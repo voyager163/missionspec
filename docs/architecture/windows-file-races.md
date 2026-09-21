@@ -144,6 +144,25 @@ destination during the retained-preimage gap, interrupt native publication, and
 reuse the stage pathname after publication. Assertions require unrelated bytes
 and later locks to survive—not merely an unknown outcome.
 
+The controlled test transport asserts each exact expected checkpoint before
+acknowledging it. Native failure objects also contain a diagnostic `phase`, but
+are terminal responses, never continuation requests. Stdin errors are observed
+and any subsequent native terminal diagnostic is retained; EPIPE, missing
+checkpoints, unexpected success/failure, malformed output and signal termination
+cannot count as a passing operation. Expected failures require an exact native
+reason. Portable process-based protocol regressions run with:
+
+```sh
+node --test tests/windows-helper-protocol.test.mjs
+```
+
+At `e28deb8`, held allocation, held deletion and exact canonical/edited source
+security copying passed on actual Windows. Publication remains unqualified: the
+prior harness acknowledged a terminal error's `phase` and then emitted an
+unhandled EPIPE, obscuring the native failure. The corrected transport preserves
+that failure for the next hosted diagnosis without changing native policy or
+treating pipe closure as success.
+
 Then rerun the existing Windows component suite and the three separately selected
 application scenarios documented in [Windows state](windows-state.md), plus the
 unchanged CodeQL query. Local skipped Windows cases and previous passing Windows
