@@ -1,0 +1,9 @@
+* text=auto
+*.md text eol=lf
+*.mjs text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+# Preserve the reviewed upstream legal text, including its original trailing spaces.
+THIRD_PARTY_NOTICES text eol=lf -whitespace
+licenses/TELEMETRY_THIRD_PARTY_NOTICES text eol=lf -whitespace

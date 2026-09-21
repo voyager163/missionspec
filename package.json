@@ -1,0 +1,61 @@
+{
+  "name": "@msn-control/missionspec",
+  "version": "0.0.0",
+  "private": true,
+  "description": "An independent specification and change workflow engine.",
+  "type": "module",
+  "bin": {
+    "missionspec": "dist/cli/main.js"
+  },
+  "types": "./dist/api/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/api/index.d.ts",
+      "import": "./dist/api/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "assets",
+    "docs",
+    "README.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "CODE_OF_CONDUCT.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES",
+    "licenses/cli-runtime.json"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/voyager163/missionspec.git"
+  },
+  "engines": {
+    "node": ">=24.21.0 <25"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "check:repository": "node scripts/check-repository.mjs",
+    "check:architecture": "node scripts/check-architecture.mjs",
+    "check:package": "npm run build && node scripts/check-package.mjs",
+    "check:licenses": "node scripts/check-licenses.mjs --scope cli --package",
+    "check:portable": "npm run build && node --test tests/contracts.test.mjs tests/artifacts.test.mjs tests/clarification.test.mjs tests/skill-assets.test.mjs tests/skill-rendering.test.mjs tests/cli.test.mjs tests/package.test.mjs tests/check-licenses.test.mjs tests/repository-checks.test.mjs tests/architecture.test.mjs && npm run check:architecture && npm run check:repository && node scripts/check-package.mjs && npm run check:licenses",
+    "check": "npm test && npm run check:architecture && npm run check:repository && node scripts/check-package.mjs && npm run check:licenses"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "ajv": "8.20.0",
+    "mdast-util-from-markdown": "2.0.3",
+    "yaml": "2.9.1",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@babel/parser": "7.29.9",
+    "@types/node": "24.13.6",
+    "github-slugger": "2.0.0",
+    "typescript": "7.0.2"
+  }
+}

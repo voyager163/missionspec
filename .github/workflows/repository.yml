@@ -1,0 +1,66 @@
+name: Repository checks
+
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repository-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DO_NOT_TRACK: "1"
+  MISSIONSPEC_TELEMETRY: "0"
+
+jobs:
+  repository-checks:
+    name: Repository checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24.21.0"
+      - name: Restore locked dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Check repository contracts
+        run: npm run check
+      - name: Restore isolated telemetry-service dependencies
+        run: npm --prefix services/telemetry-ingest ci --ignore-scripts --no-audit --no-fund
+      - name: Check isolated service provenance and retained notices
+        run: node scripts/check-licenses.mjs --scope service
+      - name: Check the local telemetry service without Azure credentials
+        run: npm --prefix services/telemetry-ingest test
+      - name: Check telemetry infrastructure policy without cloud access
+        run: node --test infrastructure/opentofu/telemetry/tests/*.test.mjs
+  windows-read-only:
+    name: Windows read-only compatibility
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24.21.0"
+      - name: Restore locked dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Check portable contracts and read-only CLI
+        run: npm run check:portable

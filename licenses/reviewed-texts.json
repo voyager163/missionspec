@@ -1,0 +1,766 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Pinned legal-text evidence from the reviewed initial locked dependency sets; not a legal opinion. The --write inventory command must not update this file.",
+  "reviewedFiles": [
+    {
+      "licenseExpression": "(MIT AND Zlib)",
+      "retainedSha256": "20356aece8f36fda34645e97af3b163da0a88e253b78ffba298590d5b9121ebb",
+      "observedAt": [
+        "service:pako@2.2.0:lib/zlib/README"
+      ]
+    },
+    {
+      "licenseExpression": "(MIT AND Zlib)",
+      "retainedSha256": "a04665b3b2de56c66730c1f720f528175739e4104f79073614aa611da1e85539",
+      "observedAt": [
+        "service:pako@2.2.0:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "0BSD",
+      "retainedSha256": "0e8d2550baea17eb3072c4f919b36fbf9852bb49dba948549872e713863c0834",
+      "observedAt": [
+        "service:tslib@2.8.1:LICENSE.txt"
+      ]
+    },
+    {
+      "licenseExpression": "0BSD",
+      "retainedSha256": "72ba857a2d06a6d440c28e690835119f6d70fe16f58b7538e3e3c1c133d944d7",
+      "observedAt": [
+        "service:tslib@2.8.1:CopyrightNotice.txt"
+      ]
+    },
+    {
+      "licenseExpression": "Apache-2.0",
+      "retainedSha256": "50a6b24f8defc31a078aa9799a91d776f83948071574854f12473362aee74d0d",
+      "observedAt": [
+        "service:ecdsa-sig-formatter@1.0.11:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "BSD-2-Clause",
+      "retainedSha256": "2701eb669226473bb7df25dff5abcd3b7f73589091dce6dea1ca50919a138c73",
+      "observedAt": [
+        "cli:json-schema-typed@8.0.2:LICENSE.md"
+      ]
+    },
+    {
+      "licenseExpression": "BSD-3-Clause",
+      "retainedSha256": "751d0e80fb5c828f8c3de198cc760e1e05377e47c8263ab6ee2f10cdc19ba658",
+      "observedAt": [
+        "service:buffer-equal-constant-time@1.0.1:LICENSE.txt"
+      ]
+    },
+    {
+      "licenseExpression": "BSD-3-Clause",
+      "retainedSha256": "b010b0dfdfdb23d7396e03b82cd4621fc9bb8f95d6b0aea70b9c24e12074c786",
+      "observedAt": [
+        "cli:fast-uri@3.1.8:LICENSE",
+        "service:fast-uri@3.1.8:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "BSD-3-Clause",
+      "retainedSha256": "e7dc37bf662d7f786efcb46c545615e70c1daf458a38385521c63cf6607cdfe1",
+      "observedAt": [
+        "cli:qs@6.16.0:LICENSE.md"
+      ]
+    },
+    {
+      "licenseExpression": "ISC",
+      "retainedSha256": "4ec3d4c66cd87f5c8d8ad911b10f99bf27cb00cdfcff82621956e379186b016b",
+      "observedAt": [
+        "cli:isexe@2.0.0:LICENSE",
+        "cli:once@1.4.0:LICENSE",
+        "cli:which@2.0.2:LICENSE",
+        "cli:wrappy@1.0.2:LICENSE",
+        "service:semver@7.8.5:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "ISC",
+      "retainedSha256": "5bba27375d93e9119f76c1015f7672cf9ad5f70952296e0842fb2243d6376869",
+      "observedAt": [
+        "cli:yaml@2.9.1:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "ISC",
+      "retainedSha256": "5ffe28e7ade7d8f10d85d5337a73fd793dac5c462fb9a28fbf8c5046c7fbca3b",
+      "observedAt": [
+        "cli:inherits@2.0.4:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "ISC",
+      "retainedSha256": "76d6d1ea0c268da37dd3c961b4fcfb23dee8417fff9e8786d4d44c585b781b69",
+      "observedAt": [
+        "cli:setprototypeof@1.2.0:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "ISC",
+      "retainedSha256": "80d3168ad2f70f6f5bb2ab22b23414707abf6f0a392034891481ae36a1a429d4",
+      "observedAt": [
+        "cli:zod-to-json-schema@3.25.2:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "0dd4e47333485760cf8c265db5a5e24ae8d7401064c6f2e19793ee81a5bef42f",
+      "observedAt": [
+        "cli:cookie-signature@1.2.2:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "11d017c3b9f1ee3f44caf7203035f0461d5b57e0db8ce1bc03a9af34fa7d3f6b",
+      "observedAt": [
+        "cli:parseurl@1.3.3:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "1662fae9b5314d11cf51284e2dcd1f006a354f7343f08712a730fcff9a359801",
+      "observedAt": [
+        "cli:ms@2.1.3:license.md",
+        "service:ms@2.1.3:license.md"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "17474e386e0b9e1a700cc3d06b2b0882a2c376d9c6b49c7f8274409b8f8d2352",
+      "observedAt": [
+        "service:@azure/msal-node@6.0.1:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "1a526fbe8d8577f5a4b1c2821842b55b7c0e18862531c62ae4ce69c9b19b74b6",
+      "observedAt": [
+        "cli:unpipe@1.0.0:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "1aa9a12863eefb583779b2ca0e5d73c610b6e6d07529ae0472721769a6ea0a32",
+      "observedAt": [
+        "cli:cors@2.8.6:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "206c1adcf206dc0031b11232f5b054ec5f1662407ab1ca415247921cab2068ab",
+      "observedAt": [
+        "cli:has-symbols@1.1.0:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "2144eb6894cb440fde6b2b3aaae3b617c8f1dc9bb19813079dcf62ec6c517042",
+      "observedAt": [
+        "service:jsonwebtoken@9.0.3:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "23d466b1b134b415b66fa50c6526b4cf3e7b9258554da88d3abb371721e7ce68",
+      "observedAt": [
+        "cli:body-parser@2.3.0:LICENSE",
+        "cli:type-is@2.1.0:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "255aa557a1f55224ce522f311629c0bf20854740a67955cefd798fbd1d3d1ded",
+      "observedAt": [
+        "cli:escape-html@1.0.3:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "257aed98914108e91a337912727b6a802eef218248507f74b76faffaff517a38",
+      "observedAt": [
+        "cli:content-type@1.0.5:LICENSE",
+        "cli:content-type@2.1.0:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "25a328069fe771f8ed5b6f983ed4b0e6c84b3312ac0f69b28c3d52dc277962c9",
+      "observedAt": [
+        "cli:send@1.2.1:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "25a399d4a42f419445101092a1fc3f9b4bfe06d614f84128222d79e3a2105fe7",
+      "observedAt": [
+        "service:lodash.isboolean@3.0.3:LICENSE",
+        "service:lodash.isnumber@3.0.3:LICENSE",
+        "service:lodash.isstring@4.0.1:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "2b770a704c15de238c3f622b01b0044ddd60b49ee30608ea6991ebf19db7a7a1",
+      "observedAt": [
+        "cli:dunder-proto@1.0.1:LICENSE",
+        "cli:math-intrinsics@1.1.0:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "306fa513e39b23a6e8747520de761809d206b99800ef41907b530226574c59ae",
+      "observedAt": [
+        "cli:dequal@2.0.3:license"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "3320319f8a5f42bc4254e65471eca7a5ea4dc8c883c4c24b4868e36b14890bcf",
+      "observedAt": [
+        "service:jwa@2.0.1:LICENSE",
+        "service:jws@4.0.1:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "37876d7de8bdf5e5b9b58a697ebc34044624e493e6f49eff5c938e5226dcac6b",
+      "observedAt": [
+        "cli:raw-body@3.0.2:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "39c5ec504cf6bd5cd782a7c695828e09189df79f5d94840e4f08feb97b9fd416",
+      "observedAt": [
+        "cli:get-intrinsic@1.3.0:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "3a61c6c96caf5c1d9b623fb9b04c822b783dfcb78aa7e49c76a3f643e6ed7f95",
+      "observedAt": [
+        "cli:debug@4.4.3:LICENSE",
+        "service:debug@4.4.3:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "3f1189b28e3866e0d979968d466b78f813f76827cfdca1fbb124cc0a5c8841f8",
+      "observedAt": [
+        "cli:zod@4.6.5:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "44191656d296391e0ec97e32f5385f0d02b6f2992694082d22ea04ba0f66f9e4",
+      "observedAt": [
+        "cli:is-promise@4.0.0:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "47dcccf62bf40469d23849b0b1dc8df9fc91bce219b880c638d4dc4596e6b5cf",
+      "observedAt": [
+        "cli:finalhandler@2.1.1:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "48da2f39e100d4085767e94966b43f4fa95ff6a0698fba57ed460914e35f94a0",
+      "observedAt": [
+        "cli:path-key@3.1.1:license",
+        "cli:shebang-regex@3.0.0:license"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "4bc935e71be198c67ddf3c2b5fddb195f6edc182bfc155a96a6db61b44b494b9",
+      "observedAt": [
+        "cli:safer-buffer@2.1.2:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "4eeb3271453a891df609e5a9f4ee79a68307f730c13417a3bfeffa604ac8cf25",
+      "observedAt": [
+        "cli:path-to-regexp@8.4.2:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "512cfa4d5e7a7569c7ae4dd95241cb6ae2aaf648ef9ebd080c01bd24868d26e9",
+      "observedAt": [
+        "cli:statuses@2.0.2:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "553d4d20029a24e315b428a1a54a9e109eaa340f2e958a4f50a92362c2c4070b",
+      "observedAt": [
+        "cli:negotiator@1.1.0:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "5c932d88256b4ab958f64a856fa48e8bd1f55bc1d96b8149c65689e0c61789d3",
+      "observedAt": [
+        "service:bundle-name@4.1.0:license",
+        "service:default-browser-id@5.0.1:license",
+        "service:default-browser@5.5.1:license",
+        "service:define-lazy-prop@3.0.0:license",
+        "service:is-docker@3.0.0:license",
+        "service:is-inside-container@1.0.0:license",
+        "service:is-wsl@3.1.1:license",
+        "service:open@10.2.0:license",
+        "service:run-applescript@7.1.0:license",
+        "service:wsl-utils@0.1.0:license"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "5e13dbbc1d120fc2a03cecde7c91424ae2d7de11b63d58ded2f4431e261ee50d",
+      "observedAt": [
+        "cli:@modelcontextprotocol/sdk@1.30.0:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "5e325595b4ea8cfec3802f545b1def5d7b73e4a5b8e9ba63e32a320f67732292",
+      "observedAt": [
+        "cli:call-bind-apply-helpers@1.0.2:LICENSE",
+        "cli:call-bound@1.0.4:LICENSE",
+        "cli:es-define-property@1.0.1:LICENSE",
+        "cli:es-errors@1.3.0:LICENSE",
+        "cli:es-object-atoms@1.1.2:LICENSE",
+        "cli:side-channel-list@1.0.1:LICENSE",
+        "cli:side-channel-map@1.0.1:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "62568a2d1337b77171ecca9db10579163446de1ba6151678e81f06cdc199971b",
+      "observedAt": [
+        "cli:ipaddr.js@1.9.1:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "63b9a188d7d43e64b0558b7115255045b9fe20a5fc3ff483421cb899e7f52bcb",
+      "observedAt": [
+        "cli:serve-static@2.2.1:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "63cb98b3f6abfb3c3592c16f88253c1bdc834087bf52671e8ce5609e4eb693cf",
+      "observedAt": [
+        "cli:character-entities@2.0.2:license",
+        "cli:mdast-util-to-string@4.0.0:license"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "6895190430d809c4c57a7582ecc2f99acbc2ea39a5dfad20262a41d5b3e91733",
+      "observedAt": [
+        "cli:@hono/node-server@2.1.1:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "69dee148a2cc470554dfa7142e830662062394d0fe67cddd379aba90dc60d6b3",
+      "observedAt": [
+        "cli:shebang-command@2.0.0:license"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "6ee0feb1f6ef996ff5a68600f8cf98909cf412d39ef3cdceaefd87d636fa1b7f",
+      "observedAt": [
+        "cli:require-from-string@2.0.2:license",
+        "service:require-from-string@2.0.2:license"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "6f296a5eccc1dc96714bb94ebaa9cac25b0a1467d74cc5263ac4d0646ab01f62",
+      "observedAt": [
+        "cli:devlop@1.1.0:license"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "6fb9754611c20f6649f68805e8c990e83261f29316e29de9e6cedae607b8634c",
+      "observedAt": [
+        "cli:object-assign@4.1.1:license"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "70b126abc64d7ea06e1243349073935caa16fa47a41a571773ccf0b350b1d574",
+      "observedAt": [
+        "cli:merge-descriptors@2.0.0:license"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "71368fd0f5b4129191e9afcd1e1ef2dc89a9090d3e4d80bbab92dafd032b3bef",
+      "observedAt": [
+        "service:http-proxy-agent@7.0.2:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "71f83c4c0621102a56d9853812777b85751bce7e9726f686f5b056c1f8a4b0e6",
+      "observedAt": [
+        "cli:accepts@2.0.0:LICENSE",
+        "cli:mime-types@3.0.2:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "7585ea7bba616ccbbe43cb54ecb67956688c3c5641bb84f3099a652a73193afe",
+      "observedAt": [
+        "cli:encodeurl@2.0.0:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "773e131a7684726005a7e4688a80b4620033bc08499bc1404dd1a1eb3bca725e",
+      "observedAt": [
+        "cli:function-bind@1.1.2:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "7bf9b2de73a6b356761c948d0e9eeb4be6c1270bd04c79cd489c1e400ffdfc1a",
+      "observedAt": [
+        "cli:fast-deep-equal@3.1.3:LICENSE",
+        "cli:json-schema-traverse@1.0.0:LICENSE",
+        "service:fast-deep-equal@3.1.3:LICENSE",
+        "service:json-schema-traverse@1.0.0:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744",
+      "observedAt": [
+        "service:@azure-rest/core-client@2.9.0:LICENSE",
+        "service:@azure/abort-controller@2.2.0:LICENSE",
+        "service:@azure/core-auth@1.11.0:LICENSE",
+        "service:@azure/core-client@1.11.1:LICENSE",
+        "service:@azure/core-rest-pipeline@1.25.0:LICENSE",
+        "service:@azure/core-tracing@1.4.0:LICENSE",
+        "service:@azure/core-util@1.14.0:LICENSE",
+        "service:@azure/identity@4.13.3:LICENSE",
+        "service:@azure/logger@1.3.0:LICENSE",
+        "service:@azure/monitor-ingestion@1.2.0:LICENSE",
+        "service:@typespec/ts-http-runtime@0.3.9:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "8078b0829d6c3e9ecde2f003e1966e4cad3efc6e7a640efbab0313cc166b1af1",
+      "observedAt": [
+        "cli:jose@6.2.12:LICENSE.md"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "8089bcc08845ec143e5761f4a101a65b8c792a0dedbfeeb90a15560c0b77f768",
+      "observedAt": [
+        "cli:on-finished@2.4.1:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "835eb611a23301b27115ca1be9f754c876e643ceb7fe63049c6b50609a1cafeb",
+      "observedAt": [
+        "cli:eventsource-parser@3.1.1:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "8d8c55319c7729d57be811c747452636688d54f19701ee0752b6b15ad3771d9a",
+      "observedAt": [
+        "service:agent-base@7.1.4:LICENSE",
+        "service:https-proxy-agent@7.0.6:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "95a5762890e5c1c9808921cef095661fc482c5e1f0bba31446ac85595df6237c",
+      "observedAt": [
+        "cli:express@5.2.1:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "965ef284f7f4c176842ec2e87fa13e79feed777d56d7a21a5a3b38f1bb6dc288",
+      "observedAt": [
+        "cli:ee-first@1.1.1:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "9df3bb69929a3b650ed73b3bfa1756725aaff0ac296461605753547004eafeaf",
+      "observedAt": [
+        "cli:ajv-formats@3.0.1:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "a05350a88e318e4f5f2c2a1ff1e2e88daa4dd38e6e78b71cccae422bdc762cc3",
+      "observedAt": [
+        "cli:ajv@8.20.0:LICENSE",
+        "service:ajv@8.20.0:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "a0ec0dab16b3666f24950f86d257930ac2ad475557b4bfe245620e0817d8a45d",
+      "observedAt": [
+        "cli:fresh@2.0.0:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "a6ab98e5c77b9070c443eaff2ff81034a6f8cc05a7524d5098eb0f24defa0115",
+      "observedAt": [
+        "cli:hono@4.13.8:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "a752c164b45840ef677e68c738aefabfd665ee9f112ada4538761301a97118b0",
+      "observedAt": [
+        "cli:express-rate-limit@8.7.0:license"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "a7996721249a136fbcfc1c201bcb5f414f38a701d4a24f28abe65e16cfcce813",
+      "observedAt": [
+        "cli:etag@1.8.1:LICENSE",
+        "cli:proxy-addr@2.0.8:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "a832d679750e49ab433626ab196350b89964b60eb0d3edd3341887c7d5f4c128",
+      "observedAt": [
+        "cli:toidentifier@1.0.1:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "aaa78451b6fecd1b9c4594c796c133c0e90cad100372ff8bc6de615e9ef9adf1",
+      "observedAt": [
+        "cli:cross-spawn@7.0.6:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "ac779f7314c74f232ef847ea86e714abe25cf6eeb5cc97b69451b74e2af6492d",
+      "observedAt": [
+        "cli:iconv-lite@0.7.3:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "bd134b41da59e452fb5a1d366b660886f741c87c2bf9428e93764c419fbc40f5",
+      "observedAt": [
+        "cli:depd@2.0.0:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "bd40cc437e28a3ad7bef2ad34e6b72e757b182e67bda1acadbab4ef0476f8232",
+      "observedAt": [
+        "cli:object-inspect@1.13.4:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "bd47ce7b88c7759630d1e2b9fcfa170a0f1fde522be09e13fb1581a79d090400",
+      "observedAt": [
+        "cli:content-disposition@1.1.0:LICENSE",
+        "cli:forwarded@0.2.0:LICENSE",
+        "cli:media-typer@1.1.1:LICENSE",
+        "cli:vary@1.1.2:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "be46ce1e3b0479af9ce82d22b465a6d7d2ff084fca0aaf3d54172da2b5eb5781",
+      "observedAt": [
+        "cli:get-proto@1.0.1:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "bf9b0d665be2a689851eea667ca9f42066ea1d903b38349c51e6a44b2577680a",
+      "observedAt": [
+        "cli:hasown@2.0.4:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "c02110eedc16c7114f1a9bdc026c65626ce1d9c7e27fd51a8e0feee8a48a6858",
+      "observedAt": [
+        "cli:cookie@0.7.2:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383",
+      "observedAt": [
+        "cli:@types/debug@4.1.13:LICENSE",
+        "cli:@types/mdast@4.0.4:LICENSE",
+        "cli:@types/ms@2.1.0:LICENSE",
+        "cli:@types/unist@3.0.3:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "c544adf8f0d43453d9fdf6c11da19605d12d89806a7870653169b8cc97f5bb53",
+      "observedAt": [
+        "service:@azure/msal-browser@5.22.0:LICENSE",
+        "service:@azure/msal-common@16.14.1:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "c7cc929b57080f4b9d0c6cf57669f0463fc5b39906344dfc8d3bc43426b30eac",
+      "observedAt": [
+        "service:safe-buffer@5.2.1:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "ca4662cb5d1b738fbe5350c0d5485ba11773b4b7208974082ae6e129a52d631d",
+      "observedAt": [
+        "cli:unist-util-stringify-position@4.0.0:license"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "cc1dfd4dafa27271e8212cd3b274eeb3f262e40a6fdab36ddc3f9696f706f58b",
+      "observedAt": [
+        "cli:mime-db@1.54.0:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "cfc3f455254c0af0655cc3ff46a41ed644b67599f6043346169d285bf2b3cf3b",
+      "observedAt": [
+        "cli:side-channel-weakmap@1.0.2:LICENSE",
+        "cli:side-channel@1.1.1:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "d0bca4e517157b7a6120c085f5fe43a35b90c095e3bbeb9e67f220c608506a16",
+      "observedAt": [
+        "cli:router@2.2.0:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "d90bf0a089da4cf43d644ed240a0b3825dcdb705e64e38371d56995a4cc9e4c5",
+      "observedAt": [
+        "cli:gopd@1.2.0:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "dcb94ff9b1e037a847bc20589dc81a1066d041fd4c16deb18b0fa968c66cf395",
+      "observedAt": [
+        "cli:http-errors@2.0.1:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "dd1081884a92952802f4803110a6bb543acea9a814c786d58605b4c1219b5ebb",
+      "observedAt": [
+        "cli:decode-named-character-reference@1.3.0:license",
+        "cli:mdast-util-from-markdown@2.0.3:license",
+        "cli:micromark-core-commonmark@2.0.3:license",
+        "cli:micromark-factory-destination@2.0.1:license",
+        "cli:micromark-factory-label@2.0.1:license",
+        "cli:micromark-factory-space@2.0.1:license",
+        "cli:micromark-factory-title@2.0.1:license",
+        "cli:micromark-factory-whitespace@2.0.1:license",
+        "cli:micromark-util-character@2.1.1:license",
+        "cli:micromark-util-chunked@2.0.1:license",
+        "cli:micromark-util-classify-character@2.0.1:license",
+        "cli:micromark-util-combine-extensions@2.0.1:license",
+        "cli:micromark-util-decode-numeric-character-reference@2.0.2:license",
+        "cli:micromark-util-decode-string@2.0.1:license",
+        "cli:micromark-util-encode@2.0.1:license",
+        "cli:micromark-util-html-tag-name@2.0.1:license",
+        "cli:micromark-util-normalize-identifier@2.0.1:license",
+        "cli:micromark-util-resolve-all@2.0.1:license",
+        "cli:micromark-util-sanitize-uri@2.0.1:license",
+        "cli:micromark-util-subtokenize@2.1.0:license",
+        "cli:micromark-util-symbol@2.0.1:license",
+        "cli:micromark-util-types@2.0.2:license",
+        "cli:micromark@4.0.2:license"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "e3b44af066615de2ea48d18d852d0762f18c0b2efcea714fa48a6f729d405b85",
+      "observedAt": [
+        "cli:bytes@3.1.2:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "e4154853b384fa7ec1e699f360873868890b9e030b789fcd05a0246f154f99de",
+      "observedAt": [
+        "service:@azure/core-process@1.0.0:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "f655e6291356ec0de7a8f0e69f294961a2cea86678ec94588be1e6a492e278ab",
+      "observedAt": [
+        "cli:range-parser@1.3.0:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "f683a72ffe6a9675b5507af22fe0f448d8c8de3da1e14f139d370a7e6a54a23e",
+      "observedAt": [
+        "cli:eventsource@3.0.7:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "f8d791359a50cbcac82c29cb7b0b1b889b28be76fdd35b8ee33f0f7c8704702a",
+      "observedAt": [
+        "cli:ip-address@10.7.2:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "feb87a2e0c305de3464cc44077da5393c52d8ca6362d37427157d04ec6f4510d",
+      "observedAt": [
+        "cli:pkce-challenge@5.0.1:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "ffd8b33b354585f4ce119f19c53728281e48a97b074491eb6bf6d5c5ff305272",
+      "observedAt": [
+        "service:lodash.includes@4.3.0:LICENSE",
+        "service:lodash.isinteger@4.0.4:LICENSE",
+        "service:lodash.isplainobject@4.0.6:LICENSE",
+        "service:lodash.once@4.1.1:LICENSE"
+      ]
+    }
+  ]
+}
