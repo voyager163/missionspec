@@ -16,9 +16,9 @@ native proposal bridges, MCP transport, focused clarification, consistency/gap
 reports, reviewed lessons, explicit import and recoverable evidence pruning.
 **Native autonomous execution remains unqualified and disabled in the CLI.**
 Synthetic protocol tests and installed skills are not live-host qualification.
-Windows private-state APIs have dedicated native qualification; interactive
-Windows terminal confirmation remains disabled. The current held-handle file
-protocol must pass its own race and recovery gates before it is qualified.
+Windows private-state APIs have passed native held-handle race, setup, source,
+recovery and pruning qualification in the documented private NTFS scope.
+Interactive Windows terminal confirmation remains disabled.
 See the [Windows capability boundary](docs/architecture/windows-state.md).
 Live native execution and production telemetry deployment remain separate
 release gates. Ordinary Claude Code skills and CLI/MCP integration do not

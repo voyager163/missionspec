@@ -86,11 +86,20 @@ application reruns caught an initial-creation regression.
 
 The four additional Windows contexts were bound only after verifying their
 successful reports and exact App identities: application contexts at `bbd2f97`
-and the native race context at `8c2e3f0`. Their current failures still block
+and the native race context at `8c2e3f0`. Failures block
 merge; historical success establishes a check identity, not qualification of
 later code. Readback confirmed all twelve effective contexts on both protected
-branches and a blocked draft PR during the regression. Windows terminal/ConPTY
-confirmation and native execution remain separate disabled capabilities.
+branches and a blocked draft PR during the regression.
+
+The corrected implementation at `e4e5b13ebf224d81490e02eab1dbe7427dd7ca87`
+passed all twelve required checks. In
+[run 35636916251](https://github.com/voyager163/missionspec/actions/runs/35636916251),
+eight native race/setup cases passed with zero skips, followed by the full
+source, recovery and pruning jobs. Both CodeQL categories and the native CodeQL
+check passed with zero open alerts on the PR merge ref. GitHub reported the
+revision clean under the active protections, without a merge bypass. Windows
+terminal/ConPTY confirmation and native execution remain separate disabled
+capabilities; this is development qualification, not a product release.
 
 ## 1. Validate locally
 

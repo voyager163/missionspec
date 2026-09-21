@@ -1,9 +1,17 @@
 # Windows held-handle file effects
 
-This is the replacement candidate for CodeQL `js/file-system-race` alerts
+This is the implemented replacement for CodeQL `js/file-system-race` alerts
 **4–9**, not a suppression or a claim that private ACLs make all same-account
 processes harmless. The earlier Windows application tests did not exercise the
 final check/use interleavings identified by that query.
+
+At `e4e5b13ebf224d81490e02eab1dbe7427dd7ca87`,
+[run 35636916251](https://github.com/voyager163/missionspec/actions/runs/35636916251)
+passed all eight native race/setup cases with zero skips and all three full
+application jobs (source, recovery and pruning). All twelve required checks
+passed, including the unchanged native CodeQL gate, with zero open PR merge-ref
+alerts. This is evidence for the bounded private NTFS API behavior below, not
+same-account tamper immunity, console authority or native-host qualification.
 
 ## Mapping the six findings
 
@@ -201,8 +209,9 @@ ownership and distinguishes descriptor extraction, setter status and actual
 security drift. A setter failure reports its directly returned numeric Windows
 status; it does not interpret a cached `GetLastError`, dump ACLs/SIDs/paths, or
 relax fingerprint equality. Canonical and explicitly edited private descriptors
-are both tested directly before the longer publication scenarios. Fresh Windows
-evidence is still required.
+are both tested directly before the longer publication scenarios. The subsequent
+passing Windows results are recorded above; every protocol change still
+requires fresh behavioral qualification.
 
 Separate processes attempt file writes, renames, ancestor replacement and
 competing lock reclamation at held-handle checkpoints. Further cases create a

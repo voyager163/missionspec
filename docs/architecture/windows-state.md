@@ -4,33 +4,35 @@ Windows private storage and Windows effect execution are separate capabilities.
 The narrow storage and directory-barrier components at **`d684dbb` passed 23/23
 actual Windows tests with zero skips** in
 [run 35583798870, job 106282370371](https://github.com/voyager163/missionspec/actions/runs/35583798870/job/106282370371).
-The real application integration below is a **new qualification candidate**;
-that earlier success does not qualify it, a console channel, or native execution.
-POSIX success or mocked `process.platform` results are not Windows qualification.
+The integrated [held-handle protocol](windows-file-races.md) subsequently passed
+all eight native race/setup cases and the full source, recovery and pruning
+application jobs at **`e4e5b13ebf224d81490e02eab1dbe7427dd7ca87`** in
+[run 35636916251](https://github.com/voyager163/missionspec/actions/runs/35636916251).
+All twelve required checks passed, including unchanged CodeQL checks; the six
+earlier filesystem-race alerts are fixed and the PR merge ref has no open
+alerts. No alert/query was disabled or blanket-dismissed.
 
-The successful application runs at `bbd2f97` exposed six subsequent CodeQL
-filesystem race findings. The current [held-handle correction candidate](windows-file-races.md)
-changes Windows creation, publication, lock release/reclaim and pruning deletion.
-It requires fresh Windows and CodeQL evidence; prior passing runs are not evidence
-for these changed operations. No alert/query is disabled or blanket-dismissed.
+These results qualify the tested private NTFS APIs, not a console channel,
+native execution, every Windows installation or physical power-loss behavior.
+POSIX success or mocked `process.platform` results are not Windows qualification.
 
 ## Capability matrix
 
-| Surface | Windows candidate behavior |
+| Surface | Windows behavior and qualification boundary |
 | --- | --- |
 | SQLite runtime ledger | Explicit create/read/write on validated private local NTFS; existing schema-3 validation, exact workspace binding, CAS, rollback, immutable history and sidecar refusal remain unchanged |
 | Dedicated telemetry preferences | SID/ACL-checked parent and file, real SQLite patches/reopen, no permissive Windows ownership exception; existing journals/WAL/shared memory require reconciliation |
 | Dedicated diagnostic JSONL | Private parent/file, exclusive cooperative lock, bounded canonical append and digest-bound explicit truncation, file flush |
 | Private workspace reads | SID/ACL checks instead of meaningless POSIX UID/mode checks; existing root digest, inode/device checks and content checks remain |
 | Private directory metadata barrier | Qualified at the revision/run above: stable identity, writable directory handles, sharing contention, and eight interruption/recovery boundaries |
-| Workspace setup, source/artifact writes, immutable runtime records, file journals/recovery | Candidate integration in the existing `LocalWorkspace`; restricted private current-user NTFS roots, atomic private allocation and mandatory namespace barriers |
-| Raw-evidence removal and dead-prune-lock recovery | Candidate integration in the existing pruning application and filesystem adapter; no change to SQLite prepare/complete or exact-grant requirements |
-| Trusted callback/MCP receipt issuance and revocation | Candidate integration in the existing broker; callbacks remain independently trusted composition and human presence remains **not attested** |
+| Workspace setup, source/artifact writes, immutable runtime records, file journals/recovery | Qualified through the existing `LocalWorkspace` APIs; restricted private current-user NTFS roots, atomic private allocation and mandatory namespace barriers |
+| Raw-evidence removal and dead-prune-lock recovery | Qualified through the existing pruning application and filesystem adapter; no change to SQLite prepare/complete or exact-grant requirements |
+| Trusted callback/MCP receipt issuance and revocation | Persisted broker receipts/revocation exercised through trusted callbacks; callbacks remain independently trusted composition and human presence remains **not attested** |
 | Terminal confirmation | **Blocked** on Windows regardless of TTY booleans; actual console/ConPTY challenge behavior remains unqualified |
 | Real registered checks / native-host execution and cancellation | Unchanged, independently blocked; storage capability never establishes execution, completion or quiescence |
 
 This does not qualify interactive Windows CLI setup: terminal issuance is still
-unavailable, and native checks/hosts remain independently gated. The candidate
+unavailable, and native checks/hosts remain independently gated. These
 application operations require trusted library composition and exact current
 grants, not `approved` input or an environment switch. SQLite's pruning
 tables can store supplied immutable lifecycle records; that is **not** a new
@@ -177,11 +179,12 @@ or the complete journal/effect ordering protocol. Read-handle flushing still
 returned false with error 203 even after immediate capture; no capability or
 failure classification depends on interpreting that code.
 
-Before the general protocol can be enabled, qualification still needs current-user
+The subsequent protocol qualification required current-user
 directory handles without backup/restore privilege bypass, stable native identity
 checks around flushes, create/link/rename/unlink ordering, interrupted journal and
-recovery cases, and propagation of failed/unknown flush outcomes. Authority and
-process/console checks have their own remaining gates. Failed probes never fall
+recovery cases, and propagation of failed/unknown flush outcomes. The passing
+component and application runs above cover those bounded cases. Independent
+authority composition and process/console checks retain their own gates. Failed probes never fall
 back to reporting durability success.
 
 ### Qualified identity-guarded native barrier
@@ -218,7 +221,7 @@ and options fail before the flush. Failure throws
 that already mutated data must preserve its journal and report an unconfirmed
 effect rather than infer rollback or proceed to completion.
 
-`tests/windows-directory-durability.test.mjs` qualifies this candidate separately:
+`tests/windows-directory-durability.test.mjs` exercises the barrier separately:
 real handle-sharing contention, wrong/replaced identities, junction/case aliases,
 ordinary-file rejection, public/foreign ACL rejection without repair, and exact
 handle closure behavior. Its test-only namespace driver uses actual private files,
@@ -253,7 +256,7 @@ and evidence-file barriers—not the test-only protocol driver or a replacement
 workflow engine. The separate application suite below must now qualify those
 real paths. No terminal or native-host gate is opened by a directory flush.
 
-### Real application integration candidate
+### Qualified real application integration
 
 The same `LocalWorkspace` validates plans, resolves actual authority, checks all
 guards, writes immutable journals and performs explicit recovery. Windows changes
@@ -356,8 +359,8 @@ bounded permission fingerprints, not raw ACLs, SIDs or paths. Actual differences
 still stop publication and preserve the empty/retained stage. The initial
 application run at `c54ad89` stopped at this comparison after 551 seconds and
 then exhausted its aggregate timeout; it did not qualify source or pruning
-integration. A passing quick rerun and the three actual-application jobs are
-still required; the representation fix is not itself hosted qualification.
+integration. The later passing quick regressions and three application jobs,
+not the representation fix alone, provide the recorded qualification.
 
 At `b05ede8`, the component suite and actual pruning scenario passed, and source
 ACL preservation, callback receipts/revocation and initial journal recovery also
@@ -367,7 +370,7 @@ It now runs for private ordinary files independently of directory inheritance.
 The quick component suite covers both source ADS and the exact retained-stage
 guard, proving that rejection preserves default and named-stream bytes and never
 creates a copied stage from an ADS-bearing source. The affected application
-negatives still require a hosted rerun; no metadata predicate was relaxed.
+negatives passed in the later hosted runs above; no metadata predicate was relaxed.
 
 The application suite exercises real `LocalWorkflow`, `openLocalAuthority` and
 `LocalEvidencePruning` APIs: declined/malformed and approved setup, persistent
@@ -378,7 +381,8 @@ a real closed-handle sync failure, retained-stage ADS/ACL and identity-replaceme
 preservation, SQLite pruning preparation and partial-delete
 exits, changed raw preservation, current reapproval and no replay. Fault
 boundaries wrap real operations in test workers; no production fault/approval
-boolean is introduced. These tests are not yet hosted qualification evidence.
+boolean is introduced. All three scenarios passed in the recorded hosted run;
+callback fixtures remain test composition, not human-presence evidence.
 
 SQLite continues using its built-in Windows VFS, rollback/DELETE journaling and
 the existing `synchronous=FULL` contract (preferences use `EXTRA`). JSONL continues
@@ -439,9 +443,9 @@ passed that regression and advanced to an intentional `public-access` rejection
 in the shared `D:\a` checkout ancestry. **That checkout was not a qualified private
 state location.** Moving only generated fixtures to independently validated
 profile storage does not qualify the public checkout, weaken ancestor policy,
-or enable CLI/workspace mutations there. Storage qualification now targets the
-selected profile-local NTFS directories and remains pending a passing hosted
-rerun. The [fourth run, 35577218133](https://github.com/voyager163/missionspec/actions/runs/35577218133),
+or enable CLI/workspace mutations there. Subsequent storage qualification used
+the selected profile-local NTFS directories, not the shared checkout.
+The [fourth run, 35577218133](https://github.com/voyager163/missionspec/actions/runs/35577218133),
 also rejected an overly strict **test-only** precheck that treated existing
 profile containers as private leaves. Fixture selection now uses the unchanged
 production creation contract described above. Follow-up
@@ -461,8 +465,8 @@ module path; and `rmSync` was used on an empty directory. The tests now change
 `SystemRoot` only inside an already-started child and require the helper's exact
 controlled rejection, use framework ACL methods with the JSON utility explicitly
 loaded from its OS path, and remove the exact empty directory with `rmdirSync`.
-No production predicate or fixture placement changed. Full qualification still
-requires the remaining positive and negative cases to pass together.
+No production predicate or fixture placement changed. The later passing
+component runs exercised these positive and negative cases together.
 
 Coverage includes genuine SID/DACL creation, foreign owner and public-read
 rejection without repair, literal Unicode/metacharacter paths, SQLite schema-3
