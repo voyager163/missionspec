@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
-  existsSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync,
+  existsSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync,
   symlinkSync, writeFileSync,
 } from 'node:fs';
 import { open } from 'node:fs/promises';
@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import {
-  validateWindowsStatePath, windowsFailureDiagnostic, windowsPrivateEntries,
+  validateWindowsStatePath, windowsFailureDiagnostic, windowsPrivateEntries, WindowsPrivateStateError,
 } from '../dist/adapters/platform/windows-private-state.js';
 import { openRuntimeStore } from '../dist/adapters/persistence/index.js';
 import { LocalWorkspace, makeFilePlan, writeMutation } from '../dist/adapters/filesystem/local-workspace.js';
@@ -67,7 +67,35 @@ if ($v.action -eq 'public') {
 `;
 
 let knownUserFolders;
-function privateFixtureBase() {
+function fixtureEntry(target) {
+  try { return lstatSync(target, { bigint: true }); } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function safeFixtureFailure(error) {
+  if (error instanceof WindowsPrivateStateError) return error.message;
+  return ['EPERM', 'EACCES', 'ENOENT', 'EEXIST', 'ENOTDIR', 'ENOTEMPTY', 'EIO', 'EBUSY'].includes(error?.code)
+    ? `filesystem-${error.code}` : 'fixture-operation-unavailable';
+}
+
+function removeFixtureRoot(root, identity, emptyOnly = false) {
+  const current = fixtureEntry(root);
+  if (current === null) return;
+  if (!current.isDirectory() || current.isSymbolicLink() || current.dev !== identity.dev || current.ino !== identity.ino) {
+    throw new Error('Fixture root identity changed; cleanup refused');
+  }
+  privateEntry(root, true);
+  const verified = fixtureEntry(root);
+  if (verified === null || verified.dev !== identity.dev || verified.ino !== identity.ino) {
+    throw new Error('Fixture root changed during cleanup validation');
+  }
+  if (emptyOnly) rmdirSync(root);
+  else rmSync(root, { recursive: true });
+}
+
+function createPrivateFixtureRoot() {
   knownUserFolders ??= powershell(String.raw`
 $ErrorActionPreference = 'Stop'
 [Console]::Out.Write((@{
@@ -81,28 +109,59 @@ $ErrorActionPreference = 'Stop'
   const relative = path.relative(profile, localAppData);
   assert.ok(relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) &&
     !path.isAbsolute(relative), 'Local application data must lie inside the current OS-reported user profile');
-  for (const candidate of [localAppData, profile]) {
-    try {
-      // Existing locations are checked, never re-ACL'd; every fixture operation
-      // independently rechecks this complete ancestry through the real helper.
-      privateEntry(candidate, true);
-      return candidate;
-    } catch (error) {
-      if (error?.code !== 'EPERM') throw error;
+  const failures = [];
+  for (const [kind, candidate] of [['local-app-data', localAppData], ['profile', profile]]) {
+    const root = path.join(candidate, `.windows-state-${randomUUID()}`);
+    let before;
+    try { before = fixtureEntry(root); } catch (error) {
+      failures.push(`${kind}: no creation attempted because the exclusive path could not be inspected: ${safeFixtureFailure(error)}`);
+      continue;
     }
+    if (before !== null) throw new Error('Exclusive fixture UUID path already exists; no cleanup attempted');
+    try {
+      // The existing container is an ancestor, not a private leaf. The helper
+      // checks its ancestry before atomically securing this new child.
+      privateEntry(root, true, true);
+    } catch (error) {
+      const reason = safeFixtureFailure(error);
+      let partial;
+      try { partial = fixtureEntry(root); } catch (inspectionError) {
+        throw new Error(`${kind}: ${reason}; creation state cannot be inspected: ${safeFixtureFailure(inspectionError)}`);
+      }
+      if (partial !== null) {
+        try { removeFixtureRoot(root, partial, true); } catch (cleanupError) {
+          throw new Error(`${kind}: ${reason}; partial creation retained because safe empty-root cleanup failed: ${safeFixtureFailure(cleanupError)}`);
+        }
+        throw new Error(`${kind}: ${reason}; partial creation occurred and its verified empty UUID root was removed; no fallback attempted`);
+      }
+      failures.push(`${kind}: ${reason}`);
+      continue;
+    }
+    let identity;
+    try { identity = fixtureEntry(root); } catch (error) {
+      throw new Error(`${kind}: successful creation could not be identity-checked; qualification stopped: ${safeFixtureFailure(error)}`);
+    }
+    if (identity === null) throw new Error(`${kind}: successfully created fixture disappeared; qualification stopped`);
+    if (!identity.isDirectory() || identity.isSymbolicLink()) {
+      throw new Error(`${kind}: successfully created fixture changed type; qualification stopped without cleanup`);
+    }
+    return { root, identity, kind };
   }
-  throw new Error('No current-user-owned private local NTFS profile location is available for qualification fixtures');
+  throw new Error(`No private NTFS fixture root could be created under the OS-reported profile containers. ${failures.join(' | ')}`);
 }
 
 async function fixture(t) {
-  const root = path.join(privateFixtureBase(), `.windows-state-${randomUUID()}`);
+  const { root, identity, kind } = createPrivateFixtureRoot();
   const stores = [];
-  assert.equal(existsSync(root), false);
   t.after(() => {
     try { for (const store of stores) ok(store.close()); }
-    finally { rmSync(root, { recursive: true, force: true }); }
+    finally {
+      try { removeFixtureRoot(root, identity); } catch (error) {
+        throw new Error(`Exact UUID fixture cleanup failed: ${safeFixtureFailure(error)}`);
+      }
+    }
   });
-  privateEntry(root, true, true);
+  t.diagnostic(`Private fixture container: ${kind}; new protected current-user-owned UUID root`);
   const runtime = path.join(root, '.missionspec');
   privateEntry(runtime, true, true);
   const files = await LocalWorkspace.open(root);

@@ -193,15 +193,26 @@ Do not combine this with the POSIX-specific legacy suites or infer that skipped
 Windows tests on macOS qualify anything. For sensitive fixtures, the test asks
 the OS for the current user's `LocalApplicationData` and `UserProfile` known
 folders—not unchecked environment paths, `RUNNER_TEMP` or `os.tmpdir()`.
-Local application data must be inside that profile. It selects local application
-data, or the profile itself, only after the unchanged production helper confirms
-current-user ownership, restrictive ACLs, a local NTFS volume and safe ancestors.
-If neither location qualifies, the test fails; it never changes an existing
-profile or checkout ACL to obtain access.
+Local application data must be inside that profile. The test attempts exclusive
+creation of a fresh UUID directory beneath local application data, then beneath
+the profile only if the first attempt created nothing. The unchanged production
+`create: true` operation validates the existing container and every ancestor
+using **ancestor policy**, then atomically supplies the new leaf's current-user
+owner and protected DACL. A readable or SYSTEM-owned existing container can be
+safe ancestry; it is not required to satisfy private-leaf ownership/inheritance
+rules. No profile/checkout ACL is changed or ancestor predicate relaxed.
 
-Every private fixture is an exclusively created UUID directory under that
-validated location, and cleanup removes only that exact new directory after its
-SQLite handles close. A controlled negative case grants delete-child access to
+If both candidates fail without creating anything, the failure identifies the
+`local-app-data` and `profile` candidates using only sanitized helper reasons and
+phases, never their paths, ACLs or SIDs. Any partial or uninspectable creation
+stops qualification rather than falling back. Only a verified current-user-owned,
+identity-stable, empty partial UUID directory can be removed; otherwise it is
+retained and the failure is explicit.
+
+Every successful fixture is an exclusively created UUID directory, and cleanup
+rechecks that exact root's device/inode identity and private ACL after its SQLite
+handles close. It never removes the selected profile container. A controlled
+negative case grants delete-child access to
 Everyone **only on a newly created test-owned parent**, proves private creation
 and ledger reopening fail without ACL repair or database changes, then restores
 that test parent's original descriptor for cleanup. No OS/profile/checkout ACL
@@ -222,7 +233,10 @@ state location.** Moving only generated fixtures to independently validated
 profile storage does not qualify the public checkout, weaken ancestor policy,
 or enable CLI/workspace mutations there. Storage qualification now targets the
 selected profile-local NTFS directories and remains pending a passing hosted
-rerun. Follow-up
+rerun. The [fourth run, 35577218133](https://github.com/voyager163/missionspec/actions/runs/35577218133),
+also rejected an overly strict **test-only** precheck that treated existing
+profile containers as private leaves. Fixture selection now uses the unchanged
+production creation contract described above. Follow-up
 diagnostics report only allowlisted operation phases, helper/system/ancestor/private
 boundary categories, exception type categories and bounded script line numbers.
 They never copy native exception messages, filesystem paths, ACLs, SIDs, raw
