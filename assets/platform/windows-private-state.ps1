@@ -141,18 +141,18 @@ try {
               if ($ace.SecurityIdentifier.Value -eq $sid -and ($flags -band 3) -eq 3) { $inherit = $inherit -bor $ace.AccessMask }
             }
           }
-          if ($ordinary) {
-            $script:phase = 'file-metadata'
-            if ($directory -or ($attributes -band (-bnot 0xA0)) -ne 0) { throw 'file-metadata' }
-            $streams = [Runtime.InteropServices.Marshal]::AllocHGlobal(1024)
-            try {
-              if (!$native::GetFileInformationByHandleEx($handle, 7, $streams, 1024) -or
-                  [Runtime.InteropServices.Marshal]::ReadInt32($streams, 0) -ne 0 -or
-                  [Runtime.InteropServices.Marshal]::ReadInt32($streams, 4) -ne 14 -or
-                  [Runtime.InteropServices.Marshal]::PtrToStringUni([IntPtr]::Add($streams, 24), 7) -cne '::$DATA') { throw 'file-metadata' }
-            } finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($streams) }
-          }
           if ($writable -and ($inherit -band 0x1F01FF) -ne 0x1F01FF) { throw 'inheritance' }
+        }
+        if ($ordinary) {
+          $script:phase = 'file-metadata'
+          if ($directory -or ($attributes -band (-bnot 0xA0)) -ne 0) { throw 'file-metadata' }
+          $streams = [Runtime.InteropServices.Marshal]::AllocHGlobal(1024)
+          try {
+            if (!$native::GetFileInformationByHandleEx($handle, 7, $streams, 1024) -or
+                [Runtime.InteropServices.Marshal]::ReadInt32($streams, 0) -ne 0 -or
+                [Runtime.InteropServices.Marshal]::ReadInt32($streams, 4) -ne 14 -or
+                [Runtime.InteropServices.Marshal]::PtrToStringUni([IntPtr]::Add($streams, 24), 7) -cne '::$DATA') { throw 'file-metadata' }
+          } finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($streams) }
         }
       }
       if ($flushRequested) {

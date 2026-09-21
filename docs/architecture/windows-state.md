@@ -339,7 +339,7 @@ Each command above is a separate job, not sequential steps within one 15-minute
 budget. Run this quick, direct security-copy regression first:
 
 ```sh
-node --test --test-concurrency=1 --test-name-pattern="^(security-copy diagnostics|Windows security comparison|Windows direct stage copy)" tests/windows-private-state.test.mjs
+node --test --test-concurrency=1 --test-name-pattern="^(security-copy diagnostics|Windows security comparison|Windows direct stage copy|Windows ordinary files)" tests/windows-private-state.test.mjs
 ```
 
 It covers canonical and explicitly edited protected DACLs, rejects real access
@@ -352,6 +352,16 @@ application run at `c54ad89` stopped at this comparison after 551 seconds and
 then exhausted its aggregate timeout; it did not qualify source or pruning
 integration. A passing quick rerun and the three actual-application jobs are
 still required; the representation fix is not itself hosted qualification.
+
+At `b05ede8`, the component suite and actual pruning scenario passed, and source
+ACL preservation, callback receipts/revocation and initial journal recovery also
+completed. Source/recovery then exposed a control-flow defect: ordinary-file
+stream/attribute validation was nested inside the directory-inheritance branch.
+It now runs for private ordinary files independently of directory inheritance.
+The quick component suite covers both source ADS and the exact retained-stage
+guard, proving that rejection preserves default and named-stream bytes and never
+creates a copied stage from an ADS-bearing source. The affected application
+negatives still require a hosted rerun; no metadata predicate was relaxed.
 
 The application suite exercises real `LocalWorkflow`, `openLocalAuthority` and
 `LocalEvidencePruning` APIs: declined/malformed and approved setup, persistent

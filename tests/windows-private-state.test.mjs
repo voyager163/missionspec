@@ -312,6 +312,42 @@ test('Windows direct stage copy preserves canonical and edited protected source 
   assert.equal(readFileSync(unsafe, 'utf8'), 'unadopted source bytes');
 });
 
+test('Windows ordinary files and retained-stage guards reject named streams without deleting bytes', windows, (t) => {
+  const f = createPrivateFixtureRoot();
+  t.after(() => removeFixtureRoot(f.root, f.identity));
+  const source = path.join(f.root, 'source.txt');
+  const stage = path.join(f.root, `source.txt.msn-${randomUUID()}`);
+  privateEntry(source, false, true);
+  writeFileSync(source, 'original default stream');
+  windowsPrivateEntries([{ path: source, directory: false, writable: true, ordinaryFile: true }]);
+  windowsPrivateEntries([{
+    path: stage, directory: false, writable: true, create: true, ordinaryFile: true, copySecurityFrom: source,
+  }]);
+  writeFileSync(stage, 'reviewed staged default stream');
+  windowsPrivateEntries([{ path: stage, directory: false, writable: true, ordinaryFile: true, sameSecurityAs: source }]);
+
+  writeFileSync(`${stage}:user`, 'unreviewed retained-stage stream');
+  assert.throws(() => windowsPrivateEntries([{
+    path: stage, directory: false, writable: true, ordinaryFile: true, sameSecurityAs: source,
+  }]), /file-metadata/u);
+  assert.equal(readFileSync(stage, 'utf8'), 'reviewed staged default stream');
+  assert.equal(readFileSync(`${stage}:user`, 'utf8'), 'unreviewed retained-stage stream');
+  assert.equal(readFileSync(source, 'utf8'), 'original default stream');
+
+  writeFileSync(`${source}:unreviewed`, 'unreviewed source stream');
+  assert.throws(() => windowsPrivateEntries([{
+    path: source, directory: false, writable: true, ordinaryFile: true,
+  }]), /file-metadata/u);
+  const refused = path.join(f.root, 'must-not-be-created');
+  assert.throws(() => windowsPrivateEntries([{
+    path: refused, directory: false, writable: true, create: true, ordinaryFile: true, copySecurityFrom: source,
+  }]), /file-metadata/u);
+  assert.equal(existsSync(refused), false);
+  assert.equal(readFileSync(source, 'utf8'), 'original default stream');
+  assert.equal(readFileSync(`${source}:unreviewed`, 'utf8'), 'unreviewed source stream');
+  assert.equal(readFileSync(`${stage}:user`, 'utf8'), 'unreviewed retained-stage stream');
+});
+
 test('untrusted create-child ACE rights never become write/append grants to an OS file', windows, () => {
   const cases = powershell(String.raw`
 $ErrorActionPreference = 'Stop'
