@@ -71,8 +71,10 @@ if ($changed) {
   if ($directory) { [IO.Directory]::SetAccessControl($v.path, $acl) }
   else { [IO.File]::SetAccessControl($v.path, $acl) }
 }
-$after = (ReadFixtureAcl).GetSecurityDescriptorSddlForm($sections)
-[Console]::Out.Write((@{sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;before=$before;after=$after} | ConvertTo-Json -Compress))
+$afterAcl = ReadFixtureAcl
+$after = $afterAcl.GetSecurityDescriptorSddlForm($sections)
+$owner = $afterAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+[Console]::Out.Write((@{sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;owner=$owner;before=$before;after=$after} | ConvertTo-Json -Compress))
 `;
 
 let knownUserFolders;
@@ -335,12 +337,13 @@ test('real SID ACLs secure new empty entries and reject unsafe/foreign existing 
   privateEntry(target, false, true);
   writeFileSync(target, 'private');
   const acl = powershell(aclScript, { path: target });
-  assert.match(acl.after, new RegExp(`^O:${acl.sid.replaceAll('-', '\\-')}`));
+  assert.equal(acl.owner, acl.sid);
   assert.throws(() => privateEntry(target, false, true));
   for (const action of ['public', 'owner']) {
-    powershell(aclScript, { path: target, action });
+    const changed = powershell(aclScript, { path: target, action });
     const unsafe = powershell(aclScript, { path: target }).after;
     try {
+      if (action === 'owner') assert.notEqual(changed.owner, acl.sid);
       assert.throws(() => privateEntry(target));
       assert.equal(powershell(aclScript, { path: target }).after, unsafe);
       assert.equal(readFileSync(target, 'utf8'), 'private');
