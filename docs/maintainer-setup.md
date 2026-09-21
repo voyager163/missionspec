@@ -40,7 +40,7 @@ read back these hosted controls:
 
 The effective branch-rules API confirms both branches inherit these rules.
 The implementation has been committed and published through a pull request.
-After observing successful hosted runs, eight required check contexts were bound
+After observing successful hosted runs, twelve required check contexts were bound
 to their actual GitHub Apps, with strict up-to-date-branch enforcement:
 
 | Required context | GitHub App ID |
@@ -49,6 +49,10 @@ to their actual GitHub Apps, with strict up-to-date-branch enforcement:
 | Repository checks (macos-latest) | 15368 (`github-actions`) |
 | Windows read-only compatibility | 15368 (`github-actions`) |
 | Windows private-state qualification | 15368 (`github-actions`) |
+| Windows held-handle race qualification | 15368 (`github-actions`) |
+| Windows workflow (source) | 15368 (`github-actions`) |
+| Windows workflow (recovery) | 15368 (`github-actions`) |
+| Windows workflow (pruning) | 15368 (`github-actions`) |
 | Dependency review | 15368 (`github-actions`) |
 | CodeQL (javascript-typescript) | 15368 (`github-actions`) |
 | CodeQL (actions) | 15368 (`github-actions`) |
@@ -74,11 +78,19 @@ of native-model behavior.
 Subsequent Windows private-storage and directory-barrier qualification passed
 at `d684dbb`; the source, recovery and pruning application scenarios passed at
 `bbd2f97`. That application revision also produced six CodeQL filesystem-race
-findings, correctly blocking merge. The PR remains draft while the replacement
-[held-handle protocol](architecture/windows-file-races.md) is qualified against
-real Windows races and all existing application scenarios. Earlier passing
-runs do not qualify a changed protocol. Windows terminal/ConPTY confirmation
-and native execution remain separate disabled capabilities.
+findings, correctly blocking merge. The replacement
+[held-handle protocol](architecture/windows-file-races.md) cleared all six
+findings with the query unchanged. At `8c2e3f0`, all six native
+race/security/rename/recovery cases passed on Windows with zero skips, while
+application reruns caught an initial-creation regression.
+
+The four additional Windows contexts were bound only after verifying their
+successful reports and exact App identities: application contexts at `bbd2f97`
+and the native race context at `8c2e3f0`. Their current failures still block
+merge; historical success establishes a check identity, not qualification of
+later code. Readback confirmed all twelve effective contexts on both protected
+branches and a blocked draft PR during the regression. Windows terminal/ConPTY
+confirmation and native execution remain separate disabled capabilities.
 
 ## 1. Validate locally
 

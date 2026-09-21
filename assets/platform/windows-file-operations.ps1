@@ -329,7 +329,6 @@ function Effect-AbsentProcess([int]$processId) {
 function Invoke-MissionSpecPublication($context, $operation) {
   if ([string]$operation.kind -notin @('publish', 'inspect-publication')) { throw 'effect-operation' }
   if ($null -eq $operation.lease -and $operation.kind -ceq 'publish') { throw 'writer-lease' }
-  $parent = Effect-PinDirectory $context ([IO.Path]::GetDirectoryName([string]$operation.path))
   $intent = Effect-OpenFile $context ([string]$operation.intent) $false $true
   $saved = $null
   if ($null -ne $intent) {
@@ -347,6 +346,9 @@ function Invoke-MissionSpecPublication($context, $operation) {
     if ($null -ne $saved.preimage) { Check-EffectReferenceShape $saved.preimage }
   }
   if ($operation.kind -ceq 'inspect-publication' -and $null -eq $saved) { return @{state='absent'} }
+  # An unprepared publication need not have destination parents yet. Inspection
+  # never creates them; mutation/recovery still require the pinned parent below.
+  $parent = Effect-PinDirectory $context ([IO.Path]::GetDirectoryName([string]$operation.path))
   $target = Effect-OpenFile $context ([string]$operation.path) $true $true $true
   $stage = Effect-OpenFile $context ([string]$operation.stage) $true $true $true
   $backup = Effect-OpenFile $context ([string]$operation.backup) $true $true $true

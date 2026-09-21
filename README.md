@@ -146,8 +146,10 @@ relative navigation targets inside a package.
 **Private vulnerability reporting is enabled.** Use the private GitHub route in
 [SECURITY.md](SECURITY.md); never publish sensitive findings in public issues.
 PR-only, conversation-resolution, force-push and deletion protections are active
-for `develop` and `main`. Required Linux/macOS, Windows read-only, dependency-review
-and CodeQL checks are bound to their verified GitHub Apps.
+for `develop` and `main`. Required Linux/macOS, Windows read-only/private-state,
+native race and application, dependency-review and CodeQL checks are bound to
+their verified GitHub Apps. A passing scanner cannot bypass a failing Windows
+application check.
 
 The [maintainer setup guide](docs/maintainer-setup.md) distinguishes local checks
 from GitHub controls that still require authorization, configuration, and

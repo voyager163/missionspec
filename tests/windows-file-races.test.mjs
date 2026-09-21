@@ -9,6 +9,8 @@ import {
   ensureWindowsPrivateDirectories, inspectWindowsPrivateFile, removeWindowsPrivateFile, windowsPublication, writeWindowsPrivateFile,
 } from '../dist/adapters/platform/windows-private-state.js';
 import { digestContent } from '../dist/kernel/revisions.js';
+import { LocalWorkflow } from '../dist/application/local-workflow.js';
+import { openLocalAuthority } from '../dist/adapters/authority/local-authority.js';
 import { createPrivateFixtureRoot, removeFixtureRoot } from './fixtures/windows-private-state.mjs';
 import { windowsFileSecurity } from './fixtures/windows-file-security.mjs';
 import { controlHelper } from './fixtures/windows-controlled-helper.mjs';
@@ -161,6 +163,55 @@ test('held same-directory rename preserves identity before the replacement proto
   assert.equal(readFileSync(f.target, 'utf8'), 'reviewed replacement');
   assert.equal(existsSync(f.stage), false);
   assert.equal(existsSync(f.operation.backup), false);
+});
+
+test('unprepared publication inspection leaves missing destination parents absent', windows, (t) => {
+  const f = fixture(t);
+  const transactions = path.join(f.root, '.missionspec', 'transactions');
+  ensureWindowsPrivateDirectories(f.scope, transactions);
+  const transactionId = randomUUID();
+  const publication = {
+    relative: 'not-created/nested/source.txt', transactionId, index: 0,
+    plan: digestContent('TEST ONLY absent publication inspection'),
+    expected: 'absent', proposed: digestContent('reviewed bytes'),
+  };
+  const missingParent = path.join(f.root, 'not-created');
+  const intent = path.join(transactions, `${transactionId}.win-0.json`);
+  assert.equal(windowsPublication(f.scope, publication, true), 'absent');
+  assert.equal(existsSync(missingParent), false);
+  assert.equal(existsSync(intent), false);
+  assert.throws(() => windowsPublication(f.scope, publication), /writer-lease/u);
+  assert.equal(existsSync(missingParent), false);
+  writeWindowsPrivateFile(f.scope, intent, '{"schemaVersion":1}');
+  assert.throws(() => windowsPublication(f.scope, publication, true), /publication-intent/u);
+  assert.equal(readFileSync(intent, 'utf8'), '{"schemaVersion":1}');
+  assert.equal(existsSync(missingParent), false);
+});
+
+test('real approved setup creates only reviewed absent destinations and their private parents', windows, async (t) => {
+  const f = fixture(t);
+  // TEST ONLY transport: these decisions do not qualify human presence.
+  const authority = await openLocalAuthority({ directory: f.root, transport: {
+    channel: 'trusted-callback', protocolIdentity: { id: 'test.absent-setup', version: '1' },
+    async confirm() { return 'accept'; },
+  } });
+  const workflow = await LocalWorkflow.open(f.root, { authority });
+  const plan = await workflow.previewSetup();
+  const confirmation = await workflow.confirm(plan);
+  assert.equal(confirmation.status, 'ok');
+  assert.equal(confirmation.value.state, 'issued');
+  assert.equal(confirmation.value.approval.assurance.humanPresence, 'not-attested');
+  assert.equal(existsSync(path.join(f.root, 'missionspec')), false);
+  assert.equal(existsSync(path.join(f.root, 'unreviewed')), false);
+  await workflow.apply(plan, confirmation.value.approval.reference);
+  assert.equal((await workflow.project()).state, 'initialized');
+  assert.deepEqual(await workflow.files.pending(), []);
+  for (const mutation of plan.mutations) {
+    assert.equal(mutation.effect.expected, 'absent');
+    const file = await workflow.files.read(mutation.effect.path);
+    assert.equal(file.digest, mutation.effect.proposed);
+  }
+  assert.equal(existsSync(path.join(f.root, 'unreviewed')), false);
 });
 
 test('held publication blocks stale stage/destination writes and never overwrites a gap winner', windows, async (t) => {

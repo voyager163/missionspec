@@ -92,6 +92,19 @@ A missing/unrecognized intent, changed preimage, foreign target, unexpected stag
 occupant, partial sidecar or changed root blocks recovery and preserves bytes.
 It never treats arbitrary user deletion as permission to replace a file.
 
+Unprepared inspection reads the scoped intent in the already-created transaction
+directory **before** requiring destination parents. If there is no intent, it
+returns only `absent` (no publication prepared) and creates nothing. The
+application must still check the exact reviewed preimage, hold its writer lease,
+create only reviewed parents, and allocate the stage before publication.
+An existing malformed/foreign intent or a missing parent during mutation or
+recorded recovery remains an error, never an inferred creation grant.
+
+This distinction fixes the actual initial-setup failure after `8c2e3f0`: the
+native replacement fixtures had existing parents, whereas the real setup's
+`missionspec/config.yaml` parent did not yet exist. The inspector prematurely
+pinned that missing parent and failed with `STATUS_OBJECT_NAME_NOT_FOUND`.
+
 ### Same-directory rename ABI and sharing
 
 The actual `cb9c0b2` run exposed the first preimage rename failure. The prior
@@ -166,6 +179,14 @@ It verifies that held-source rename preserves file identity and bytes, consumes
 only the admitted stage name and creates no backup for an absent target. The
 full publication cases continue to require no-replace rejection of a real
 destination winner and recovery of the exact retained preimage.
+
+The corresponding narrow application regression covers actual approved setup,
+and a separate read-only case proves that absent-parent inspection neither
+creates paths nor accepts a corrupt intent:
+
+```sh
+node --test --test-concurrency=1 --test-name-pattern="^(unprepared publication inspection|real approved setup)" tests/windows-file-races.test.mjs
+```
 
 For a quick check of the source-security-copy path specifically:
 
