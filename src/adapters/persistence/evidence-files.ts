@@ -11,7 +11,22 @@ import { integer, oneOf, record, text } from '../../kernel/validation.js';
 import type { EvidencePruneObservation, EvidencePruneTarget } from '../../ports/evidence-pruning.js';
 import { parsePruneTarget } from './pruning.js';
 import { requireSupportedPlatform } from './filesystem.js';
-import { requireWindowsProcessAbsent, syncWindowsPrivateDirectory, windowsPrivateEntries } from '../platform/windows-private-state.js';
+import {
+  inspectWindowsPrivateFile, removeWindowsPrivateFile, syncWindowsPrivateDirectory, windowsPrivateEntries, writeWindowsPrivateFile,
+  type WindowsFileScope, type WindowsWriterLease,
+} from '../platform/windows-private-state.js';
+
+const windowsLeases = new WeakMap<LocalWorkspace, WindowsWriterLease>();
+
+function windowsScope(files: LocalWorkspace, lease = true): WindowsFileScope {
+  const root = lstatSync(files.root, { bigint: true });
+  if (!root.isDirectory() || root.isSymbolicLink() ||
+      digestContent(JSON.stringify({ root: files.root, device: String(root.dev), inode: String(root.ino) })) !== files.rootDigest) {
+    throw new WorkflowError('scope-exceeded', 'Evidence workspace identity changed before native admission.');
+  }
+  const held = lease ? windowsLeases.get(files) : undefined;
+  return { root: files.root, dev: root.dev, ino: root.ino, ...(held === undefined ? {} : { lease: held }) };
+}
 
 function missing(error: unknown): boolean {
   return typeof error === 'object' && error !== null && Reflect.get(error, 'code') === 'ENOENT';
@@ -64,7 +79,6 @@ function syncDirectory(directory: string): void {
 }
 
 function reclaimDeadPruneLock(filename: string, id: ContentDigest): void {
-  if (process.platform === 'win32') windowsPrivateEntries([{ path: filename, directory: false, writable: true, ordinaryFile: true }]);
   const descriptor = openSync(filename, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stat = fstatSync(descriptor, { bigint: true });
@@ -81,12 +95,8 @@ function reclaimDeadPruneLock(filename: string, id: ContentDigest): void {
     text(owner.nonce, 'prune.lock.nonce', 80);
     const pid = integer(owner.pid, 'prune.lock.pid', 1, 2147483647);
     let dead = false;
-    if (process.platform === 'win32') {
-      try { requireWindowsProcessAbsent(pid); dead = true; } catch { /* Unknown/live process state never permits reclaiming a lock. */ }
-    } else {
-      try { process.kill(pid, 0); } catch (error) {
-        dead = typeof error === 'object' && error !== null && Reflect.get(error, 'code') === 'ESRCH';
-      }
+    try { process.kill(pid, 0); } catch (error) {
+      dead = typeof error === 'object' && error !== null && Reflect.get(error, 'code') === 'ESRCH';
     }
     if (!dead) throw new WorkflowError('conflict', 'The prune writer may still be alive; its lock cannot be removed.');
     const current = lstatSync(filename, { bigint: true });
@@ -105,52 +115,53 @@ export async function withEvidencePruneLock<T>(
   parseDigest(id);
   await scope(files, workspace);
   const filename = path.join(files.root, '.missionspec', 'transaction.lock');
-  let descriptor: number;
-  const flags = constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW;
+  const lockContent = JSON.stringify({ schemaVersion: 1, kind: 'evidence-prune', id, pid: process.pid, nonce: randomUUID() });
   if (process.platform === 'win32') {
-    try { lstatSync(filename); reclaimDeadPruneLock(filename, id); } catch (error) { if (!missing(error)) throw error; }
-    try {
-      windowsPrivateEntries([{ path: filename, directory: false, writable: true, create: true, ordinaryFile: true }]);
-      descriptor = openSync(filename, constants.O_WRONLY | constants.O_NOFOLLOW);
-    } catch {
-      throw new WorkflowError('effect-outcome-unknown', 'Prune lock creation was not confirmed; preserve any partial lock for reconciliation.');
+    let old: string | undefined;
+    try { old = readFileSync(filename, 'utf8'); } catch (error) { if (!missing(error)) throw error; }
+    if (old !== undefined) {
+      const owner = record(JSON.parse(old) as unknown, 'prune.lock', ['schemaVersion', 'kind', 'id', 'pid', 'nonce']);
+      if (owner.schemaVersion !== 1 || owner.kind !== 'evidence-prune' || parseDigest(owner.id) !== id) {
+        throw new WorkflowError('conflict', 'Only this prune can reclaim its own dead writer lock.');
+      }
+      text(owner.nonce, 'prune.lock.nonce', 80);
+      const pid = integer(owner.pid, 'prune.lock.pid', 1, 2147483647);
+      try {
+        const previous = inspectWindowsPrivateFile(windowsScope(files, false), filename);
+        if (previous.digest !== digestContent(old)) throw new Error('Writer changed');
+        removeWindowsPrivateFile(windowsScope(files, false), filename, previous.digest, previous, pid);
+      } catch { throw new WorkflowError('conflict', 'The prune writer is live, unknown, or changed; its lock is retained.'); }
     }
-  } else {
-    try { descriptor = openSync(filename, flags, 0o600); } catch (error) {
-      if (typeof error !== 'object' || error === null || Reflect.get(error, 'code') !== 'EEXIST') throw error;
-      reclaimDeadPruneLock(filename, id);
-      descriptor = openSync(filename, flags, 0o600);
+    const owned = writeWindowsPrivateFile(windowsScope(files, false), filename, lockContent);
+    windowsLeases.set(files, { path: filename, dev: BigInt(owned.device), ino: BigInt(owned.inode), digest: owned.digest });
+    try {
+      if ((await files.pending()).length !== 0) throw new WorkflowError('conflict', 'Pending file transactions block pruning.');
+      return await operation();
+    } finally {
+      windowsLeases.delete(files);
+      try { removeWindowsPrivateFile(windowsScope(files, false), filename, owned.digest, owned); }
+      catch { throw new WorkflowError('effect-outcome-unknown', 'Prune lock release was not confirmed; reconcile its durable state.'); }
     }
   }
+  let descriptor: number;
+  const flags = constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW;
+  try { descriptor = openSync(filename, flags, 0o600); } catch (error) {
+    if (typeof error !== 'object' || error === null || Reflect.get(error, 'code') !== 'EEXIST') throw error;
+    reclaimDeadPruneLock(filename, id);
+    descriptor = openSync(filename, flags, 0o600);
+  }
   let identity: BigIntStats;
-  const lockContent = JSON.stringify({ schemaVersion: 1, kind: 'evidence-prune', id, pid: process.pid, nonce: randomUUID() });
   try {
     writeFileSync(descriptor, lockContent);
     fsyncSync(descriptor);
     identity = fstatSync(descriptor, { bigint: true });
     syncDirectory(path.dirname(filename));
-  } catch (error) {
-    if (process.platform === 'win32') throw new WorkflowError('effect-outcome-unknown', 'Prune lock persistence was not confirmed; no preparation or removal can be assumed.');
-    throw error;
-  } finally {
-    try { closeSync(descriptor); } catch (error) {
-      if (process.platform === 'win32') throw new WorkflowError('effect-outcome-unknown', 'Prune lock close failed; no operation success is implied.');
-      throw error;
-    }
-  }
-  if (process.platform === 'win32') {
-    const closed = lstatSync(filename, { bigint: true });
-    if (!sameIdentity(identity, closed) || readFileSync(filename, 'utf8') !== lockContent) {
-      throw new WorkflowError('effect-outcome-unknown', 'Prune lock changed during close; no unrelated lock is adopted.');
-    }
-    identity = closed;
-  }
+  } finally { closeSync(descriptor); }
   try {
     if ((await files.pending()).length !== 0) throw new WorkflowError('conflict', 'Pending file transactions block pruning.');
     return await operation();
   } finally {
     try {
-      if (process.platform === 'win32') windowsPrivateEntries([{ path: filename, directory: false, writable: true, ordinaryFile: true }]);
       const current = lstatSync(filename, { bigint: true });
       privateEntry(current, false);
       if (!sameIdentity(identity, current) || identity.mtimeNs !== current.mtimeNs || identity.ctimeNs !== current.ctimeNs) {
@@ -159,7 +170,6 @@ export async function withEvidencePruneLock<T>(
       unlinkSync(filename);
       syncDirectory(path.dirname(filename));
     } catch (error) {
-      if (process.platform === 'win32') throw new WorkflowError('effect-outcome-unknown', 'Prune writer-lock release was not confirmed; reconcile the durable prune state explicitly.');
       throw error;
     }
   }
@@ -238,6 +248,16 @@ export async function removePreparedEvidence(
     if (process.platform === 'win32') syncWindowsPrivateDirectory(directory, parent);
     return 'already-absent';
   }
+  if (process.platform === 'win32') {
+    try {
+      const reference = inspectWindowsPrivateFile(windowsScope(files), opened.target);
+      if (reference.device !== String(opened.identity.dev) || reference.inode !== String(opened.identity.ino) || reference.digest !== item.rawDigest) {
+        throw new WorkflowError('stale-revision', 'Evidence changed before native deletion admission.');
+      }
+      removeWindowsPrivateFile(windowsScope(files), opened.target, item.rawDigest, reference);
+      return 'removed';
+    } finally { closeSync(opened.descriptor); }
+  }
   try {
     const currentParent = lstatSync(directory, { bigint: true });
     privateEntry(currentParent, true);
@@ -249,8 +269,7 @@ export async function removePreparedEvidence(
     }
     // No await/callback between the verified read/hash, final identity check and unlink.
     unlinkSync(opened.target);
-    if (process.platform === 'win32') syncWindowsPrivateDirectory(directory, currentParent);
-    else {
+    {
       const descriptor = openSync(directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
       try {
         if (!sameIdentity(currentParent, fstatSync(descriptor, { bigint: true }))) {

@@ -4,6 +4,7 @@ $ProgressPreference = 'SilentlyContinue'
 $phase = 'input'
 $boundary = 'helper'
 $leaseHandle = [IntPtr]::Zero
+$nativeStatus = $null
 try {
   if (![string]::Equals([Environment]::SystemDirectory, 'C:\Windows\System32', [StringComparison]::OrdinalIgnoreCase) -or
       ![string]::Equals($PSHOME, 'C:\Windows\System32\WindowsPowerShell\v1.0', [StringComparison]::OrdinalIgnoreCase) -or
@@ -36,15 +37,40 @@ try {
   Native 'GetFinalPathNameByHandleW' 'kernel32.dll' ([uint32]) @([IntPtr], [Text.StringBuilder], [uint32], [uint32])
   Native 'GetFileInformationByHandle' 'kernel32.dll' ([bool]) @([IntPtr], [IntPtr])
   Native 'GetFileInformationByHandleEx' 'kernel32.dll' ([bool]) @([IntPtr], [int], [IntPtr], [uint32])
+  Native 'SetFileInformationByHandle' 'kernel32.dll' ([bool]) @([IntPtr], [int], [IntPtr], [uint32])
+  Native 'ReadFile' 'kernel32.dll' ([bool]) @([IntPtr], [IntPtr], [uint32], [uint32].MakeByRefType(), [IntPtr])
+  Native 'WriteFile' 'kernel32.dll' ([bool]) @([IntPtr], [IntPtr], [uint32], [uint32].MakeByRefType(), [IntPtr])
+  Native 'SetFilePointerEx' 'kernel32.dll' ([bool]) @([IntPtr], [int64], [int64].MakeByRefType(), [uint32])
+  Native 'SetSecurityInfo' 'advapi32.dll' ([uint32]) @([IntPtr], [int], [uint32], [IntPtr], [IntPtr], [IntPtr], [IntPtr])
+  Native 'GetSecurityDescriptorOwner' 'advapi32.dll' ([bool]) @([IntPtr], [IntPtr].MakeByRefType(), [bool].MakeByRefType())
+  Native 'GetSecurityDescriptorGroup' 'advapi32.dll' ([bool]) @([IntPtr], [IntPtr].MakeByRefType(), [bool].MakeByRefType())
+  Native 'GetSecurityDescriptorDacl' 'advapi32.dll' ([bool]) @([IntPtr], [bool].MakeByRefType(), [IntPtr].MakeByRefType(), [bool].MakeByRefType())
+  Native 'NtCreateFile' 'ntdll.dll' ([int]) @([IntPtr].MakeByRefType(), [uint32], [IntPtr], [IntPtr], [IntPtr], [uint32], [uint32], [uint32], [uint32], [IntPtr], [uint32])
   Native 'FlushFileBuffers' 'kernel32.dll' ([bool]) @([IntPtr])
   Native 'K32EnumProcesses' 'kernel32.dll' ([bool]) @([IntPtr], [uint32], [uint32].MakeByRefType())
   Native 'CloseHandle' 'kernel32.dll' ([bool]) @([IntPtr])
   Native 'CreateDirectoryW' 'kernel32.dll' ([bool]) @([string], [IntPtr])
   Native 'LocalFree' 'kernel32.dll' ([IntPtr]) @([IntPtr])
   Native 'ConvertStringSecurityDescriptorToSecurityDescriptorW' 'advapi32.dll' ([bool]) @([string], [uint32], [IntPtr].MakeByRefType(), [uint32].MakeByRefType())
-  Native 'GetSecurityInfo' 'advapi32.dll' ([uint32]) @([IntPtr], [int], [uint32], [IntPtr], [IntPtr], [IntPtr], [IntPtr].MakeByRefType(), [IntPtr].MakeByRefType())
+  Native 'GetSecurityInfo' 'advapi32.dll' ([uint32]) @([IntPtr], [int], [uint32], [IntPtr].MakeByRefType(), [IntPtr].MakeByRefType(), [IntPtr].MakeByRefType(), [IntPtr].MakeByRefType(), [IntPtr].MakeByRefType())
   Native 'GetSecurityDescriptorLength' 'advapi32.dll' ([uint32]) @([IntPtr])
   $native = $type.CreateType()
+  function HandleSecurity([IntPtr]$handle, [uint32]$information = 7) {
+    $descriptor = [IntPtr]::Zero
+    $owner = [IntPtr]::Zero
+    $group = [IntPtr]::Zero
+    $dacl = [IntPtr]::Zero
+    $sacl = [IntPtr]::Zero
+    try {
+      if ($native::GetSecurityInfo($handle, 1, $information, [ref]$owner, [ref]$group, [ref]$dacl,
+          [ref]$sacl, [ref]$descriptor) -ne 0) { throw 'file-security' }
+      $length = $native::GetSecurityDescriptorLength($descriptor)
+      if ($length -lt 20 -or $length -gt 65536) { throw 'file-security' }
+      $bytes = [byte[]]::new($length)
+      [Runtime.InteropServices.Marshal]::Copy($descriptor, $bytes, 0, $length)
+      return [Security.AccessControl.RawSecurityDescriptor]::new($bytes, 0)
+    } finally { [void]$native::LocalFree($descriptor) }
+  }
   function CheckDirectoryIdentity([IntPtr]$information, $expected, [bool]$directory = $true) {
     $bytes = [byte[]]::new(52)
     [Runtime.InteropServices.Marshal]::Copy($information, $bytes, 0, 52)
@@ -65,10 +91,13 @@ try {
     $handle = $native::CreateFileW($p, 0x20080, 7, [IntPtr]::Zero, 3, 0x02200000, [IntPtr]::Zero)
     if ($handle -eq [IntPtr](-1)) { throw 'file-security' }
     $descriptor = [IntPtr]::Zero
+    $owner = [IntPtr]::Zero
+    $group = [IntPtr]::Zero
+    $dacl = [IntPtr]::Zero
     $label = [IntPtr]::Zero
     try {
       # Access-affecting labels, attributes, scope and filters; not privileged audit-SACL access.
-      if ($native::GetSecurityInfo($handle, 1, 0x1F0, [IntPtr]::Zero, [IntPtr]::Zero, [IntPtr]::Zero,
+      if ($native::GetSecurityInfo($handle, 1, 0x1F0, [ref]$owner, [ref]$group, [ref]$dacl,
           [ref]$label, [ref]$descriptor) -ne 0) { throw 'file-security' }
       $length = $native::GetSecurityDescriptorLength($descriptor)
       if ($length -lt 20 -or $length -gt 8192) { throw 'file-security' }
@@ -81,14 +110,15 @@ try {
       if (!$native::CloseHandle($handle)) { throw 'close' }
     }
   }
-  function CheckEntry([string]$p, [bool]$private, [bool]$directory, [bool]$writable, [bool]$system = $false, $flushExpected = $null, [bool]$ordinary = $false) {
+  function CheckEntry([string]$p, [bool]$private, [bool]$directory, [bool]$writable, [bool]$system = $false, $flushExpected = $null, [bool]$ordinary = $false, [IntPtr]$held = [IntPtr]::Zero) {
     $script:boundary = if ($system) { 'system' } elseif ($private) { 'private' } else { 'ancestor' }
     $script:phase = 'entry-open'
     $entryTrusted = if ($system) { $osTrusted } else { $trusted }
     $flushRequested = $null -ne $flushExpected
     $access = if ($flushRequested) { 0x40020080 } else { 0x20080 }
     $sharing = if ($flushRequested) { 3 } else { 7 }
-    $handle = $native::CreateFileW($p, $access, $sharing, [IntPtr]::Zero, 3, 0x02200000, [IntPtr]::Zero)
+    $ownsHandle = $held -eq [IntPtr]::Zero
+    $handle = if ($ownsHandle) { $native::CreateFileW($p, $access, $sharing, [IntPtr]::Zero, 3, 0x02200000, [IntPtr]::Zero) } else { $held }
     if ($handle -eq [IntPtr](-1)) { throw 'open' }
     $info = [IntPtr]::Zero
     try {
@@ -103,11 +133,9 @@ try {
       $script:phase = 'entry-final-path'
       $length = $native::GetFinalPathNameByHandleW($handle, $final, 1024, 0)
       if ($length -eq 0 -or $length -ge 1024 -or ![string]::Equals($final.ToString(), ('\\?\' + $p), [StringComparison]::Ordinal)) { throw 'alias' }
-      $sections = [Security.AccessControl.AccessControlSections]'Owner, Access'
       $script:phase = 'entry-acl-read'
-      $acl = if ($directory) { [IO.Directory]::GetAccessControl($p, $sections) } else { [IO.File]::GetAccessControl($p, $sections) }
       $script:phase = 'entry-acl-parse'
-      $raw = [Security.AccessControl.RawSecurityDescriptor]::new($acl.GetSecurityDescriptorBinaryForm(), 0)
+      $raw = HandleSecurity $handle 5
       $script:phase = 'entry-owner'
       if ($null -eq $raw.DiscretionaryAcl -or $null -eq $raw.Owner) { throw 'acl' }
       if (($private -and $raw.Owner.Value -ne $sid) -or (!$private -and $raw.Owner.Value -notin $entryTrusted)) { throw 'owner' }
@@ -175,7 +203,7 @@ try {
       try {
         if ($info -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::FreeHGlobal($info) }
       } finally {
-        if (!$native::CloseHandle($handle)) {
+        if ($ownsHandle -and !$native::CloseHandle($handle)) {
           if ($flushRequested) { $script:phase = 'directory-close' }
           throw 'close'
         }
@@ -189,7 +217,13 @@ try {
   $boundary = 'helper'
   Import-Module -Name 'C:\Windows\System32\WindowsPowerShell\v1.0\Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1' -ErrorAction Stop
   $phase = 'json-input'
-  $inputObject = [Console]::In.ReadToEnd() | Microsoft.PowerShell.Utility\ConvertFrom-Json
+  $inputObject = [Console]::In.ReadLine() | Microsoft.PowerShell.Utility\ConvertFrom-Json
+  if ($null -ne $inputObject.operation) {
+    . ($PSScriptRoot + '\windows-file-operations.ps1')
+    $result = Invoke-MissionSpecFileOperation $inputObject.operation
+    [Console]::Out.Write((@{ok=$true;value=$result} | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 12 -Compress))
+    return
+  }
   if ($null -ne $inputObject.lease) {
     $phase = 'writer-lease'
     $lease = $inputObject.lease
@@ -343,6 +377,9 @@ try {
       'file-metadata','file-security','process-inspection','process-present','writer-lease','lease-close')) { $reason = $phase }
   if ($failure.Exception.Message -in @('file-security-owner','file-security-group','file-security-control',
       'file-security-dacl','file-security-descriptor','file-security-policy')) { $reason = $failure.Exception.Message }
+  if ($failure.Exception.Message -in @('effect-root','effect-path','effect-open','effect-read','effect-write','effect-size',
+      'effect-identity','effect-preimage','effect-flush','effect-rename','effect-delete','effect-cancelled','effect-operation',
+      'handle-close','publication-intent','publication-state')) { $reason = $failure.Exception.Message }
   $knownTypes = @('RuntimeException', 'MethodException', 'MethodInvocationException', 'PSInvalidCastException',
     'ParameterBindingException', 'ArgumentException', 'ArgumentNullException', 'InvalidOperationException',
     'NotSupportedException', 'TypeLoadException', 'MissingMethodException', 'IOException', 'UnauthorizedAccessException',
@@ -355,8 +392,9 @@ try {
     if ($innerType -notin $knownTypes) { $innerType = 'other' }
   }
   $line = [int]$failure.InvocationInfo.ScriptLineNumber
+  $nativeDetail = if ($null -eq $nativeStatus) { '' } else { ',"nativeStatus":' + [string][int]$nativeStatus }
   [Console]::Out.Write('{"ok":false,"reason":"' + $reason + '","phase":"' + $phase +
-    '","boundary":"' + $boundary + '","exceptionType":"' + $exceptionType + '","innerType":"' + $innerType + '","line":' + $line + '}')
+    '","boundary":"' + $boundary + '","exceptionType":"' + $exceptionType + '","innerType":"' + $innerType + '","line":' + $line + $nativeDetail + '}')
   exit 1
 } finally {
   if ($leaseHandle -ne [IntPtr]::Zero) {

@@ -8,6 +8,12 @@ The real application integration below is a **new qualification candidate**;
 that earlier success does not qualify it, a console channel, or native execution.
 POSIX success or mocked `process.platform` results are not Windows qualification.
 
+The successful application runs at `bbd2f97` exposed six subsequent CodeQL
+filesystem race findings. The current [held-handle correction candidate](windows-file-races.md)
+changes Windows creation, publication, lock release/reclaim and pruning deletion.
+It requires fresh Windows and CodeQL evidence; prior passing runs are not evidence
+for these changed operations. No alert/query is disabled or blanket-dismissed.
+
 ## Capability matrix
 
 | Surface | Windows candidate behavior |
@@ -285,20 +291,19 @@ are platform branches in that adapter, not a second controller:
   an explicit uncertain outcome; no sensitive stage bytes or source replacement
   are performed. Unsupported access policy is refused rather than dropped.
   This is not a general auditing-SACL or extended-metadata cloning facility.
-- Existing-file replacement uses the same staged rename protocol; absent-file
-  publication uses the same exclusive hard-link publication followed immediately
-  by stage unlink, synchronously on Windows. Unexpected hard links always fail.
-  An abrupt exit between those two syscalls can retain an internal linked pair:
-  it is **not** silently normalized or treated as completion. Establish writer
-  quiescence and review that retained stage before manual reconciliation.
+- Windows publication now uses held-handle, directory-relative no-replace rename.
+  Existing-file replacement first retains the verified preimage under an immutable
+  native intent, then publishes without overwriting an intervening destination.
+  This has an explicit recoverable absence interval, not a claimed atomic exchange.
+  The old hard-link-pair publication/cleanup path is removed on Windows. See the
+  [six-finding mapping and complete recovery protocol](windows-file-races.md).
 - Recovery re-fsyncs the retained journal and any reused exact-content stage,
   and re-establishes directory barriers for already-applied outputs. Changed
   source/stage bytes remain blockers, never overwritten. Windows stage rejection
   performs no automatic cleanup: ADS, unsafe/changed security and replacement
   stages remain available for reconciliation. Stage identity/version and bytes
-  are checked again before publication. Successful exclusive publication removes
-  only its verified same-inode linked candidate; a rename consumes its stage
-  without subsequently unlinking a potentially reused stage pathname. Failed write, flush,
+  are checked through held native handles before publication. A rename consumes
+  its stage without subsequently unlinking a potentially reused stage pathname. Failed write, flush,
   close or lock release reports an unknown effect rather than success.
 
 The persistent authority backend allows independently installed
@@ -313,12 +318,13 @@ identity checks precede synchronous unlink; a native directory barrier also
 confirms already-absent recovery paths before completion. Existing evidence/run
 history is retained and completed pruning never deletes a replacement raw file.
 
-Cooperative lock recovery uses a bounded **complete** `K32EnumProcesses` snapshot,
+Cooperative lock recovery acquires a destructive handle to the exact lock before
+checking a bounded **complete** `K32EnumProcesses` snapshot,
 including a self-presence sanity check. A live/reused PID, unknown/truncated
 inspection, wrong transaction/prune identity or changed lock blocks reclaim.
 This checks the one local filesystem writer only: it is not host cancellation
-or descendant-process quiescence. Node performs source rename/link/unlink itself.
-Its creation helpers additionally hold a non-delete-shared native handle to the
+or descendant-process quiescence. Native effects are bound to held objects and
+their verified writer lease. The helpers hold a non-delete-shared native handle to the
 exact writer-lock inode and digest, so a delayed helper cannot create entries
 under a replaced lock and recovery cannot steal a lock still leased by that
 helper. Read-only status never reclaims a lock. Partial/unparseable locks require

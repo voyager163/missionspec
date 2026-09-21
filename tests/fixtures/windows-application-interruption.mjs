@@ -1,32 +1,36 @@
 // TEST ONLY fault boundaries around the real application and real filesystem/SQLite operations.
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
+import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import path from 'node:path';
 import { windowsPrivateEntries } from '../../dist/adapters/platform/windows-private-state.js';
 
 const input = JSON.parse(fs.readFileSync(0, 'utf8'));
 let replacedStage = false;
-if (input.mode === 'file-exit') {
-  const unlink = fs.unlinkSync;
-  fs.unlinkSync = (filename, ...args) => {
-    const result = unlink(filename, ...args);
-    if (/\.msn-[a-f0-9-]{36}$/u.test(String(filename))) process.exit(74);
+if (['file-exit', 'stage-exit', 'journal-sync-failure', 'prune-delete-exit'].includes(input.mode)) {
+  const spawn = childProcess.spawnSync;
+  childProcess.spawnSync = (program, args, options) => {
+    let operation;
+    try { operation = JSON.parse(String(options?.input).split('\n')[0]).operation; } catch { /* Not a native operation request. */ }
+    if (input.mode === 'journal-sync-failure' && operation?.kind === 'create' &&
+        /[\\/]transactions[\\/][a-f0-9-]{36}\.json$/u.test(operation.path)) {
+      // Cancel after the real write, before the native file-flush acknowledgement.
+      return spawn(program, args, { ...options, input: `${JSON.stringify({ operation })}\ncontinue\n` });
+    }
+    const result = spawn(program, args, options);
+    if (result.status === 0 && input.mode === 'file-exit' && operation?.kind === 'publish') process.exit(74);
+    if (result.status === 0 && input.mode === 'stage-exit' && operation?.kind === 'create' &&
+        /\.msn-[a-f0-9-]{36}$/u.test(operation.path)) process.exit(74);
+    if (result.status === 0 && input.mode === 'prune-delete-exit' && operation?.kind === 'delete' &&
+        /[\\/]evidence[\\/]EVD-[^\\/]+\.json$/u.test(operation.path)) process.exit(75);
     return result;
   };
-} else if (['journal-sync-failure', 'stage-exit', 'recovery-stage-replace'].includes(input.mode)) {
+} else if (input.mode === 'recovery-stage-replace') {
   const open = fsp.open;
   fsp.open = async (filename, ...args) => {
     const handle = await open(filename, ...args);
-    if (input.mode === 'journal-sync-failure' && /[\\/]transactions[\\/][a-f0-9-]{36}\.json$/u.test(String(filename)) &&
-        (args[0] & fs.constants.O_WRONLY) !== 0) {
-      const sync = handle.sync.bind(handle);
-      handle.sync = async () => { await handle.close(); return sync(); };
-    } else if (input.mode === 'stage-exit' && /\.msn-[a-f0-9-]{36}$/u.test(String(filename)) &&
-        (args[0] & fs.constants.O_WRONLY) !== 0) {
-      const close = handle.close.bind(handle);
-      handle.close = async () => { await close(); process.exit(74); };
-    } else if (input.mode === 'recovery-stage-replace' && String(filename) === input.stage && !replacedStage) {
+    if (String(filename) === input.stage && !replacedStage) {
       const close = handle.close.bind(handle);
       handle.close = async () => {
         await close();
@@ -38,13 +42,6 @@ if (input.mode === 'file-exit') {
       };
     }
     return handle;
-  };
-} else if (input.mode === 'prune-delete-exit') {
-  const unlink = fs.unlinkSync;
-  fs.unlinkSync = (filename, ...args) => {
-    const result = unlink(filename, ...args);
-    if (/[\\/]evidence[\\/]EVD-[^\\/]+\.json$/u.test(String(filename))) process.exit(75);
-    return result;
   };
 }
 syncBuiltinESMExports();

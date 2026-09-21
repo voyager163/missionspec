@@ -1,4 +1,4 @@
-import { constants, linkSync, lstatSync, readFileSync, renameSync, unlinkSync, type BigIntStats } from 'node:fs';
+import { constants, lstatSync } from 'node:fs';
 import { link, lstat, mkdir, open, readdir, realpath, rename, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -13,8 +13,10 @@ import { requireApproval, unavailableAuthority } from '../../application/authori
 import { WorkflowError } from '../../application/errors.js';
 import { parseTaskDefinition, type TaskDefinition } from '../../engines/planning/contracts.js';
 import {
-  requireWindowsProcessAbsent, syncWindowsPrivateDirectory, validateWindowsStatePath, windowsPrivateEntries,
-  WindowsDirectoryDurabilityError, WindowsPrivateStateError, type WindowsPrivateEntry, type WindowsWriterLease,
+  syncWindowsPrivateDirectory, validateWindowsStatePath, windowsPrivateEntries,
+  ensureWindowsPrivateDirectories, inspectWindowsPrivateFile, removeWindowsPrivateFile, syncWindowsPrivateFile,
+  windowsPublication, writeWindowsPrivateFile, WindowsDirectoryDurabilityError, WindowsPrivateStateError,
+  type WindowsFileReference, type WindowsFileScope, type WindowsPrivateEntry, type WindowsWriterLease,
 } from '../platform/windows-private-state.js';
 
 export interface FileGuard {
@@ -177,12 +179,6 @@ function windowsIoDetail(error: unknown): string {
     ? `Filesystem code: ${code}.` : 'Filesystem outcome is unconfirmed.';
 }
 
-function sameWindowsStage(left: BigIntStats, right: BigIntStats): boolean {
-  return right.isFile() && !right.isSymbolicLink() && right.nlink === 1n &&
-    left.dev === right.dev && left.ino === right.ino && left.size === right.size &&
-    left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
-}
-
 export async function observeWorkspaceRoot(directory: string): Promise<{ root: string; rootDigest: ContentDigest }> {
   const root = await realpath(directory);
   const info = await lstat(root, { bigint: true });
@@ -212,6 +208,14 @@ export class LocalWorkspace {
       throw new WorkflowError('scope-exceeded', 'The observed workspace root changed.');
     }
     let current = this.root;
+    if (process.platform === 'win32' && createParents) {
+      const parent = path.dirname(path.join(this.root, relative));
+      if (parent !== this.root) {
+        try { ensureWindowsPrivateDirectories(this.windowsScope(), parent); } catch (error) {
+          throw new WorkflowError('effect-outcome-unknown', `Private parent creation was not confirmed. ${windowsIoDetail(error)}`);
+        }
+      }
+    }
     const checks: WindowsPrivateEntry[] = [];
     if (process.platform === 'win32' && writable) checks.push({ path: this.root, directory: true, writable: true });
     const parts = relative.split('/');
@@ -219,27 +223,9 @@ export class LocalWorkspace {
       current = path.join(current, parts[index]!);
       if (process.platform === 'win32' && writable) validateWindowsStatePath(current);
       const parent = index < parts.length - 1;
-      if (parent && createParents) {
-        if (process.platform === 'win32') {
-          let exists = true;
-          try { await lstat(current); } catch (error) { if (!missing(error)) throw error; exists = false; }
-          if (!exists) {
-            const directory = path.dirname(current);
-            const identity = await lstat(directory, { bigint: true });
-            try {
-              windowsPrivateEntries([
-                { path: directory, directory: true, writable: true },
-                { path: current, directory: true, writable: true, create: true },
-              ], this.windowsLease);
-              syncWindowsPrivateDirectory(directory, identity);
-            } catch (error) {
-              throw new WorkflowError('effect-outcome-unknown', `Private directory creation was not durably confirmed; inspect the retained state before retrying. ${windowsIoDetail(error)}`);
-            }
-          }
-        } else {
-          try { await mkdir(current, { mode: 0o700 }); } catch (error) {
-            if (!(typeof error === 'object' && error !== null && 'code' in error && error.code === 'EEXIST')) throw error;
-          }
+      if (parent && createParents && process.platform !== 'win32') {
+        try { await mkdir(current, { mode: 0o700 }); } catch (error) {
+          if (!(typeof error === 'object' && error !== null && 'code' in error && error.code === 'EEXIST')) throw error;
         }
       }
       try {
@@ -262,6 +248,16 @@ export class LocalWorkspace {
     }
     for (let index = 0; index < checks.length; index += 8) windowsPrivateEntries(checks.slice(index, index + 8));
     return current;
+  }
+
+  private windowsScope(withLease = true): WindowsFileScope {
+    const observed = lstatSync(this.root, { bigint: true });
+    if (!observed.isDirectory() || observed.isSymbolicLink() ||
+        digestContent(JSON.stringify({ root: this.root, device: String(observed.dev), inode: String(observed.ino) })) !== this.rootDigest) {
+      throw new WorkflowError('scope-exceeded', 'The workspace root identity changed before native admission.');
+    }
+    return { root: this.root, dev: observed.dev, ino: observed.ino,
+      ...(withLease && this.windowsLease !== undefined ? { lease: this.windowsLease } : {}) };
   }
 
   private async writeRoot(): Promise<void> {
@@ -356,12 +352,20 @@ export class LocalWorkspace {
     }
   }
 
-  private async compare(plan: FilePlan, recovery: boolean): Promise<void> {
+  private async compare(plan: FilePlan, recovery: boolean, transactionId?: string): Promise<void> {
     for (const guard of plan.guards) {
       const actual = (await this.read(guard.path))?.digest ?? 'absent';
       const mutation = plan.mutations.find((entry) => entry.effect.path === guard.path);
       const proposed = mutation?.effect.kind === 'file-write' ? mutation.effect.proposed : mutation ? 'absent' : null;
       if (actual !== guard.digest && !(recovery && actual === proposed)) {
+        if (process.platform === 'win32' && recovery && transactionId !== undefined && actual === 'absent' &&
+            mutation?.effect.kind === 'file-write' && mutation.effect.expected !== 'absent') {
+          const state = windowsPublication(this.windowsScope(), {
+            relative: mutation.effect.path, transactionId, index: plan.mutations.indexOf(mutation),
+            plan: plan.digest, expected: mutation.effect.expected, proposed: mutation.effect.proposed,
+          }, true);
+          if (state === 'preimage-retained') continue;
+        }
         throw new WorkflowError('stale-revision', 'A reviewed input or output changed; preserve edits and preview again.');
       }
     }
@@ -381,28 +385,17 @@ export class LocalWorkspace {
     try { await directory.sync(); } finally { await directory.close(); }
   }
 
-  private async exclusive(relative: ProjectPath, content: string, mode = 0o600, securityFrom?: string): Promise<void> {
+  private async exclusive(relative: ProjectPath, content: string, mode = 0o600, securityFrom?: string): Promise<WindowsFileReference | undefined> {
     if (process.platform === 'win32') {
       await this.writeRoot();
       const target = await this.target(relative, true, true);
       try { await lstat(target); throw new WorkflowError('conflict', 'Exclusive private creation found an existing path.'); }
       catch (error) { if (!missing(error)) throw error; }
       try {
-        windowsPrivateEntries([{ path: target, directory: false, writable: true, create: true, ordinaryFile: true,
-          ...(securityFrom === undefined ? {} : { copySecurityFrom: securityFrom }) }], this.windowsLease);
-        const identity = await lstat(target, { bigint: true });
-        const handle = await open(target, constants.O_WRONLY | constants.O_NOFOLLOW);
-        try {
-          const actual = await handle.stat({ bigint: true });
-          if (actual.dev !== identity.dev || actual.ino !== identity.ino) throw new Error('Private file identity changed');
-          await handle.writeFile(content, 'utf8');
-          await handle.sync();
-        } finally { await handle.close(); }
-        await this.syncDirectory(target);
+        return writeWindowsPrivateFile(this.windowsScope(), target, content, securityFrom);
       } catch (error) {
         throw new WorkflowError('effect-outcome-unknown', `The private file write or flush was not confirmed; preserve the existing record for reconciliation. ${windowsIoDetail(error)}`);
       }
-      return;
     }
     if (!['darwin', 'linux'].includes(process.platform)) throw new WorkflowError('capability-unavailable', 'Private local effects are unavailable on this platform.');
     const target = await this.target(relative, true);
@@ -437,11 +430,8 @@ export class LocalWorkspace {
   async withRuntimeLock<T>(operation: () => Promise<T>): Promise<T> {
     const lock = parseProjectPath('.missionspec/transaction.lock');
     const content = JSON.stringify({ kind: 'runtime', pid: process.pid });
-    await this.exclusive(lock, content);
-    let identity;
-    try { identity = process.platform === 'win32' ? await lstat(path.join(this.root, lock), { bigint: true }) : undefined; }
-    catch { throw new WorkflowError('effect-outcome-unknown', 'The written runtime lock identity could not be confirmed.'); }
-    if (identity !== undefined) this.windowsLease = { path: path.join(this.root, lock), dev: identity.dev, ino: identity.ino, digest: digestContent(content) };
+    const identity = await this.exclusive(lock, content);
+    if (identity !== undefined) this.windowsLease = { path: path.join(this.root, lock), dev: BigInt(identity.device), ino: BigInt(identity.inode), digest: identity.digest };
     try {
       if ((await this.pending()).length > 0) throw new WorkflowError('conflict', 'Pending file recovery blocks runtime effects.');
       return await operation();
@@ -449,13 +439,7 @@ export class LocalWorkspace {
       this.windowsLease = undefined;
       if (identity !== undefined) {
         try {
-          const target = await this.target(lock);
-          const current = lstatSync(target, { bigint: true });
-          if (current.dev !== identity.dev || current.ino !== identity.ino ||
-              current.mtimeNs !== identity.mtimeNs || current.ctimeNs !== identity.ctimeNs ||
-              readFileSync(target, 'utf8') !== content) throw new Error('Runtime writer lock changed');
-          unlinkSync(target);
-          await this.syncDirectory(target);
+          removeWindowsPrivateFile(this.windowsScope(false), path.join(this.root, lock), digestContent(content), identity);
         } catch {
           throw new WorkflowError('effect-outcome-unknown', 'Runtime writer-lock release was not confirmed; preserve the lock for explicit reconciliation.');
         }
@@ -510,27 +494,26 @@ export class LocalWorkspace {
     if (process.platform === 'win32') {
       for (const mutation of plan.mutations) {
         await this.target(mutation.effect.path, false, true);
-        if (mutation.effect.kind === 'file-write') validateWindowsStatePath(path.join(this.root, `${mutation.effect.path}.msn-00000000-0000-0000-0000-000000000000`));
+        if (mutation.effect.kind === 'file-write') validateWindowsStatePath(path.join(this.root, `${mutation.effect.path}.msn-00000000-0000-0000-0000-000000000000.before`));
       }
     }
     await this.checkScope(plan);
     const issued = await requireApproval(this.authority, approval, plan.request, this.now());
     const pending = await this.pending();
     if (pending.some((id) => id !== recoveryId)) throw new WorkflowError('conflict', 'An unfinished file transaction requires explicit recovery first.');
-    await this.compare(plan, recoveryId !== undefined);
+    await this.compare(plan, recoveryId !== undefined, recoveryId);
     const id = recoveryId ?? randomUUID();
     const lock = parseProjectPath('.missionspec/transaction.lock');
     let locked = false;
     let prepared = false;
-    let lockIdentity: { dev: bigint; ino: bigint; mtimeNs: bigint; ctimeNs: bigint } | undefined;
+    let lockIdentity: WindowsFileReference | undefined;
     try {
       if (process.platform === 'win32' && recoveryId !== undefined) await this.reclaimWindowsTransactionLock(lock, id);
-      await this.exclusive(lock, JSON.stringify({ transactionId: id, pid: process.pid }));
+      lockIdentity = await this.exclusive(lock, JSON.stringify({ transactionId: id, pid: process.pid }));
       locked = true;
-      if (process.platform === 'win32') lockIdentity = await lstat(path.join(this.root, lock), { bigint: true });
       if (lockIdentity !== undefined) this.windowsLease = {
-        path: path.join(this.root, lock), dev: lockIdentity.dev, ino: lockIdentity.ino,
-        digest: digestContent(JSON.stringify({ transactionId: id, pid: process.pid })),
+        path: path.join(this.root, lock), dev: BigInt(lockIdentity.device), ino: BigInt(lockIdentity.inode),
+        digest: lockIdentity.digest,
       };
       if ((await this.pending()).some((pending) => pending !== recoveryId)) {
         throw new WorkflowError('conflict', 'A pending transaction was observed after acquiring the local writer lock.');
@@ -540,19 +523,50 @@ export class LocalWorkspace {
         await this.exclusive(parseProjectPath(`.missionspec/transactions/${id}.json`), JSON.stringify({ schemaVersion: 1, plan, approval: issued }));
       } else if (process.platform === 'win32') {
         prepared = true;
-        const journal = await this.target(parseProjectPath(`.missionspec/transactions/${id}.json`), false, true);
-        const handle = await open(journal, constants.O_RDWR | constants.O_NOFOLLOW);
-        try { await handle.sync(); } finally { await handle.close(); }
-        await this.syncDirectory(journal);
+        const relative = parseProjectPath(`.missionspec/transactions/${id}.json`);
+        const journal = await this.read(relative);
+        if (journal === null) throw new WorkflowError('effect-outcome-unknown', 'The retained journal disappeared.');
+        syncWindowsPrivateFile(this.windowsScope(), path.join(this.root, relative), journal.digest);
       }
       prepared = true;
       await this.checkScope(plan);
-      await this.compare(plan, recoveryId !== undefined);
+      await this.compare(plan, recoveryId !== undefined, recoveryId);
       for (const mutation of plan.mutations) {
         await requireApproval(this.authority, approval, plan.request, this.now());
-        await this.compare(plan, true);
+        await this.compare(plan, true, id);
         const actual = (await this.read(mutation.effect.path))?.digest ?? 'absent';
         const proposed = mutation.effect.kind === 'file-write' ? mutation.effect.proposed : 'absent';
+        if (process.platform === 'win32' && mutation.effect.kind === 'file-write' && 'content' in mutation) {
+          const publication = {
+            relative: mutation.effect.path, transactionId: id, index: plan.mutations.indexOf(mutation),
+            plan: plan.digest, expected: mutation.effect.expected, proposed: mutation.effect.proposed,
+          };
+          const state = windowsPublication(this.windowsScope(), publication, true);
+          if (state === 'absent' && recoveryId !== undefined && actual === proposed) {
+            await this.syncDirectory(path.join(this.root, mutation.effect.path));
+            continue;
+          }
+          let stageIdentity: { dev: bigint; ino: bigint } | undefined;
+          if (state === 'absent') {
+            if (actual !== mutation.effect.expected) throw new WorkflowError('stale-revision', 'An output changed before publication.');
+            const target = await this.target(mutation.effect.path, true, true);
+            const stage = parseProjectPath(`${mutation.effect.path}.msn-${id}`);
+            let observed;
+            try { observed = lstatSync(path.join(this.root, stage), { bigint: true }); } catch (error) { if (!missing(error)) throw error; }
+            const retained = recoveryId === undefined ? null : await this.read(stage);
+            if (retained !== null) {
+              if (observed === undefined || retained.digest !== mutation.effect.proposed) throw new WorkflowError('stale-revision', 'The retained stage changed; it is preserved.');
+              stageIdentity = { dev: observed.dev, ino: observed.ino };
+            } else {
+              if (observed !== undefined) throw new WorkflowError('conflict', 'An unadmitted stage already exists; it is preserved.');
+              const created = await this.exclusive(stage, mutation.content, 0o600, actual === 'absent' ? undefined : target);
+              if (created === undefined) throw new WorkflowError('effect-outcome-unknown', 'Native stage creation did not return an identity.');
+              stageIdentity = { dev: BigInt(created.device), ino: BigInt(created.inode) };
+            }
+          }
+          windowsPublication(this.windowsScope(), { ...publication, ...(stageIdentity === undefined ? {} : { stageIdentity }) });
+          continue;
+        }
         if (recoveryId !== undefined && actual === proposed) {
           if (process.platform === 'win32') await this.syncDirectory(path.join(this.root, mutation.effect.path));
           continue;
@@ -565,97 +579,20 @@ export class LocalWorkspace {
         }
         if (mutation.effect.kind === 'file-remove') {
           if (process.platform === 'win32') {
-            const removalGuard = lstatSync(target, { bigint: true });
-            windowsPrivateEntries([{ path: target, directory: false, writable: true, ordinaryFile: true }]);
-            if (((await this.read(mutation.effect.path))?.digest ?? 'absent') !== mutation.effect.expected) {
-              throw new WorkflowError('stale-revision', 'An output changed before removal.');
-            }
-            const current = lstatSync(target, { bigint: true });
-            if (current.dev !== removalGuard.dev || current.ino !== removalGuard.ino ||
-                current.mtimeNs !== removalGuard.mtimeNs || current.ctimeNs !== removalGuard.ctimeNs) {
-              throw new WorkflowError('stale-revision', 'An output or its metadata changed before removal.');
-            }
-            unlinkSync(target);
+            removeWindowsPrivateFile(this.windowsScope(), target, mutation.effect.expected);
           } else await unlink(target);
         }
         else if ('content' in mutation) {
           const stage = parseProjectPath(`${mutation.effect.path}.msn-${id}`);
-          const stagePath = path.join(this.root, stage);
-          let stageIdentity: BigIntStats | undefined;
-          if (process.platform === 'win32' && recoveryId !== undefined) {
-            try { stageIdentity = lstatSync(stagePath, { bigint: true }); } catch (error) { if (!missing(error)) throw error; }
-          }
-          const stageFile = process.platform === 'win32' && recoveryId !== undefined ? await this.read(stage) : null;
-          if (process.platform === 'win32' && recoveryId !== undefined &&
-              ((stageIdentity === undefined) !== (stageFile === null))) {
-            throw new WorkflowError('stale-revision', 'The retained stage appeared or disappeared while being admitted; it is preserved for reconciliation.');
-          }
-          if (stageIdentity !== undefined && !sameWindowsStage(stageIdentity, lstatSync(stagePath, { bigint: true }))) {
-            throw new WorkflowError('stale-revision', 'The retained stage identity or metadata changed while being read; it is preserved for reconciliation.');
-          }
-          if (stageFile === null) {
-            await this.exclusive(stage, mutation.content, process.platform === 'win32' || existing === null ? 0o600 : existing.mode & 0o777,
-              process.platform === 'win32' && existing !== null ? target : undefined);
-            if (process.platform === 'win32') stageIdentity = lstatSync(stagePath, { bigint: true });
-          } else if (stageFile.digest !== mutation.effect.proposed) {
-            throw new WorkflowError('stale-revision', 'The retained stage differs from the reviewed bytes; no stage edit is overwritten.');
-          }
+          await this.exclusive(stage, mutation.content, existing === null ? 0o600 : existing.mode & 0o777);
           try {
-            if (process.platform === 'win32') {
-              const securityGuard = existing === null ? null : lstatSync(target, { bigint: true });
-              windowsPrivateEntries([{ path: path.join(this.root, stage), directory: false, writable: true, ordinaryFile: true,
-                ...(existing === null ? {} : { sameSecurityAs: target }) }]);
-              if (securityGuard !== null) {
-                const current = lstatSync(target, { bigint: true });
-                if (current.dev !== securityGuard.dev || current.ino !== securityGuard.ino ||
-                    current.mtimeNs !== securityGuard.mtimeNs || current.ctimeNs !== securityGuard.ctimeNs) {
-                  throw new WorkflowError('stale-revision', 'Source data or security changed during the final permission check.');
-                }
-              }
-              if (stageFile !== null) {
-                const handle = await open(path.join(this.root, stage), constants.O_RDWR | constants.O_NOFOLLOW);
-                try { await handle.sync(); } finally { await handle.close(); }
-                await this.syncDirectory(path.join(this.root, stage));
-              }
-            }
             if (((await this.read(mutation.effect.path))?.digest ?? 'absent') !== mutation.effect.expected) {
               throw new WorkflowError('stale-revision', 'An output changed before replacement.');
             }
-            if (process.platform === 'win32') {
-              const currentStage = lstatSync(stagePath, { bigint: true });
-              if (stageIdentity === undefined || !sameWindowsStage(stageIdentity, currentStage) ||
-                  digestContent(readFileSync(stagePath)) !== mutation.effect.proposed ||
-                  !sameWindowsStage(currentStage, lstatSync(stagePath, { bigint: true }))) {
-                throw new WorkflowError('stale-revision', 'The admitted stage changed; neither it nor a replacement stage is removed.');
-              }
-              if (mutation.effect.expected === 'absent') {
-                linkSync(stagePath, target);
-                const linked = lstatSync(stagePath, { bigint: true });
-                const published = lstatSync(target, { bigint: true });
-                if (!linked.isFile() || linked.isSymbolicLink() || linked.nlink !== 2n ||
-                    !published.isFile() || published.isSymbolicLink() || published.nlink !== 2n ||
-                    linked.dev !== stageIdentity.dev || linked.ino !== stageIdentity.ino ||
-                    published.dev !== stageIdentity.dev || published.ino !== stageIdentity.ino ||
-                    digestContent(readFileSync(stagePath)) !== mutation.effect.proposed) {
-                  throw new WorkflowError('stale-revision', 'The published stage pair changed; both paths are preserved for reconciliation.');
-                }
-                const checked = lstatSync(stagePath, { bigint: true });
-                const checkedTarget = lstatSync(target, { bigint: true });
-                if (checked.dev !== linked.dev || checked.ino !== linked.ino || checked.nlink !== 2n ||
-                    checked.size !== linked.size || checked.mtimeNs !== linked.mtimeNs || checked.ctimeNs !== linked.ctimeNs ||
-                    checkedTarget.dev !== linked.dev || checkedTarget.ino !== linked.ino || checkedTarget.nlink !== 2n ||
-                    checkedTarget.size !== linked.size || checkedTarget.mtimeNs !== linked.mtimeNs ||
-                    checkedTarget.ctimeNs !== linked.ctimeNs) {
-                  throw new WorkflowError('stale-revision', 'The linked stage changed during cleanup verification; no pathname is removed.');
-                }
-                unlinkSync(stagePath);
-              } else renameSync(stagePath, target);
-            } else if (mutation.effect.expected === 'absent') await link(await this.target(stage), target);
+            if (mutation.effect.expected === 'absent') await link(await this.target(stage), target);
             else await rename(await this.target(stage), target);
           } finally {
-            if (process.platform !== 'win32') {
-              try { await unlink(stagePath); } catch (error) { if (!missing(error)) throw error; }
-            }
+            try { await unlink(path.join(this.root, stage)); } catch (error) { if (!missing(error)) throw error; }
           }
         }
         await this.syncDirectory(target);
@@ -682,13 +619,9 @@ export class LocalWorkspace {
         this.windowsLease = undefined;
         if (process.platform === 'win32') {
           try {
-            const target = await this.target(lock);
-            const current = await lstat(target, { bigint: true });
-            if (lockIdentity === undefined || current.dev !== lockIdentity.dev || current.ino !== lockIdentity.ino ||
-                current.mtimeNs !== lockIdentity.mtimeNs || current.ctimeNs !== lockIdentity.ctimeNs ||
-                readFileSync(target, 'utf8') !== JSON.stringify({ transactionId: id, pid: process.pid })) throw new Error('Writer lock changed');
-            unlinkSync(target);
-            await this.syncDirectory(target);
+            if (lockIdentity === undefined) throw new Error('Writer lock identity unavailable');
+            removeWindowsPrivateFile(this.windowsScope(false), path.join(this.root, lock),
+              digestContent(JSON.stringify({ transactionId: id, pid: process.pid })), lockIdentity);
           } catch {
             throw new WorkflowError('effect-outcome-unknown', 'Writer-lock release was not confirmed; do not infer transaction completion or steal a replacement lock.');
           }
@@ -699,24 +632,19 @@ export class LocalWorkspace {
 
   private async reclaimWindowsTransactionLock(lock: ProjectPath, id: string): Promise<void> {
     const filename = await this.target(lock, false, true);
-    let identity;
-    try { identity = lstatSync(filename, { bigint: true }); } catch (error) { if (missing(error)) return; throw error; }
     const original = await this.read(lock);
-    if (original === null) throw new WorkflowError('conflict', 'Writer lock changed during recovery.');
+    if (original === null) return;
     const owner = record(JSON.parse(original.content) as unknown, 'transaction.lock', ['transactionId', 'pid']);
     if (owner.transactionId !== id || typeof owner.pid !== 'number' || !Number.isSafeInteger(owner.pid)) {
       throw new WorkflowError('conflict', 'Only this transaction can reclaim its own demonstrably dead writer lock.');
     }
-    try { requireWindowsProcessAbsent(owner.pid); } catch {
+    try {
+      const reference = inspectWindowsPrivateFile(this.windowsScope(false), filename);
+      if (reference.digest !== original.digest) throw new Error('Writer lock changed');
+      removeWindowsPrivateFile(this.windowsScope(false), filename, original.digest, reference, owner.pid);
+    } catch {
       throw new WorkflowError('conflict', 'The recorded writer may still exist; its lock is preserved.');
     }
-    const current = lstatSync(filename, { bigint: true });
-    if (identity.dev !== current.dev || identity.ino !== current.ino || identity.mtimeNs !== current.mtimeNs ||
-        identity.ctimeNs !== current.ctimeNs || readFileSync(filename, 'utf8') !== original.content) {
-      throw new WorkflowError('conflict', 'Writer lock changed before recovery; no unrelated lock is removed.');
-    }
-    unlinkSync(filename);
-    await this.syncDirectory(filename);
   }
 
   async recoveryPlan(id: string): Promise<FilePlan> {
@@ -727,7 +655,7 @@ export class LocalWorkspace {
     if (data.schemaVersion !== 1) throw new ContractError('journal', 'unsupported journal version');
     const plan = parseFilePlan(data.plan);
     await this.checkScope(plan);
-    await this.compare(plan, true);
+    await this.compare(plan, true, id);
     return plan;
   }
 
