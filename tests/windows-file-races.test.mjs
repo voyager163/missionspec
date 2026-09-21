@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -148,6 +148,20 @@ function publicationFixture(t, present = true) {
   };
   return { ...f, scope, target, stage, publication, operation };
 }
+
+test('held same-directory rename preserves identity before the replacement protocol', windows, (t) => {
+  const f = publicationFixture(t, false);
+  const before = lstatSync(f.stage, { bigint: true });
+  assert.equal(existsSync(f.target), false);
+  assert.equal(windowsPublication(f.scope, f.publication), 'published');
+  const after = lstatSync(f.target, { bigint: true });
+  assert.equal(after.dev, before.dev);
+  assert.equal(after.ino, before.ino);
+  assert.equal(after.nlink, 1n);
+  assert.equal(readFileSync(f.target, 'utf8'), 'reviewed replacement');
+  assert.equal(existsSync(f.stage), false);
+  assert.equal(existsSync(f.operation.backup), false);
+});
 
 test('held publication blocks stale stage/destination writes and never overwrites a gap winner', windows, async (t) => {
   const f = publicationFixture(t);

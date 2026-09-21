@@ -36,8 +36,9 @@ APIs, not a native addon, external executable shim or a second workflow engine.
 - Handles request real directory/file data access, not just metadata access,
   with sharing that excludes directory/leaf deletion and unwanted writers.
 - Child opens/creation use `NtCreateFile` **relative to a held parent handle**.
-  Renames use `SetFileInformationByHandle(FileRenameInfo)` with the held
-  destination directory and **replacement disabled**.
+  Renames use `NtSetInformationFile(FileRenameInformation)` on the held source,
+  with **replacement disabled**. Only a simple leaf name in that source's same
+  pinned parent is accepted; no full-path rename fallback exists.
 - Owner, group, DACL and supported access policy are obtained from the **actual
   handle** using `GetSecurityInfo`. Data hashes and stream/attribute checks
   likewise use that handle.
@@ -91,6 +92,39 @@ A missing/unrecognized intent, changed preimage, foreign target, unexpected stag
 occupant, partial sidecar or changed root blocks recovery and preserves bytes.
 It never treats arbitrary user deletion as permission to replace a file.
 
+### Same-directory rename ABI and sharing
+
+The actual `cb9c0b2` run exposed the first preimage rename failure. The prior
+Win32 `FileRenameInfo` call supplied our write-denying parent pin as
+`RootDirectory`. The native
+[`FILE_RENAME_INFORMATION` contract](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information)
+distinguishes that case: a non-null root invokes `IopOpenLinkOrRenameTarget`,
+whose relative directory open requests `FILE_WRITE_DATA | SYNCHRONIZE`.
+That conflicts with the existing pin's sharing. For a same-directory rename,
+the documented form is instead a **simple leaf name and null `RootDirectory`**.
+
+All publication/preimage moves are already within one parent. The adapter
+checks that the source's recorded parent is the exact held parent object, keeps
+that parent and all ancestors pinned, and uses the source-relative form of
+[`NtSetInformationFile`](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntsetinformationfile),
+native information class **10**, not Win32 class **3**. Source handles retain
+`DELETE` access; source/target data-sharing restrictions and directory pins are
+unchanged. `ReplaceIfExists` remains false. The operation cannot use a caller's
+working directory, a different parent, a full path, or an ADS name.
+
+The native structure layout is explicit:
+
+| Pointer size | Root handle offset | Name-length offset | Name offset | Aligned structure size |
+| --- | --- | --- | --- | --- |
+| 4 bytes | 4 | 8 | 12 | 16 |
+| 8 bytes | 8 | 16 | 20 | 24 |
+
+The zeroed buffer includes the aligned structure size plus the UTF-16 name bytes,
+including spare terminator/padding space; `FileNameLength` excludes that padding.
+A correctly sized `IO_STATUS_BLOCK` is supplied. Nonzero returned NTSTATUS is
+reported numerically with `phase=effect-rename`; no cached Win32 last-error value
+or unsafe pathname fallback is used.
+
 This is not a single atomic exchange: observers can see the destination absent
 between steps 3 and 4. The recovery protocol, rather than a false atomicity claim,
 handles that state. Absent-target publication needs no retained preimage and uses
@@ -121,6 +155,17 @@ Run the focused held-handle regression first on actual Windows:
 npm run build
 node --test --test-concurrency=1 tests/windows-file-races.test.mjs
 ```
+
+The focused rename case runs without retained-preimage/recovery complexity:
+
+```sh
+node --test --test-concurrency=1 --test-name-pattern="^held same-directory rename" tests/windows-file-races.test.mjs
+```
+
+It verifies that held-source rename preserves file identity and bytes, consumes
+only the admitted stage name and creates no backup for an absent target. The
+full publication cases continue to require no-replace rejection of a real
+destination winner and recovery of the exact retained preimage.
 
 For a quick check of the source-security-copy path specifically:
 

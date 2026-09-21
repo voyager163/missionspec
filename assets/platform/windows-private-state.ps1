@@ -46,6 +46,7 @@ try {
   Native 'GetSecurityDescriptorGroup' 'advapi32.dll' ([bool]) @([IntPtr], [IntPtr].MakeByRefType(), [bool].MakeByRefType())
   Native 'GetSecurityDescriptorDacl' 'advapi32.dll' ([bool]) @([IntPtr], [bool].MakeByRefType(), [IntPtr].MakeByRefType(), [bool].MakeByRefType())
   Native 'NtCreateFile' 'ntdll.dll' ([int]) @([IntPtr].MakeByRefType(), [uint32], [IntPtr], [IntPtr], [IntPtr], [uint32], [uint32], [uint32], [uint32], [IntPtr], [uint32])
+  Native 'NtSetInformationFile' 'ntdll.dll' ([int]) @([IntPtr], [IntPtr], [IntPtr], [uint32], [int])
   Native 'FlushFileBuffers' 'kernel32.dll' ([bool]) @([IntPtr])
   Native 'K32EnumProcesses' 'kernel32.dll' ([bool]) @([IntPtr], [uint32], [uint32].MakeByRefType())
   Native 'CloseHandle' 'kernel32.dll' ([bool]) @([IntPtr])

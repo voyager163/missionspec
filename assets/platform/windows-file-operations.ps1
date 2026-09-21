@@ -124,7 +124,9 @@ function Effect-OpenRelative($context, $parent, [string]$name, [bool]$directory,
       $script:nativeStatus = $status
       throw 'effect-open'
     }
-    return Remember-EffectHandle $context $handle $p $directory
+    $item = Remember-EffectHandle $context $handle $p $directory
+    $item['parent'] = $parent
+    return $item
   } finally {
     [void]$native::LocalFree($descriptor)
     [Runtime.InteropServices.Marshal]::FreeHGlobal($text)
@@ -265,17 +267,31 @@ function Effect-CreateFile($context, [string]$p, [string]$content, $template = $
 }
 
 function Effect-Rename($item, $parent, [string]$name) {
+  $script:phase = 'effect-rename'
+  if ($item.closed -or $parent.closed -or $item.directory -or !$parent.directory -or
+      $null -eq $item.parent -or $item.parent.handle -ne $parent.handle -or
+      [IO.Path]::GetDirectoryName([string]$item.path) -cne [string]$parent.path -or
+      $name.Length -eq 0 -or $name -match '[\\/:]' -or $name -in @('.', '..')) { throw 'effect-path' }
   $bytes = [Text.Encoding]::Unicode.GetBytes($name)
   $nameOffset = 2 * [IntPtr]::Size + 4
-  $buffer = [Runtime.InteropServices.Marshal]::AllocHGlobal($nameOffset + $bytes.Length)
+  $structureSize = [int]([Math]::Ceiling(($nameOffset + 2) / [double][IntPtr]::Size) * [IntPtr]::Size)
+  $bufferSize = $structureSize + $bytes.Length
+  $buffer = [Runtime.InteropServices.Marshal]::AllocHGlobal($bufferSize)
+  $statusBlock = [Runtime.InteropServices.Marshal]::AllocHGlobal(2 * [IntPtr]::Size)
   try {
-    for ($index = 0; $index -lt $nameOffset; $index++) { [Runtime.InteropServices.Marshal]::WriteByte($buffer, $index, 0) }
-    [Runtime.InteropServices.Marshal]::WriteIntPtr($buffer, [IntPtr]::Size, $parent.handle)
+    for ($index = 0; $index -lt $bufferSize; $index++) { [Runtime.InteropServices.Marshal]::WriteByte($buffer, $index, 0) }
+    # Native same-directory rename is relative to the held source object.
+    # RootDirectory stays NULL; ReplaceIfExists stays FALSE. A supplied root
+    # invokes IopOpenLinkOrRenameTarget and conflicts with our write-denying pin.
     [Runtime.InteropServices.Marshal]::WriteInt32($buffer, 2 * [IntPtr]::Size, $bytes.Length)
     [Runtime.InteropServices.Marshal]::Copy($bytes, 0, [IntPtr]::Add($buffer, $nameOffset), $bytes.Length)
-    if (!$native::SetFileInformationByHandle($item.handle, 3, $buffer, $nameOffset + $bytes.Length)) { throw 'effect-rename' }
+    $status = $native::NtSetInformationFile($item.handle, $statusBlock, $buffer, $bufferSize, 10)
+    if ($status -ne 0) { $script:nativeStatus = $status; throw 'effect-rename' }
     $item.path = [IO.Path]::Combine($parent.path, $name)
-  } finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($buffer) }
+  } finally {
+    [Runtime.InteropServices.Marshal]::FreeHGlobal($statusBlock)
+    [Runtime.InteropServices.Marshal]::FreeHGlobal($buffer)
+  }
 }
 
 function Effect-Delete($item, $parent) {
