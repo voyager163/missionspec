@@ -5,6 +5,7 @@ import path from 'node:path';
 import { parseWorkspaceBinding, type WorkspaceBinding } from '../../kernel/revisions.js';
 import { ContractError, integer, oneOf, record, text } from '../../kernel/validation.js';
 import { StoreFailure } from './failures.js';
+import { requireWindowsPrivateState, validateWindowsStatePath, windowsPrivateEntries } from '../platform/windows-private-state.js';
 
 export interface RuntimeStoreOptions {
   readonly directory: string;
@@ -25,10 +26,11 @@ export function parseOptions(value: unknown): Required<RuntimeStoreOptions> {
   const input = record(value, 'runtimeStore', ['directory', 'expectedWorkspace', 'mode', 'busyTimeoutMs']);
   const directory = text(input.directory, 'runtimeStore.directory', 4096);
   if (!path.isAbsolute(directory) || directory === path.parse(directory).root ||
-      path.normalize(directory) !== directory || directory.includes('\0') || directory.includes('\\') ||
+      path.normalize(directory) !== directory || directory.includes('\0') || (process.platform !== 'win32' && directory.includes('\\')) ||
       directory.split(path.sep).some((part) => part === '.' || part === '..')) {
     throw new ContractError('runtimeStore.directory', 'expected a normalized absolute private directory path');
   }
+  if (process.platform === 'win32') validateWindowsStatePath(directory);
   if (path.basename(directory) !== 'state' || path.basename(path.dirname(directory)) !== '.missionspec') {
     throw new StoreFailure('incompatible', 'Only .missionspec/state/ledger.sqlite is supported; prototype paths are not migrated.');
   }
@@ -109,6 +111,7 @@ function rejectPrototypeFiles(directory: string): void {
 }
 
 export function requireSupportedPlatform(): void {
+  if (process.platform === 'win32') { requireWindowsPrivateState(); return; }
   if ((process.platform !== 'darwin' && process.platform !== 'linux') || process.getuid === undefined) {
     throw new StoreFailure('unavailable',
       'Owner-only filesystem permissions require local POSIX semantics; Windows ACL handling is not qualified.');
@@ -117,6 +120,28 @@ export function requireSupportedPlatform(): void {
 
 export function prepareFiles(options: Required<RuntimeStoreOptions>): StoreFiles {
   requireSupportedPlatform();
+  if (process.platform === 'win32') {
+    const writable = options.mode !== 'read-only';
+    rejectPrototypeDirectory(options.directory);
+    rejectPrototypeFiles(options.directory);
+    windowsPrivateEntries([{ path: path.dirname(options.directory), directory: true, writable }]);
+    if (options.mode === 'create' && exists(options.directory) === undefined) {
+      windowsPrivateEntries([{ path: options.directory, directory: true, writable: true, create: true }]);
+    }
+    const directoryIdentity = lstatSync(options.directory);
+    windowsPrivateEntries([{ path: options.directory, directory: true, writable }]);
+    const filename = path.join(options.directory, 'ledger.sqlite');
+    checkSidecars(filename);
+    if (options.mode === 'create') {
+      if (exists(filename) !== undefined) throw new StoreFailure('conflict', 'Exclusive runtime store creation found an existing path.');
+      windowsPrivateEntries([{ path: filename, directory: false, writable: true, create: true }]);
+    }
+    const identity = lstatSync(filename);
+    windowsPrivateEntries([{ path: filename, directory: false, writable }]);
+    const files = { directory: options.directory, filename, directoryIdentity, identity, writable };
+    if (options.mode !== 'create') checkFiles(files);
+    return files;
+  }
   checkAncestors(path.dirname(path.dirname(options.directory)));
   rejectPrototypeDirectory(options.directory);
   checkAncestors(path.dirname(options.directory));
@@ -144,11 +169,19 @@ export function prepareFiles(options: Required<RuntimeStoreOptions>): StoreFiles
 }
 
 export function checkFiles(files: StoreFiles): void {
-  checkAncestors(path.dirname(files.directory));
+  if (process.platform === 'win32') {
+    windowsPrivateEntries([
+      { path: path.dirname(files.directory), directory: true, writable: files.writable },
+      { path: files.directory, directory: true, writable: files.writable },
+      { path: files.filename, directory: false, writable: files.writable },
+    ]);
+  } else checkAncestors(path.dirname(files.directory));
   const directory = lstatSync(files.directory);
   const file = lstatSync(files.filename);
-  checkPrivate(directory, true, files.writable);
-  checkPrivate(file, false, files.writable);
+  if (process.platform !== 'win32') {
+    checkPrivate(directory, true, files.writable);
+    checkPrivate(file, false, files.writable);
+  }
   if (!sameFile(directory, files.directoryIdentity) || !sameFile(file, files.identity)) {
     throw new StoreFailure('unavailable', 'Runtime store path identity changed; reopen explicitly after review.');
   }

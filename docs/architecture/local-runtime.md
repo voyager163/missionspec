@@ -359,8 +359,11 @@ not success or destructive cleanup.
 
 Same-UID adversarial confinement is **not provided**. Portable Node filesystem
 APIs do not supply race-proof directory-relative compare-and-swap. Keep the
-workspace private and trust its local composition. Windows mutations remain
-unavailable pending ACL qualification. This phase's new file/controller tests
+workspace private and trust its local composition. Windows file transactions,
+immutable runtime records and authority issuance remain unavailable pending
+directory-durability qualification; the separate
+[SID/ACL storage candidate](windows-state.md) does not enable those effects.
+This phase's new file/controller tests
 were run locally on macOS; prior Linux SQLite qualification is not new native-host
 or file-transaction qualification. Network filesystems are not qualified.
 
@@ -564,7 +567,7 @@ rejected/cancelled/incomplete. Known change files are copied exactly; unrelated
 files/edits remain in place, and nonempty archive destinations block.
 
 External capability gates: exact native-host permission/limit/cancellation/fencing
-qualification, Windows private-state ACL qualification, and mandatory adversarial
+qualification, Windows storage/namespace/console qualification, and mandatory adversarial
 check confinement. No model or live paid host calls were made. Unknown local
 process outcomes cannot be auto-cleared without inspection evidence that the
 portable process adapter cannot supply.

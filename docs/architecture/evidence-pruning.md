@@ -190,7 +190,10 @@ pruning/runtime-store/lessons/local-workflow run passed all 86 tests.
 
 Authority responses used in tests are explicitly test-only; they do not qualify
 a genuine human channel. Production uses the existing actual local authority.
-Windows remains unavailable pending ACL qualification. The previously documented
+Windows raw removal and lock recovery remain unavailable: ACL-checked SQLite
+storage alone does not qualify directory-entry durability or process-death
+inspection. See the separate [Windows capability boundary](windows-state.md).
+The previously documented
 SQLite/local-filesystem qualification limits still apply. No age-based or
 unreviewed pruning, paid semantic evaluation, native-host authority, or
 tamper-proof history is claimed.

@@ -1,12 +1,13 @@
 import { constants } from 'node:fs';
-import { open } from 'node:fs/promises';
-import { isAbsolute } from 'node:path';
+import { lstat, open } from 'node:fs/promises';
+import { dirname, isAbsolute } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { parsePreference } from '../../observability/policy.js';
 import type {
   PreferenceFailureReason, PreferenceRead, PreferenceStorageFailure, PreferenceWrite,
   TelemetryPreference, TelemetryPreferenceStore,
 } from '../../observability/policy.js';
+import { windowsPrivateEntries } from '../platform/windows-private-state.js';
 
 export const MAX_PREFERENCE_STORE_BYTES = 65_536;
 export const PREFERENCE_BUSY_TIMEOUT_MS = 250;
@@ -99,13 +100,30 @@ export function createUserTelemetryPreferenceStore(
     let cleanup: PreferenceStorageFailure['cleanup'] = 'complete';
     let persistence: PreferenceStorageFailure['persistence'] = 'unchanged';
     try {
+      if (process.platform === 'win32') {
+        windowsPrivateEntries([{ path: dirname(path), directory: true, writable: patch !== undefined }]);
+        for (const suffix of ['-journal', '-wal', '-shm']) {
+          try {
+            await lstat(`${path}${suffix}`);
+            return failure('busy');
+          } catch (error) { if (errorCode(error) !== 'ENOENT') throw error; }
+        }
+        try {
+          await lstat(path);
+          windowsPrivateEntries([{ path, directory: false, writable: patch !== undefined }]);
+        } catch (error) { if (errorCode(error) !== 'ENOENT') throw error; }
+      }
       try {
         file = await openFile(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
       } catch (error) {
         if (errorCode(error) !== 'ENOENT') throw error;
         if (patch === undefined) return { state: 'ready', value: Object.freeze({}) };
         try {
-          file = await openFile(path, constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+          if (process.platform === 'win32') {
+            windowsPrivateEntries([{ path, directory: false, writable: true, create: true }]);
+            created = true;
+            file = await openFile(path, constants.O_RDWR | constants.O_NOFOLLOW);
+          } else file = await openFile(path, constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
           created = true;
         } catch (creationError) {
           if (errorCode(creationError) !== 'EEXIST') throw creationError;
@@ -114,6 +132,11 @@ export function createUserTelemetryPreferenceStore(
       }
       const info = await file.stat();
       reason = 'unrecognized-store';
+      if (process.platform === 'win32') {
+        windowsPrivateEntries([{ path, directory: false, writable: patch !== undefined }]);
+        const current = await lstat(path);
+        if (current.dev !== info.dev || current.ino !== info.ino) throw new TypeError('Preference path changed');
+      }
       if (!info.isFile() || info.nlink !== 1 || info.size > MAX_PREFERENCE_STORE_BYTES ||
         (process.platform !== 'win32' && (info.uid !== process.getuid?.() || (info.mode & 0o022) !== 0))) {
         throw new TypeError('Unsafe preference store');
@@ -130,6 +153,14 @@ export function createUserTelemetryPreferenceStore(
       await file.close();
       file = undefined;
       reason = 'io';
+      if (process.platform === 'win32') {
+        windowsPrivateEntries([
+          { path: dirname(path), directory: true, writable: patch !== undefined },
+          { path, directory: false, writable: patch !== undefined },
+        ]);
+        const current = await lstat(path);
+        if (current.dev !== info.dev || current.ino !== info.ino) throw new TypeError('Preference path changed');
+      }
       database = connect(path, patch === undefined);
       database.exec('PRAGMA trusted_schema = OFF; PRAGMA temp_store = MEMORY; PRAGMA mmap_size = 0');
       if (patch !== undefined) {

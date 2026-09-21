@@ -80,9 +80,12 @@ The Linux tests used the already-local immutable image
 with no network, no image pull, and a read-only container root filesystem.
 The factory accepts the Node 24 line starting at 24.21; qualification is not a
 claim that every future patch or filesystem behaves identically.
-Windows and non-POSIX permission models fail explicitly until ACL handling is
-qualified. A subprocess test exercises the unsupported-Windows branch; it is
-not a Windows platform-readiness claim. Network filesystems and Docker Desktop
+Windows has a narrowly scoped SID/ACL-validated local-NTFS storage candidate;
+see [Windows state and its independent qualification command](windows-state.md).
+It does not enable source writes, directory-durable runtime records, authority,
+or pruning. The existing mocked-platform subprocess test is still not a Windows
+platform-readiness claim. Other non-POSIX models fail explicitly.
+Network filesystems and Docker Desktop
 host bind mounts are not qualified: a bind-mount probe exposed remapped ownership
 and asynchronous active-WAL shared-memory timestamps. The native Linux-volume
 run passed the actual ownership-change rejection and read-only assertions.
@@ -173,7 +176,7 @@ used**, so an active WAL cannot be silently ignored. Recovery must be an explici
 separate reviewed operation, not status. A transient sidecar can conservatively
 make even a readable database unavailable.
 
-The root and file must be owned by the current UID and inaccessible to group or
+On POSIX, the root and file must be owned by the current UID and inaccessible to group or
 others. The database must be a regular single-link file, and the root must be a
 real directory. Required owner read/search permissions (and owner write
 permissions for writable handles) are checked; read-only files can be opened by
@@ -194,6 +197,9 @@ the ownership rules of a safe shared temporary ancestor without accessing a
 system temporary directory. No system temporary directory is accessed or
 modified by these tests.
 
+On Windows the equivalent boundary uses actual owner SIDs, restrictive DACLs,
+local NTFS/Win32 identity and reparse/alias checks, never UID/mode emulation;
+the precise supported and rejected ACL forms are documented in [Windows state](windows-state.md).
 The adapter rechecks device/inode identity and permissions before operations.
 SQLite cannot open an already-verified file descriptor through this Node API;
 these checks are **not** a race-proof defense against a malicious same-UID process

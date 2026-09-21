@@ -28,6 +28,9 @@ function sameIdentity(left: BigIntStats, right: BigIntStats): boolean {
 }
 
 async function scope(files: LocalWorkspace, expected: WorkspaceBinding): Promise<string> {
+  if (process.platform === 'win32') {
+    throw new WorkflowError('capability-unavailable', 'Evidence deletion and dead-writer recovery require qualified directory durability and local process inspection.');
+  }
   requireSupportedPlatform();
   const observed = await observeWorkspaceRoot(files.root);
   const identity = await files.identity();

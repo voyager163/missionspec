@@ -1,12 +1,13 @@
 import { constants } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { open, unlink } from 'node:fs/promises';
+import { lstat, open, unlink } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
-import { isAbsolute } from 'node:path';
+import { dirname, isAbsolute } from 'node:path';
 import { record } from '../../kernel/validation.js';
 import { MAX_EVENT_BYTES } from '../../observability/events.js';
 import { serializeDiagnosticEvent } from './diagnostics.js';
 import type { DiagnosticSink } from './diagnostics.js';
+import { windowsPrivateEntries } from '../platform/windows-private-state.js';
 
 export interface AuthorizedJsonlSink extends DiagnosticSink {
   previewPrune(): Promise<LogPruneInspection>;
@@ -44,10 +45,18 @@ export function parseLogPrunePreview(value: unknown): LogPrunePreview {
   });
 }
 
-async function validateFile(file: FileHandle): Promise<void> {
+async function validateFile(file: FileHandle, path: string): Promise<void> {
   const info = await file.stat();
-  if (process.platform === 'win32' || !info.isFile() || info.nlink !== 1 ||
-    (info.mode & 0o077) !== 0 || info.uid !== process.getuid?.()) {
+  if (process.platform === 'win32') {
+    windowsPrivateEntries([
+      { path: dirname(path), directory: true, writable: true },
+      { path, directory: false, writable: true },
+    ]);
+    const current = await lstat(path);
+    if (info.dev !== current.dev || info.ino !== current.ino) throw new TypeError('Diagnostic path changed');
+  }
+  if (!info.isFile() || info.nlink !== 1 ||
+    (process.platform !== 'win32' && ((info.mode & 0o077) !== 0 || info.uid !== process.getuid?.()))) {
     throw new TypeError('Diagnostic destination is not a private regular file');
   }
 }
@@ -63,7 +72,7 @@ function validateLine(line: string): void {
 }
 
 async function snapshot(file: FileHandle, path: string): Promise<LogPrunePreview> {
-  await validateFile(file);
+  await validateFile(file, path);
   const before = await file.stat({ bigint: true });
   if (before.size > BigInt(MAX_LOG_BYTES)) throw new TypeError('Diagnostic segment exceeds preview bound');
   const hash = createHash('sha256');
@@ -95,10 +104,20 @@ async function snapshot(file: FileHandle, path: string): Promise<LogPrunePreview
 /** The embedding application, not a skill or project setting, authorizes this path. */
 export function createAuthorizedJsonlSink(path: string): AuthorizedJsonlSink {
   function validatePath(): void {
-    if (process.platform === 'win32' || typeof path !== 'string' || !isAbsolute(path) || !path.endsWith('.jsonl') ||
+    if (typeof path !== 'string' || !isAbsolute(path) || !path.endsWith('.jsonl') ||
       path.length > 4096 || /[\u0000-\u001f\u007f]/u.test(path)) {
       throw new TypeError('Invalid diagnostic destination');
     }
+    if (process.platform === 'win32') {
+      windowsPrivateEntries([{ path: dirname(path), directory: true, writable: true }]);
+    }
+  }
+  async function openLock(): Promise<FileHandle> {
+    if (process.platform === 'win32') {
+      windowsPrivateEntries([{ path: `${path}.lock`, directory: false, writable: true, create: true }]);
+      return open(`${path}.lock`, constants.O_WRONLY);
+    }
+    return open(`${path}.lock`, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
   }
   let pending: Promise<void> = Promise.resolve();
   let queued = 0;
@@ -117,7 +136,15 @@ export function createAuthorizedJsonlSink(path: string): AuthorizedJsonlSink {
         try {
           validatePath();
           validateLine(line);
-          lock = await open(`${path}.lock`, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+          lock = await openLock();
+          if (process.platform === 'win32') {
+            let create = false;
+            try { await lstat(path); } catch (error) {
+              if (typeof error !== 'object' || error === null || Reflect.get(error, 'code') !== 'ENOENT') throw error;
+              create = true;
+            }
+            windowsPrivateEntries([{ path, directory: false, writable: true, create }]);
+          }
           file = await open(path, constants.O_RDWR | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
           const current = await snapshot(file, path);
           const bytes = Buffer.from(line);
@@ -174,7 +201,7 @@ export function createAuthorizedJsonlSink(path: string): AuthorizedJsonlSink {
         let result: LogPruneResult = { state: 'unavailable', reason: 'io', effect: 'unchanged' };
         try {
           validatePath();
-          lock = await open(`${path}.lock`, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+          lock = await openLock();
           file = await open(path, constants.O_RDWR | constants.O_NOFOLLOW | constants.O_NONBLOCK);
           const current = await snapshot(file, path);
           if (current.revision !== reviewed.revision || current.bytes !== reviewed.bytes) {

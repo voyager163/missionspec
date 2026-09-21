@@ -12,6 +12,7 @@ import type { FileMutation, FileSnapshot, LocalAuthorityPort } from '../../ports
 import { requireApproval, unavailableAuthority } from '../../application/authority.js';
 import { WorkflowError } from '../../application/errors.js';
 import { parseTaskDefinition, type TaskDefinition } from '../../engines/planning/contracts.js';
+import { windowsPrivateEntries } from '../platform/windows-private-state.js';
 
 export interface FileGuard {
   readonly path: ProjectPath;
@@ -209,9 +210,12 @@ export class LocalWorkspace {
           throw new WorkflowError('scope-exceeded', 'Local paths must not traverse links or special files.');
         }
         if (info.isFile() && info.nlink !== 1) throw new WorkflowError('scope-exceeded', 'Hard-linked files are not supported.');
-        if (relative.startsWith('.missionspec/') &&
-            (info.uid !== process.getuid?.() || (info.mode & 0o077) !== 0)) {
-          throw new WorkflowError('scope-exceeded', 'Runtime state requires current-user ownership and owner-only permissions.');
+        if (relative.startsWith('.missionspec/')) {
+          if (process.platform === 'win32') {
+            windowsPrivateEntries([{ path: current, directory: info.isDirectory(), writable: false }]);
+          } else if (info.uid !== process.getuid?.() || (info.mode & 0o077) !== 0) {
+            throw new WorkflowError('scope-exceeded', 'Runtime state requires current-user ownership and owner-only permissions.');
+          }
         }
       } catch (error) {
         if (!missing(error)) throw error;
@@ -317,6 +321,9 @@ export class LocalWorkspace {
   }
 
   private async exclusive(relative: ProjectPath, content: string, mode = 0o600): Promise<void> {
+    if (!['darwin', 'linux'].includes(process.platform)) {
+      throw new WorkflowError('capability-unavailable', 'Runtime journals require a qualified durable directory-entry barrier, not only file flushing or ACLs.');
+    }
     const target = await this.target(relative, true);
     const handle = await open(target, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
     try {
