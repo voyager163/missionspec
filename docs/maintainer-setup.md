@@ -39,10 +39,36 @@ read back these hosted controls:
 - Force pushes and branch deletion prohibited.
 
 The effective branch-rules API confirms both branches inherit these rules.
-Source publication and the first hosted workflow runs are being prepared.
-Required status checks remain intentionally unset until actual hosted runs
-establish their identities and behavior. Do not describe the repository as fully
-hardened or claim the normal/failing PR merge paths have been exercised.
+The implementation has been committed and published through a pull request.
+After observing successful hosted runs, seven required check contexts were bound
+to their actual GitHub Apps, with strict up-to-date-branch enforcement:
+
+| Required context | GitHub App ID |
+| --- | --- |
+| Repository checks (ubuntu-latest) | 15368 (`github-actions`) |
+| Repository checks (macos-latest) | 15368 (`github-actions`) |
+| Windows read-only compatibility | 15368 (`github-actions`) |
+| Dependency review | 15368 (`github-actions`) |
+| CodeQL (javascript-typescript) | 15368 (`github-actions`) |
+| CodeQL (actions) | 15368 (`github-actions`) |
+| CodeQL | 57789 (`github-advanced-security`) |
+
+Qualification revision: `2f92429cf508912eeae89a7aa964d5708aeb97dd`, with
+GitHub's tested merge revision `4f1db30b1eba870612ed1d10b397e81e68cd4223`.
+[Repository checks](https://github.com/voyager163/missionspec/actions/runs/35570034629),
+[CodeQL analysis](https://github.com/voyager163/missionspec/actions/runs/35570034539)
+and [dependency review](https://github.com/voyager163/missionspec/actions/runs/35570034657)
+passed. Both CodeQL categories reported successful analysis and no open alerts
+on that PR merge revision. GitHub reported the PR mergeable and clean after
+enforcement, without requiring another person's approval. No administrative
+merge bypass was used.
+
+The initial runs correctly failed on a macOS scheduling-dependent test
+assertion and a Dependency Graph licensing discrepancy; both were addressed
+before requiring the check identities. The
+[exact-version license guard](licensing.md#reviewed-dependency-graph-metadata-discrepancy)
+documents the latter. Successful scans are not a security certification or proof
+of native-model behavior. Windows private writes remain separately unqualified.
 
 ## 1. Validate locally
 
@@ -112,20 +138,20 @@ even when automation proposes them and all checks are green.
 
 ## 3. Qualify checks before requiring them
 
-The local workflow is named `Repository checks`. Its job display template is
+The workflow is named `Repository checks`. Its job display template is
 `Repository checks (${{ matrix.os }})`, configured for `ubuntu-latest`,
 and `macos-latest`. A separate `Windows read-only compatibility` job runs
 `check:portable` on `windows-latest`, rather than running unsupported POSIX
-write/TTY tests or implying Windows ACL qualification. These labels are **not verified
-required status identifiers**. Matrix expansion and workflow revisions can alter
-the check names GitHub presents.
+write/TTY tests or implying Windows ACL qualification. The observed required
+identities above are specific to the qualified revision. Matrix expansion and
+workflow revisions can alter the names; coordinate any rename with the ruleset.
 
 The local definition uses full-SHA-pinned actions and a read-only token, without
 secrets or caches. Its isolated service and static infrastructure checks do not
 authenticate to Azure or deploy anything. This definition does not change
 repository-wide action settings or establish that a hosted run has succeeded.
 
-Two additional local definitions are present:
+Two additional hosted definitions are present:
 
 - `CodeQL analysis` covers JavaScript/TypeScript and GitHub Actions without
   running project build scripts. Its analysis job has only the extra reporting
@@ -134,7 +160,7 @@ Two additional local definitions are present:
 - `Dependency review` checks changed dependency graphs for high/critical
   findings and the explicit license allowlist, without writing PR comments.
 
-These definitions have not run on GitHub. A successful CodeQL analysis/upload
+These definitions passed the recorded GitHub runs. A successful CodeQL analysis/upload
 does not mean it found no vulnerabilities. Qualify actual finding behavior,
 dependency graph coverage (including the isolated service), fork behavior, and
 any native code-scanning merge protection separately. License metadata checks
@@ -200,9 +226,8 @@ For later changes to the reporting configuration:
    contributor and issue guidance to describe the actual available route.
 
 Keep the documented state aligned with verified API readback. Never invent a
-fallback address or reuse the conduct contact. The updated policy and issue forms
-remain local until the separately authorized publication step; hosted enablement
-does not itself publish these document edits.
+fallback address or reuse the conduct contact. The policy and issue forms are included in the publication PR; hosted enablement
+does not itself merge these document edits into the default branch.
 
 ## Further controls and publication
 
@@ -218,7 +243,7 @@ useful controls, not comprehensive guarantees.
 A push is not a release. Tags, GitHub releases, npm publication, announcements,
 and any hosted execution require their own explicit authority. The planned
 `@msn-control/missionspec` package has no usable product release yet. Do not
-present the project as release-ready while required hosted checks remain unqualified,
+present the project as release-ready while native/platform/cloud qualification remains incomplete,
 or turn planned hosts and skills into advertised working features.
 
 Before closing a setup milestone, distinguish:

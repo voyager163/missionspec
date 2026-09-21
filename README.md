@@ -16,7 +16,7 @@ native proposal bridges, MCP transport, focused clarification, consistency/gap
 reports, reviewed lessons, explicit import and recoverable evidence pruning.
 **Native autonomous execution remains unqualified and disabled in the CLI.**
 Synthetic protocol tests and installed skills are not live-host qualification.
-Windows private-state writes, required hosted CI checks and production
+Windows private-state writes, live native execution qualification and production
 telemetry deployment remain separate release gates.
 
 The root package manifest is private at version `0.0.0` for local development;
@@ -138,7 +138,8 @@ relative navigation targets inside a package.
 **Private vulnerability reporting is enabled.** Use the private GitHub route in
 [SECURITY.md](SECURITY.md); never publish sensitive findings in public issues.
 PR-only, conversation-resolution, force-push and deletion protections are active
-for `develop` and `main`. Required CI checks still await real hosted qualification.
+for `develop` and `main`. Required Linux/macOS, Windows read-only, dependency-review
+and CodeQL checks are bound to their verified GitHub Apps.
 
 The [maintainer setup guide](docs/maintainer-setup.md) distinguishes local checks
 from GitHub controls that still require authorization, configuration, and

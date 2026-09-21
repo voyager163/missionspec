@@ -56,8 +56,10 @@ changes. An active branch ruleset enforces this for `develop` and `main`.
 The project currently has one maintainer and requires **zero external
 approving reviews**. The maintainer may review and merge their own pull request
 after checking its content and validation results. Conversation resolution,
-force-push and deletion restrictions are active. Required CI checks are not yet
-configured: they must use actual observed successful hosted check identities.
+force-push and deletion restrictions are active. Required checks use observed
+successful hosted identities and their GitHub Apps, with strict up-to-date-branch
+enforcement. Windows CI covers portable/read-only behavior, not private-state
+write qualification.
 
 Changes to workflows, validation controls, release configuration, and security
 policy need deliberate maintainer review. A green check or an automated
