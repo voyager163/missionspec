@@ -591,9 +591,18 @@ test('separate processes atomically merge disclosure/disable patches; concurrent
   }
 });
 
-test('a real exclusive transaction causes bounded unavailable results, never a transient enabled default', { timeout: 10_000 }, async () => {
+test('a real exclusive transaction causes bounded unavailable results, never a transient enabled default', { timeout: 10_000 }, async (context) => {
   const path = join(scratch, 'locked.sqlite');
-  const store = ownedPreferences(path);
+  const configuredTimeouts = [];
+  const store = ownedPreferences(path, {
+    openDatabase: injectedDatabase((stage, sql, database, proceed) => {
+      const result = proceed();
+      if (stage === 'exec' && sql.startsWith('PRAGMA busy_timeout =')) {
+        configuredTimeouts.push(database.prepare('PRAGMA busy_timeout').get().timeout);
+      }
+      return result;
+    }),
+  });
   await store.save({ preference: 'disabled', disclosureVersion: 1 });
   const worker = preferenceWorker(path, 'lock');
   try {
@@ -606,7 +615,10 @@ test('a real exclusive transaction causes bounded unavailable results, never a t
     assert.equal(read.reason, 'busy');
     assert.equal(write.reason, 'busy');
     assert.equal(write.persistence, 'unchanged');
-    assert.ok(performance.now() - start < PREFERENCE_BUSY_TIMEOUT_MS * 4 + 1000);
+    assert.equal(PREFERENCE_BUSY_TIMEOUT_MS, 250);
+    assert.ok(configuredTimeouts.length >= 3);
+    assert.ok(configuredTimeouts.every((timeout) => timeout === 250));
+    context.diagnostic(`Busy read/write wall time including filesystem and runner scheduling: ${Math.round(performance.now() - start)} ms; SQLite busy timeout: 250 ms per connection.`);
     worker.child.send('release');
     await worker.exited;
     assert.deepEqual(await store.read(), { state: 'ready', value: { preference: 'disabled', disclosureVersion: 1 } });

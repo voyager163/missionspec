@@ -162,6 +162,7 @@ export function createUserTelemetryPreferenceStore(
         if (current.dev !== info.dev || current.ino !== info.ino) throw new TypeError('Preference path changed');
       }
       database = connect(path, patch === undefined);
+      database.exec(`PRAGMA busy_timeout = ${PREFERENCE_BUSY_TIMEOUT_MS}`);
       database.exec('PRAGMA trusted_schema = OFF; PRAGMA temp_store = MEMORY; PRAGMA mmap_size = 0');
       if (patch !== undefined) {
         if (created) database.exec('PRAGMA page_size = 4096');
