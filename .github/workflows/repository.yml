@@ -82,4 +82,4 @@ jobs:
       - name: Build the candidate private-state adapters
         run: npm run build
       - name: Qualify actual Windows ACLs and storage boundaries
-        run: node --test --test-concurrency=1 tests/windows-private-state.test.mjs
+        run: node --test --test-concurrency=1 tests/windows-private-state.test.mjs tests/windows-directory-durability.test.mjs

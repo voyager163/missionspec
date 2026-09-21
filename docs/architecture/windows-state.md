@@ -13,7 +13,8 @@ results are not Windows qualification.
 | Dedicated telemetry preferences | SID/ACL-checked parent and file, real SQLite patches/reopen, no permissive Windows ownership exception; existing journals/WAL/shared memory require reconciliation |
 | Dedicated diagnostic JSONL | Private parent/file, exclusive cooperative lock, bounded canonical append and digest-bound explicit truncation, file flush |
 | Private workspace reads | SID/ACL checks instead of meaningless POSIX UID/mode checks; existing root digest, inode/device checks and content checks remain |
-| Workspace setup, source/artifact writes, immutable runtime records, file journals/recovery | **Blocked before mutation**: no qualified durable directory-entry barrier |
+| Private directory metadata barrier | Separate identity-guarded native candidate; independent ordering tests must pass before workflow integration |
+| Workspace setup, source/artifact writes, immutable runtime records, file journals/recovery | **Blocked before mutation**: the complete directory/journal/source protocol is not yet qualified |
 | Raw-evidence removal and dead-prune-lock recovery | **Blocked**, including after SQLite preparation: directory durability and Windows local-process death inspection are independently unqualified |
 | Terminal confirmation, callback/MCP receipt issuance and revocation | **Blocked**: receipts require the blocked immutable-record persistence; Windows terminal/ConPTY challenge behavior is independently unqualified |
 | Real registered checks / native-host execution and cancellation | Unchanged, independently blocked; storage capability never establishes execution, completion or quiescence |
@@ -172,6 +173,76 @@ recovery cases, and propagation of failed/unknown flush outcomes. Authority and
 process/console checks have their own remaining gates. Failed probes never fall
 back to reporting durability success.
 
+### Identity-guarded native barrier candidate
+
+`syncWindowsPrivateDirectory(directory, expected)` is an internal platform
+adapter, not an API-barrel export, general file-write port or authority issuer.
+`expected` contains the previously observed Node bigint `dev` and `ino`.
+Those numbers are only an identity guard: the fixed shared helper independently
+repeats its local-NTFS, path/reparse, owner-SID, private-DACL and ancestor checks.
+Neither a caller boolean nor a supplied identity can waive any check.
+
+For this operation only, the helper:
+
+1. Opens the existing directory with `GENERIC_WRITE`, metadata-read access,
+   `FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT`, and read/write
+   sharing **without delete sharing**. The leaf cannot ordinarily be renamed or
+   deleted while its verified handle is held.
+2. Validates the directory type, canonical final path and ACL. It compares the
+   handle's volume serial and 64-bit file index with the expected device/inode.
+   This matches the NTFS identity fields used by
+   [Node 24.21's Windows stat implementation](https://github.com/nodejs/node/blob/v24.21.0/deps/uv/src/win/fs.c);
+   POSIX UID/mode fields are never used as Windows proof.
+3. Calls `FlushFileBuffers` on **that same handle**, then rechecks its directory
+   attributes, device/inode and final path.
+4. Frees native memory and closes the handle in nested `finally` handling.
+   A failed close, flush, identity check, helper timeout or uncertain helper result
+   is an error, never durability success. No Win32 error-number interpretation
+   (including the probe's 203) is necessary.
+
+It does not create an entry, change ACLs, open/flush a volume, enable privileges,
+invoke an addon or fall back to Node directory `sync()`. Unsupported identities
+and options fail before the flush. Failure throws
+`WindowsDirectoryDurabilityError` with `durability: 'unconfirmed'`; a caller
+that already mutated data must preserve its journal and report an unconfirmed
+effect rather than infer rollback or proceed to completion.
+
+`tests/windows-directory-durability.test.mjs` qualifies this candidate separately:
+real handle-sharing contention, wrong/replaced identities, junction/case aliases,
+ordinary-file rejection, public/foreign ACL rejection without repair, and exact
+handle closure behavior. Its test-only namespace driver uses actual private files,
+file `fsync`, native directory barriers, rename, unlink and separate child exits.
+It checks the ordering:
+
+```text
+prepared journal file sync → journal directory barrier
+→ staged replacement file sync → stage directory barrier
+→ rename → source directory barrier
+→ exact retained-byte unlink → removal directory barrier
+→ completion file sync → completion directory barrier
+```
+
+Actual child exits cover preparation, staging, immediately before and after
+rename/unlink barriers, and a written completion whose directory barrier has not
+yet returned. Explicit test recovery re-establishes those barriers, preserves
+changed preimages, rejects a copied cross-root journal, and never deletes a raw
+replacement after completion. A stale barrier identity cannot acknowledge the
+journal or permit following effects.
+
+This driver is **test-only**, excluded from the package, and does not use or grant
+production source-apply, approval, evidence-pruning or host authority. Its parent
+observes the actual child termination before resuming; it does not reclaim a
+persisted PID lock or establish general process quiescence. Process exits are not
+physical power-cut/storage-controller tests. No native close-failure injection or
+adversarial same-account confinement is claimed.
+
+The planned integration points remain the existing `LocalWorkspace.syncDirectory`
+and evidence-file directory barriers—not a replacement workflow engine. Before
+opening their gates, Windows tests must also cover complete production journal
+recovery, newly created ancestor ordering, exclusive absent-target/link staging,
+source ACL preservation, exact workspace binding and the independent authority/
+process boundaries. This candidate does **not** change those gates or POSIX code.
+
 SQLite continues using its built-in Windows VFS, rollback/DELETE journaling and
 the existing `synchronous=FULL` contract (preferences use `EXTRA`). JSONL continues
 its existing regular-file `sync()` contract. Neither is advertised as the missing
@@ -186,7 +257,7 @@ fixtures use separately validated current-user profile storage:
 
 ```sh
 npm run build
-node --test --test-concurrency=1 tests/windows-private-state.test.mjs
+node --test --test-concurrency=1 tests/windows-private-state.test.mjs tests/windows-directory-durability.test.mjs
 ```
 
 Do not combine this with the POSIX-specific legacy suites or infer that skipped

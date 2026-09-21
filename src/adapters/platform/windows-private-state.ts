@@ -19,6 +19,7 @@ const diagnosticPhases = [
   'input', 'native-bindings', 'entry', 'creation', 'volume', 'entry-open', 'entry-information', 'entry-attributes',
   'entry-final-path', 'entry-acl-read', 'entry-acl-parse', 'entry-owner', 'entry-aces', 'entry-user-access',
   'entry-inheritance', 'json-module', 'json-input', 'access-policy',
+  'directory-identity', 'directory-flush', 'directory-close', 'flush-options',
 ];
 const exceptionTypes = [
   'none', 'other', 'RuntimeException', 'MethodException', 'MethodInvocationException', 'PSInvalidCastException',
@@ -96,13 +97,47 @@ export interface WindowsPrivateEntry {
   readonly directory: boolean;
   readonly writable: boolean;
   readonly create?: boolean;
+  readonly flushIdentity?: { readonly device: string; readonly inode: string };
 }
 
-/** Privacy only: no directory-durability or authority capability is supplied here. */
+export class WindowsDirectoryDurabilityError extends Error {
+  readonly code = 'EIO';
+  readonly durability = 'unconfirmed';
+  constructor(detail = 'unavailable') { super(`Windows directory durability was not confirmed: ${detail}`); }
+}
+
+/** Trusted composition only; expected identity is a guard, never ownership or authority proof. */
+export function syncWindowsPrivateDirectory(directory: string, expected: { readonly dev: bigint; readonly ino: bigint }): void {
+  try {
+    if (typeof expected !== 'object' || expected === null ||
+        typeof expected.dev !== 'bigint' || expected.dev < 0n || expected.dev > 0xffff_ffffn ||
+        typeof expected.ino !== 'bigint' || expected.ino <= 0n || expected.ino > 0xffff_ffff_ffff_ffffn) {
+      throw new WindowsDirectoryDurabilityError('invalid directory identity');
+    }
+    windowsPrivateEntries([{
+      path: directory, directory: true, writable: true,
+      flushIdentity: { device: expected.dev.toString(), inode: expected.ino.toString() },
+    }]);
+  } catch (error) {
+    if (error instanceof WindowsDirectoryDurabilityError) throw error;
+    throw new WindowsDirectoryDurabilityError(error instanceof WindowsPrivateStateError ? error.message : 'helper unavailable');
+  }
+}
+
+/** Private-entry checks and the separately requested, identity-guarded directory barrier; never authority. */
 export function windowsPrivateEntries(entries: readonly WindowsPrivateEntry[]): void {
   requireWindowsPrivateState();
   if (entries.length === 0 || entries.length > 8) throw new WindowsPrivateStateError();
-  for (const entry of entries) validateWindowsStatePath(entry.path);
+  for (const entry of entries) {
+    validateWindowsStatePath(entry.path);
+    if (entry.flushIdentity !== undefined && (entry.directory !== true || entry.writable !== true || entry.create === true ||
+        typeof entry.flushIdentity.device !== 'string' || !/^(?:0|[1-9][0-9]{0,9})$/u.test(entry.flushIdentity.device) ||
+        BigInt(entry.flushIdentity.device) > 0xffff_ffffn ||
+        typeof entry.flushIdentity.inode !== 'string' || !/^[1-9][0-9]{0,19}$/u.test(entry.flushIdentity.inode) ||
+        BigInt(entry.flushIdentity.inode) > 0xffff_ffff_ffff_ffffn)) {
+      throw new WindowsPrivateStateError('flush-options');
+    }
+  }
   validateSystemPowerShell();
   const result = spawnSync(systemPowerShell, [
     '-NoLogo', '-NoProfile', '-NonInteractive', '-File', helper,

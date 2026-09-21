@@ -33,19 +33,35 @@ try {
   Native 'CreateFileW' 'kernel32.dll' ([IntPtr]) @([string], [uint32], [uint32], [IntPtr], [uint32], [uint32], [IntPtr])
   Native 'GetFinalPathNameByHandleW' 'kernel32.dll' ([uint32]) @([IntPtr], [Text.StringBuilder], [uint32], [uint32])
   Native 'GetFileInformationByHandle' 'kernel32.dll' ([bool]) @([IntPtr], [IntPtr])
+  Native 'FlushFileBuffers' 'kernel32.dll' ([bool]) @([IntPtr])
   Native 'CloseHandle' 'kernel32.dll' ([bool]) @([IntPtr])
   Native 'CreateDirectoryW' 'kernel32.dll' ([bool]) @([string], [IntPtr])
   Native 'LocalFree' 'kernel32.dll' ([IntPtr]) @([IntPtr])
   Native 'ConvertStringSecurityDescriptorToSecurityDescriptorW' 'advapi32.dll' ([bool]) @([string], [uint32], [IntPtr].MakeByRefType(), [uint32].MakeByRefType())
   $native = $type.CreateType()
-  function CheckEntry([string]$p, [bool]$private, [bool]$directory, [bool]$writable, [bool]$system = $false) {
+  function CheckDirectoryIdentity([IntPtr]$information, $expected) {
+    $bytes = [byte[]]::new(52)
+    [Runtime.InteropServices.Marshal]::Copy($information, $bytes, 0, 52)
+    $attributes = [BitConverter]::ToUInt32($bytes, 0)
+    $device = [BitConverter]::ToUInt32($bytes, 28)
+    $inode = [decimal]([BitConverter]::ToUInt32($bytes, 44)) * 4294967296 +
+      [decimal]([BitConverter]::ToUInt32($bytes, 48))
+    if (($attributes -band 0x410) -ne 0x10 -or
+        $device.ToString([Globalization.CultureInfo]::InvariantCulture) -cne [string]$expected.device -or
+        $inode.ToString('0', [Globalization.CultureInfo]::InvariantCulture) -cne [string]$expected.inode) { throw 'directory-identity' }
+  }
+  function CheckEntry([string]$p, [bool]$private, [bool]$directory, [bool]$writable, [bool]$system = $false, $flushExpected = $null) {
     $script:boundary = if ($system) { 'system' } elseif ($private) { 'private' } else { 'ancestor' }
     $script:phase = 'entry-open'
     $entryTrusted = if ($system) { $osTrusted } else { $trusted }
-    $handle = $native::CreateFileW($p, 0x20080, 7, [IntPtr]::Zero, 3, 0x02200000, [IntPtr]::Zero)
+    $flushRequested = $null -ne $flushExpected
+    $access = if ($flushRequested) { 0x40020080 } else { 0x20080 }
+    $sharing = if ($flushRequested) { 3 } else { 7 }
+    $handle = $native::CreateFileW($p, $access, $sharing, [IntPtr]::Zero, 3, 0x02200000, [IntPtr]::Zero)
     if ($handle -eq [IntPtr](-1)) { throw 'open' }
-    $info = [Runtime.InteropServices.Marshal]::AllocHGlobal(52)
+    $info = [IntPtr]::Zero
     try {
+      $info = [Runtime.InteropServices.Marshal]::AllocHGlobal(52)
       $script:phase = 'entry-information'
       if (!$native::GetFileInformationByHandle($handle, $info)) { throw 'identity' }
       $script:phase = 'entry-attributes'
@@ -97,9 +113,31 @@ try {
           if ($writable -and ($inherit -band 0x1F01FF) -ne 0x1F01FF) { throw 'inheritance' }
         }
       }
+      if ($flushRequested) {
+        $script:phase = 'directory-identity'
+        if (!$private -or !$directory -or !$writable -or $system) { throw 'flush-options' }
+        if (!$native::GetFileInformationByHandle($handle, $info)) { throw 'directory-identity' }
+        CheckDirectoryIdentity $info $flushExpected
+        $script:phase = 'directory-flush'
+        if (!$native::FlushFileBuffers($handle)) { throw 'directory-flush' }
+        $script:phase = 'directory-identity'
+        if (!$native::GetFileInformationByHandle($handle, $info)) { throw 'directory-identity' }
+        CheckDirectoryIdentity $info $flushExpected
+        [void]$final.Clear()
+        $length = $native::GetFinalPathNameByHandleW($handle, $final, 1024, 0)
+        if ($length -eq 0 -or $length -ge 1024 -or ![string]::Equals($final.ToString(), ('\\?\' + $p), [StringComparison]::Ordinal)) {
+          throw 'directory-identity'
+        }
+      }
     } finally {
-      [Runtime.InteropServices.Marshal]::FreeHGlobal($info)
-      if (!$native::CloseHandle($handle)) { throw 'close' }
+      try {
+        if ($info -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::FreeHGlobal($info) }
+      } finally {
+        if (!$native::CloseHandle($handle)) {
+          if ($flushRequested) { $script:phase = 'directory-close' }
+          throw 'close'
+        }
+      }
     }
   }
   foreach ($osDirectory in @('C:\', 'C:\Windows', 'C:\Windows\System32', 'C:\Windows\System32\WindowsPowerShell',
@@ -111,6 +149,14 @@ try {
   $phase = 'json-input'
   $inputObject = [Console]::In.ReadToEnd() | Microsoft.PowerShell.Utility\ConvertFrom-Json
   foreach ($entry in $inputObject.entries) {
+    if ($null -ne $entry.flushIdentity) {
+      $phase = 'flush-options'
+      if ($entry.directory -ne $true -or $entry.writable -ne $true -or $entry.create -or
+          [string]$entry.flushIdentity.device -cnotmatch '^(0|[1-9][0-9]{0,9})$' -or
+          [decimal]$entry.flushIdentity.device -gt 4294967295 -or
+          [string]$entry.flushIdentity.inode -cnotmatch '^[1-9][0-9]{0,19}$' -or
+          [decimal]$entry.flushIdentity.inode -gt [decimal]'18446744073709551615') { throw 'flush-options' }
+    }
     $phase = 'volume'
     $p = [string]$entry.path
     $drive = $p.Substring(0, 3)
@@ -149,14 +195,14 @@ try {
         [Runtime.InteropServices.Marshal]::FreeHGlobal($attributes)
       }
     }
-    CheckEntry $p $true ([bool]$entry.directory) ([bool]$entry.writable)
+    CheckEntry $p $true ([bool]$entry.directory) ([bool]$entry.writable) $false $entry.flushIdentity
   }
   [Console]::Out.Write('{"ok":true}')
 } catch {
   $failure = $_
   $reason = $_.Exception.Message
   if ($reason -notin @('system-executable','open','identity','type','links','alias','acl','owner','unsupported-ace','public-access',
-      'user-access','inheritance','close','volume','descriptor','create')) { $reason = $phase }
+      'user-access','inheritance','close','volume','descriptor','create','directory-identity','directory-flush','directory-close','flush-options')) { $reason = $phase }
   $knownTypes = @('RuntimeException', 'MethodException', 'MethodInvocationException', 'PSInvalidCastException',
     'ParameterBindingException', 'ArgumentException', 'ArgumentNullException', 'InvalidOperationException',
     'NotSupportedException', 'TypeLoadException', 'MissingMethodException', 'IOException', 'UnauthorizedAccessException',
