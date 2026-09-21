@@ -94,6 +94,21 @@ test('CodeQL reporting permissions are narrow and cannot authorize a project bui
   assert.match(checkWorkflow(workflow, '.github/workflows/codeql.yml').join('\n'), /permissions/);
 });
 
+test('dependency review permits only the separately pinned metadata discrepancy, never broad license exceptions', () => {
+  const workflow = validWorkflow();
+  workflow.jobs.check.steps = [{
+    uses: `actions/dependency-review-action@${'a'.repeat(40)}`,
+    with: {
+      'fail-on-severity': 'high', 'comment-summary-in-pr': 'never', 'license-check': true,
+      'allow-licenses': 'Apache-2.0, MIT, ISC, BSD-2-Clause, BSD-3-Clause, 0BSD, CC0-1.0, Unlicense, Zlib',
+      'allow-dependencies-licenses': 'pkg:npm/json-schema-typed',
+    },
+  }];
+  assert.deepEqual(checkWorkflow(workflow, '.github/workflows/dependency-review.yml'), []);
+  workflow.jobs.check.steps[0].with['allow-dependencies-licenses'] += ', pkg:npm/unreviewed';
+  assert.notEqual(checkWorkflow(workflow, '.github/workflows/dependency-review.yml').length, 0);
+});
+
 test('local links validate real targets, heading anchors, and repository containment', async (context) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'missionspec-links-'));
   context.after(() => rm(root, { recursive: true, force: true }));

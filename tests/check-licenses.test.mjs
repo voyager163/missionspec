@@ -7,7 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import {
-  assertLicenseEvidence, collectScope, packageNoticeProblems, runLicenseCheck, runtimeGraph,
+  assertLicenseEvidence, assertMetadataExceptionPin, collectScope, packageNoticeProblems, runLicenseCheck, runtimeGraph,
   verifyOutputs,
 } from '../scripts/check-licenses.mjs';
 
@@ -15,6 +15,22 @@ const repository = fileURLToPath(new URL('../', import.meta.url));
 const mit = readFileSync(path.join(repository, 'node_modules/zod/LICENSE'), 'utf8');
 const integrity = `sha512-${Buffer.alloc(64, 1).toString('base64')}`;
 const writeJson = (file, value) => writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
+
+test('a hosted metadata exception cannot widen beyond the exact reviewed package and legal text', () => {
+  const inventory = JSON.parse(readFileSync(path.join(repository, 'licenses/cli-runtime.json'), 'utf8'));
+  const source = inventory.runtimePackages.find((entry) => entry.name === 'json-schema-typed');
+  assert.doesNotThrow(() => assertMetadataExceptionPin(source, source.licenseExpression, source.legalFiles));
+  for (const change of [
+    { version: '8.0.3' }, { integrity: 'sha512-changed' }, { resolved: 'https://example.invalid/changed.tgz' },
+  ]) {
+    assert.throws(() => assertMetadataExceptionPin({ ...source, ...change }, source.licenseExpression, source.legalFiles), /exact reviewed/u);
+  }
+  assert.throws(() => assertMetadataExceptionPin(source, 'BSD-2-Clause AND JSON', source.legalFiles), /exact reviewed/u);
+  assert.throws(() => assertMetadataExceptionPin(source, source.licenseExpression, []), /exact reviewed/u);
+  assert.throws(() => assertMetadataExceptionPin(source, source.licenseExpression, [
+    { ...source.legalFiles[0], retainedSha256: '0'.repeat(64) },
+  ]), /exact reviewed/u);
+});
 
 function fixture(t, { scope = 'cli', name = 'alpha', version = '1.0.0', license = 'MIT' } = {}) {
   const root = path.join(repository, 'tests', `.license-fixture-${randomUUID()}`);

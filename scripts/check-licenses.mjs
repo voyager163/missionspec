@@ -32,6 +32,18 @@ const sha256 = (value) => createHash('sha256').update(value).digest('hex');
 const normalize = (value) => value.replace(/\r\n?/g, '\n');
 const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 
+export function assertMetadataExceptionPin(source, expression, documents) {
+  if (source.name !== 'json-schema-typed') return;
+  if (source.version !== '8.0.2' || expression !== 'BSD-2-Clause' ||
+      source.resolved !== 'https://registry.npmjs.org/json-schema-typed/-/json-schema-typed-8.0.2.tgz' ||
+      source.integrity !== 'sha512-fQhoXdcvc3V28x7C7BMs4P5+kNlgUURe2jmUT1T//oBRMDrqy1QPelJimwZGo7Hg9VPV3EQV5Bnq4hbFy2vetA==' ||
+      documents.length !== 1 || documents[0].path !== 'LICENSE.md' ||
+      documents[0].sourceSha256 !== 'bbe87b573c12bda5baf18742117330efa177e0886b3b0a278dacf8f236e1e129' ||
+      documents[0].retainedSha256 !== '2701eb669226473bb7df25dff5abcd3b7f73589091dce6dea1ca50919a138c73') {
+    throw new Error('The json-schema-typed Dependency Graph metadata exception requires its exact reviewed tarball and legal text; review any change before widening it.');
+  }
+}
+
 function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical);
   if (value && typeof value === 'object') {
@@ -326,6 +338,7 @@ export function collectScope(repositoryRoot, scope) {
       throw new Error(`Unreviewed bundled dependencies in ${location}`);
     }
     const retained = legalDocuments(scopeRoot, location, source.name, source.version, locked.license, reviewed);
+    assertMetadataExceptionPin(source, locked.license, retained);
     documents.set(location, retained);
     return {
       ...source,

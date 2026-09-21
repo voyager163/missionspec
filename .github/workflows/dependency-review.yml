@@ -27,3 +27,5 @@ jobs:
           comment-summary-in-pr: never
           license-check: true
           allow-licenses: Apache-2.0, MIT, ISC, BSD-2-Clause, BSD-3-Clause, 0BSD, CC0-1.0, Unlicense, Zlib
+          # Graph metadata disagrees with the reviewed 8.0.2 tarball. check:licenses pins its bytes/version.
+          allow-dependencies-licenses: pkg:npm/json-schema-typed

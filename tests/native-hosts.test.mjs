@@ -484,6 +484,7 @@ for (const [behavior, code] of [
   test(`Codex fails closed for ${behavior}`, async (t) => {
     const f = await fixture(t, 'codex', behavior);
     const outcome = await new CodexProposalHost(f.setup).propose(request('codex'));
+    assert.notEqual(outcome.status, 'ok');
     assert.equal(outcome.error.code, code, JSON.stringify(outcome));
     if ([
       'ambient-config', 'ambient-layer', 'missing-effective-tool-config', 'missing-input-tool-control',
@@ -493,7 +494,8 @@ for (const [behavior, code] of [
       'enabled-remote-control', 'malformed-remote-control', 'active-normalized-hook', 'unknown-normalized-hook',
       'missing-remote-environment', 'unexpected-remote-environment', 'extra-remote-field',
     ].includes(behavior)) assert.equal((await f.readTranscript()).some((message) => ['account/login/start','thread/start','turn/start'].includes(message.method)), false);
-    if (['unsolicited-turn','thread-environment'].includes(behavior)) assert.equal((await f.readTranscript()).some((message) => message.method === 'turn/start'), false);
+    // Unsolicited bytes can arrive after the outbound request; rejection, not read timing, is the invariant.
+    if (behavior === 'thread-environment') assert.equal((await f.readTranscript()).some((message) => message.method === 'turn/start'), false);
     if (nativeDenials[behavior] || ['unknown-request','user-input-request'].includes(behavior)) {
       await new Promise((resolve) => setTimeout(resolve, 20));
       const denied = (await f.readTranscript()).find((message) => message.id === (nativeDenials[behavior] ? 'native-denied' : 'native-tool') && !message.method);

@@ -141,6 +141,24 @@ expression, or unusual license location requires deliberate review.
 
 ## Shipped notices and check integration
 
+### Reviewed Dependency Graph metadata discrepancy
+
+The first hosted dependency review reported `json-schema-typed@8.0.2` as
+`BSD-2-Clause AND JSON`. The exact published npm tarball, its package metadata,
+`LICENSE.md`, source headers and the upstream release commit
+[`613f3ab84c8e1b14de492534bfcb81d1499610a3`](https://github.com/RemyRylan/json-schema-typed/blob/613f3ab84c8e1b14de492534bfcb81d1499610a3/LICENSE.md)
+declare BSD-2-Clause, including the schema-documentation attribution. The shipped
+package contains no JSON-license restriction. The complete notice is retained.
+
+The action therefore has one explicit package-name metadata exception, **not**
+an allowance for the JSON license. The pinned action matches exception package
+names without versions, so a version suffix would falsely imply a narrower
+match. The separate required local/hosted `check:licenses` enforces version
+`8.0.2`, the exact registry URL/tarball integrity and both source and retained
+legal-file hashes. A version, tarball, declared license, added legal file or text
+change fails that guard. Do not broaden or remove the guard to make a future
+upgrade pass; reassess the discrepancy and remove the exception when corrected.
+
 The root package's `files` allowlist includes `THIRD_PARTY_NOTICES` and the CLI
 runtime inventory. `docs/licensing.md` is included through `docs`. Do not add the service notice
 set, service source, or service inventory to the CLI package.

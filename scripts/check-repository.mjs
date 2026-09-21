@@ -196,9 +196,10 @@ export function checkWorkflow(workflow, file = 'workflow') {
     }
     if (isDependencyReview && !job.steps.some((step) => isRecord(step) &&
       typeof step.uses === 'string' && step.uses.startsWith('actions/dependency-review-action@') &&
-      isRecord(step.with) && Object.keys(step.with).length === 4 &&
+      isRecord(step.with) && Object.keys(step.with).length === 5 &&
       step.with?.['fail-on-severity'] === 'high' && step.with?.['comment-summary-in-pr'] === 'never' &&
-      step.with?.['license-check'] === true && step.with?.['allow-licenses'] === approvedLicenses)) {
+      step.with?.['license-check'] === true && step.with?.['allow-licenses'] === approvedLicenses &&
+      step.with?.['allow-dependencies-licenses'] === 'pkg:npm/json-schema-typed')) {
       problems.push(`${file}: dependency severity, license and no-comment policy must be explicit`);
     }
   }
