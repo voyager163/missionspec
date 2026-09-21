@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { windowsPrivateEntries } from '../platform/windows-private-state.js';
 import { LocalWorkspace, parseFilePlan, type FilePlan } from '../filesystem/local-workspace.js';
 import {
   digestApprovalRequest, parseApprovalReference, parseApprovalRequest,
@@ -129,11 +130,13 @@ class PersistentAuthority implements LocalConfirmationAuthority {
   }
 
   private async exchange(review: LocalConfirmationReview): Promise<LocalConfirmationDecision> {
-    if (this.transport === undefined || !['darwin', 'linux'].includes(process.platform)) return 'unavailable';
+    if (this.transport === undefined || !['darwin', 'linux', 'win32'].includes(process.platform) ||
+        (process.platform === 'win32' && this.transport.channel === 'terminal-confirmation')) return 'unavailable';
     const abort = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let accepted = false;
     try {
+      if (process.platform === 'win32') windowsPrivateEntries([{ path: this.files.root, directory: true, writable: true }]);
       const deadline = new Promise<LocalConfirmationDecision>((resolve) => {
         timer = setTimeout(() => { abort.abort(); resolve('cancel'); }, Math.min(120_000, Math.max(0, Date.parse(review.deadlineAt) - Date.now())));
       });

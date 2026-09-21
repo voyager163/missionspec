@@ -13,6 +13,7 @@ const terminalTransport: TrustedConfirmationTransport = Object.freeze({
   channel: 'terminal-confirmation',
   protocolIdentity: Object.freeze({ id: 'missionspec.terminal-challenge', version: '1' }),
   async confirm(review: LocalConfirmationReview, signal: AbortSignal): Promise<LocalConfirmationDecision> {
+    if (process.platform === 'win32') return 'unavailable';
     if (!isatty(0) || !isatty(2) || !process.stdin.isTTY || !process.stderr.isTTY) return 'unavailable';
     if (signal.aborted) return 'cancel';
     const challenge = `confirm ${randomBytes(16).toString('hex')}`;

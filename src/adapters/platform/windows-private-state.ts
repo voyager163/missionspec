@@ -20,6 +20,8 @@ const diagnosticPhases = [
   'entry-final-path', 'entry-acl-read', 'entry-acl-parse', 'entry-owner', 'entry-aces', 'entry-user-access',
   'entry-inheritance', 'json-module', 'json-input', 'access-policy',
   'directory-identity', 'directory-flush', 'directory-close', 'flush-options',
+  'file-metadata', 'file-security', 'process-inspection', 'process-present',
+  'writer-lease', 'lease-close',
 ];
 const exceptionTypes = [
   'none', 'other', 'RuntimeException', 'MethodException', 'MethodInvocationException', 'PSInvalidCastException',
@@ -98,6 +100,16 @@ export interface WindowsPrivateEntry {
   readonly writable: boolean;
   readonly create?: boolean;
   readonly flushIdentity?: { readonly device: string; readonly inode: string };
+  readonly ordinaryFile?: boolean;
+  readonly copySecurityFrom?: string;
+  readonly sameSecurityAs?: string;
+}
+
+export interface WindowsWriterLease {
+  readonly path: string;
+  readonly dev: bigint;
+  readonly ino: bigint;
+  readonly digest: string;
 }
 
 export class WindowsDirectoryDurabilityError extends Error {
@@ -125,11 +137,20 @@ export function syncWindowsPrivateDirectory(directory: string, expected: { reado
 }
 
 /** Private-entry checks and the separately requested, identity-guarded directory barrier; never authority. */
-export function windowsPrivateEntries(entries: readonly WindowsPrivateEntry[]): void {
+export function windowsPrivateEntries(entries: readonly WindowsPrivateEntry[], lease?: WindowsWriterLease): void {
   requireWindowsPrivateState();
   if (entries.length === 0 || entries.length > 8) throw new WindowsPrivateStateError();
   for (const entry of entries) {
     validateWindowsStatePath(entry.path);
+    for (const template of [entry.copySecurityFrom, entry.sameSecurityAs]) {
+      if (template !== undefined) {
+        validateWindowsStatePath(template);
+        if (entry.directory || entry.ordinaryFile !== true || template === entry.path || path.dirname(template) !== path.dirname(entry.path)) {
+          throw new WindowsPrivateStateError('file-security');
+        }
+      }
+    }
+    if (entry.copySecurityFrom !== undefined && entry.create !== true) throw new WindowsPrivateStateError('file-security');
     if (entry.flushIdentity !== undefined && (entry.directory !== true || entry.writable !== true || entry.create === true ||
         typeof entry.flushIdentity.device !== 'string' || !/^(?:0|[1-9][0-9]{0,9})$/u.test(entry.flushIdentity.device) ||
         BigInt(entry.flushIdentity.device) > 0xffff_ffffn ||
@@ -138,11 +159,35 @@ export function windowsPrivateEntries(entries: readonly WindowsPrivateEntry[]): 
       throw new WindowsPrivateStateError('flush-options');
     }
   }
+  if (lease !== undefined) {
+    validateWindowsStatePath(lease.path);
+    const root = path.dirname(path.dirname(lease.path));
+    if (path.basename(lease.path) !== 'transaction.lock' || path.basename(path.dirname(lease.path)) !== '.missionspec' ||
+        typeof lease.dev !== 'bigint' || lease.dev < 0n || lease.dev > 0xffff_ffffn ||
+        typeof lease.ino !== 'bigint' || lease.ino <= 0n || lease.ino > 0xffff_ffff_ffff_ffffn ||
+        !/^sha256:[a-f0-9]{64}$/u.test(lease.digest) ||
+        entries.some((entry) => entry.path !== root && !entry.path.startsWith(`${root}${path.sep}`))) {
+      throw new WindowsPrivateStateError('writer-lease');
+    }
+  }
+  invokeWindowsHelper({ entries, ...(lease === undefined ? {} : {
+    lease: { path: lease.path, device: lease.dev.toString(), inode: lease.ino.toString(), digest: lease.digest },
+  }) });
+}
+
+/** Cooperative writer recovery only: absence of one PID is not host/descendant quiescence. */
+export function requireWindowsProcessAbsent(pid: number): void {
+  requireWindowsPrivateState();
+  if (!Number.isSafeInteger(pid) || pid < 1 || pid > 2147483647) throw new WindowsPrivateStateError('process-inspection');
+  invokeWindowsHelper({ entries: [], absentProcess: pid });
+}
+
+function invokeWindowsHelper(input: object): void {
   validateSystemPowerShell();
   const result = spawnSync(systemPowerShell, [
     '-NoLogo', '-NoProfile', '-NonInteractive', '-File', helper,
   ], {
-    input: JSON.stringify({ entries }), encoding: 'utf8', windowsHide: true,
+    input: JSON.stringify(input), encoding: 'utf8', windowsHide: true,
     timeout: 20_000, maxBuffer: 16_384, shell: false,
   });
   if (result.error !== undefined || result.status !== 0 || result.stdout !== '{"ok":true}') {

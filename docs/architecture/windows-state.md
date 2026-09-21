@@ -1,9 +1,12 @@
 # Windows private-state boundary
 
 Windows private storage and Windows effect execution are separate capabilities.
-The implementation below is a **qualification candidate** until the genuine
-`windows-latest` test job passes. POSIX success or mocked `process.platform`
-results are not Windows qualification.
+The narrow storage and directory-barrier components at **`d684dbb` passed 23/23
+actual Windows tests with zero skips** in
+[run 35583798870, job 106282370371](https://github.com/voyager163/missionspec/actions/runs/35583798870/job/106282370371).
+The real application integration below is a **new qualification candidate**;
+that earlier success does not qualify it, a console channel, or native execution.
+POSIX success or mocked `process.platform` results are not Windows qualification.
 
 ## Capability matrix
 
@@ -13,15 +16,17 @@ results are not Windows qualification.
 | Dedicated telemetry preferences | SID/ACL-checked parent and file, real SQLite patches/reopen, no permissive Windows ownership exception; existing journals/WAL/shared memory require reconciliation |
 | Dedicated diagnostic JSONL | Private parent/file, exclusive cooperative lock, bounded canonical append and digest-bound explicit truncation, file flush |
 | Private workspace reads | SID/ACL checks instead of meaningless POSIX UID/mode checks; existing root digest, inode/device checks and content checks remain |
-| Private directory metadata barrier | Separate identity-guarded native candidate; independent ordering tests must pass before workflow integration |
-| Workspace setup, source/artifact writes, immutable runtime records, file journals/recovery | **Blocked before mutation**: the complete directory/journal/source protocol is not yet qualified |
-| Raw-evidence removal and dead-prune-lock recovery | **Blocked**, including after SQLite preparation: directory durability and Windows local-process death inspection are independently unqualified |
-| Terminal confirmation, callback/MCP receipt issuance and revocation | **Blocked**: receipts require the blocked immutable-record persistence; Windows terminal/ConPTY challenge behavior is independently unqualified |
+| Private directory metadata barrier | Qualified at the revision/run above: stable identity, writable directory handles, sharing contention, and eight interruption/recovery boundaries |
+| Workspace setup, source/artifact writes, immutable runtime records, file journals/recovery | Candidate integration in the existing `LocalWorkspace`; restricted private current-user NTFS roots, atomic private allocation and mandatory namespace barriers |
+| Raw-evidence removal and dead-prune-lock recovery | Candidate integration in the existing pruning application and filesystem adapter; no change to SQLite prepare/complete or exact-grant requirements |
+| Trusted callback/MCP receipt issuance and revocation | Candidate integration in the existing broker; callbacks remain independently trusted composition and human presence remains **not attested** |
+| Terminal confirmation | **Blocked** on Windows regardless of TTY booleans; actual console/ConPTY challenge behavior remains unqualified |
 | Real registered checks / native-host execution and cancellation | Unchanged, independently blocked; storage capability never establishes execution, completion or quiescence |
 
-The CLI's existing Windows mutation gates are intentionally unchanged. The
-candidate storage operations are library-level capabilities for trusted
-composition, not a claim that CLI setup or execution now works. SQLite's pruning
+This does not qualify interactive Windows CLI setup: terminal issuance is still
+unavailable, and native checks/hosts remain independently gated. The candidate
+application operations require trusted library composition and exact current
+grants, not `approved` input or an environment switch. SQLite's pruning
 tables can store supplied immutable lifecycle records; that is **not** a new
 filesystem-deletion capability or an authority issuer.
 
@@ -173,7 +178,7 @@ recovery cases, and propagation of failed/unknown flush outcomes. Authority and
 process/console checks have their own remaining gates. Failed probes never fall
 back to reporting durability success.
 
-### Identity-guarded native barrier candidate
+### Qualified identity-guarded native barrier
 
 `syncWindowsPrivateDirectory(directory, expected)` is an internal platform
 adapter, not an API-barrel export, general file-write port or authority issuer.
@@ -236,12 +241,95 @@ persisted PID lock or establish general process quiescence. Process exits are no
 physical power-cut/storage-controller tests. No native close-failure injection or
 adversarial same-account confinement is claimed.
 
-The planned integration points remain the existing `LocalWorkspace.syncDirectory`
-and evidence-file directory barriers—not a replacement workflow engine. Before
-opening their gates, Windows tests must also cover complete production journal
-recovery, newly created ancestor ordering, exclusive absent-target/link staging,
-source ACL preservation, exact workspace binding and the independent authority/
-process boundaries. This candidate does **not** change those gates or POSIX code.
+The native primitive and this isolated ordering protocol passed the hosted run
+above. Production integration uses the existing `LocalWorkspace.syncDirectory`
+and evidence-file barriers—not the test-only protocol driver or a replacement
+workflow engine. The separate application suite below must now qualify those
+real paths. No terminal or native-host gate is opened by a directory flush.
+
+### Real application integration candidate
+
+The same `LocalWorkspace` validates plans, resolves actual authority, checks all
+guards, writes immutable journals and performs explicit recovery. Windows changes
+are platform branches in that adapter, not a second controller:
+
+- The **workspace root, mutating parent directories and files must be private,
+  current-user-owned NTFS entries**. Existing unsafe roots/state are rejected,
+  never re-owned, re-ACL'd or silently adopted. Source/configuration directories
+  are intentionally narrower than public-readable POSIX project layouts.
+- New empty directories/files receive their SID descriptor atomically. Every
+  newly created parent entry is followed by the existing parent's native
+  directory barrier **before** any descendant sensitive content is written.
+- Mutable files must have only the unnamed `::$DATA` stream and ordinary
+  normal/archive attributes. Read-only, hidden/system, encrypted/compressed,
+  reparse/special and extra-stream files are refused, not normalized or discarded.
+  The volume must advertise `FILE_SUPPORTS_POSIX_UNLINK_RENAME`; this prevents
+  relying on Node's legacy delete-pending/attribute-clearing fallback.
+- A replacement stage is created with the existing file's owner/group/DACL,
+  then checked for exact owner/group/DACL and access-affecting label/resource/
+  central-policy/filter equivalence.
+  The helper never changes the existing file's descriptor. If the descriptor
+  cannot be preserved by creation/inheritance, the empty stage is retained as
+  an explicit uncertain outcome; no sensitive stage bytes or source replacement
+  are performed. Unsupported access policy is refused rather than dropped.
+  This is not a general auditing-SACL or extended-metadata cloning facility.
+- Existing-file replacement uses the same staged rename protocol; absent-file
+  publication uses the same exclusive hard-link publication followed immediately
+  by stage unlink, synchronously on Windows. Unexpected hard links always fail.
+  An abrupt exit between those two syscalls can retain an internal linked pair:
+  it is **not** silently normalized or treated as completion. Establish writer
+  quiescence and review that retained stage before manual reconciliation.
+- Recovery re-fsyncs the retained journal and any reused exact-content stage,
+  and re-establishes directory barriers for already-applied outputs. Changed
+  source/stage bytes remain blockers, never overwritten. Windows stage rejection
+  performs no automatic cleanup: ADS, unsafe/changed security and replacement
+  stages remain available for reconciliation. Stage identity/version and bytes
+  are checked again before publication. Successful exclusive publication removes
+  only its verified same-inode linked candidate; a rename consumes its stage
+  without subsequently unlinking a potentially reused stage pathname. Failed write, flush,
+  close or lock release reports an unknown effect rather than success.
+
+The persistent authority backend allows independently installed
+`trusted-callback`/`mcp-elicitation` transports on this private scope, retaining
+closed receipts, exact review/request binding, deadlines, expiry, revocation and
+`humanPresence: 'not-attested'`. It still refuses terminal-channel issuance on
+Windows. Test callbacks are explicitly **TEST ONLY**, not genuine human evidence.
+
+Pruning uses the same real `LocalEvidencePruning` application: durable SQLite
+preparation fences availability before deletion; the existing descriptor/hash/
+identity checks precede synchronous unlink; a native directory barrier also
+confirms already-absent recovery paths before completion. Existing evidence/run
+history is retained and completed pruning never deletes a replacement raw file.
+
+Cooperative lock recovery uses a bounded **complete** `K32EnumProcesses` snapshot,
+including a self-presence sanity check. A live/reused PID, unknown/truncated
+inspection, wrong transaction/prune identity or changed lock blocks reclaim.
+This checks the one local filesystem writer only: it is not host cancellation
+or descendant-process quiescence. Node performs source rename/link/unlink itself.
+Its creation helpers additionally hold a non-delete-shared native handle to the
+exact writer-lock inode and digest, so a delayed helper cannot create entries
+under a replaced lock and recovery cannot steal a lock still leased by that
+helper. Read-only status never reclaims a lock. Partial/unparseable locks require
+manual reconciliation; no force flag or caller assertion grants quiescence.
+
+The new actual-application suite is separately bounded to 13 minutes, suitable
+for a dedicated **at most 15-minute** Windows job:
+
+```sh
+npm run build
+node --test --test-concurrency=1 tests/windows-local-runtime.test.mjs
+```
+
+It exercises real `LocalWorkflow`, `openLocalAuthority` and
+`LocalEvidencePruning` APIs: declined/malformed and approved setup, persistent
+receipt reopen/revocation, draft and batched capture, replacement/new source
+patches, exact-grant and stale-edit rejection, source DACL preservation, actual
+child exit with pending file journals, live-lock refusal and reviewed recovery,
+a real closed-handle sync failure, retained-stage ADS/ACL and identity-replacement
+preservation, SQLite pruning preparation and partial-delete
+exits, changed raw preservation, current reapproval and no replay. Fault
+boundaries wrap real operations in test workers; no production fault/approval
+boolean is introduced. These tests are not yet hosted qualification evidence.
 
 SQLite continues using its built-in Windows VFS, rollback/DELETE journaling and
 the existing `synchronous=FULL` contract (preferences use `EXTRA`). JSONL continues

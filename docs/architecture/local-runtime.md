@@ -359,10 +359,12 @@ not success or destructive cleanup.
 
 Same-UID adversarial confinement is **not provided**. Portable Node filesystem
 APIs do not supply race-proof directory-relative compare-and-swap. Keep the
-workspace private and trust its local composition. Windows file transactions,
-immutable runtime records and authority issuance remain unavailable pending
-directory-durability qualification; the separate
-[SID/ACL storage candidate](windows-state.md) does not enable those effects.
+workspace private and trust its local composition. Windows now has a separate
+[real application integration candidate](windows-state.md) over the qualified
+SID/ACL and directory-barrier primitives. It restricts writes to private
+current-user NTFS roots, preserves supported source security, and still requires
+exact current grants. That integration awaits its own hosted end-to-end result;
+terminal/ConPTY and native execution remain independently unavailable.
 This phase's new file/controller tests
 were run locally on macOS; prior Linux SQLite qualification is not new native-host
 or file-transaction qualification. Network filesystems are not qualified.

@@ -42,10 +42,15 @@ async function programIdentity(program: string) {
 
 /** Explicitly trusted local programs, NOT a filesystem/network/process-tree sandbox. */
 export class LocalChecks {
+  private readonly now: () => string;
+
   constructor(
     private readonly workflow: LocalWorkflow, private readonly store: RuntimeStorePort | undefined,
     private readonly authority: LocalAuthorityPort,
-  ) {}
+    options: { readonly now?: () => string } = {},
+  ) {
+    this.now = options.now ?? (() => new Date().toISOString());
+  }
 
   async previewRegistration(slug: string, value: LocalCheckInput) {
     if (!['darwin', 'linux'].includes(process.platform)) throw new WorkflowError('check-unqualified', 'This local process adapter requires POSIX permissions and process groups.');
@@ -83,7 +88,7 @@ export class LocalChecks {
 
   async register(slug: string, value: LocalCheckInput, approval: ApprovalReference) {
     const preview = await this.previewRegistration(slug, value);
-    await requireApproval(this.authority, approval, preview.request, new Date().toISOString());
+    await requireApproval(this.authority, approval, preview.request, this.now());
     const id = `check-${randomUUID()}`;
     await this.workflow.files.recordRuntime('checks', id, { ...preview, approval });
     return { id, ...preview };
@@ -135,10 +140,10 @@ export class LocalChecks {
     const store = this.store;
     if (store === undefined) throw new WorkflowError('persistence-failed', 'Collection requires an explicitly opened runtime ledger.');
     const preview = await this.previewCollection(slug, runId, ids);
-    await requireApproval(this.authority, approval, preview.request, new Date().toISOString());
+    await requireApproval(this.authority, approval, preview.request, this.now());
     return this.workflow.files.withRuntimeLock(async () => {
       const fresh = await this.previewCollection(slug, runId, ids);
-      await requireApproval(this.authority, approval, fresh.request, new Date().toISOString());
+      await requireApproval(this.authority, approval, fresh.request, this.now());
       const runs = await store.listRuns();
       if (runs.status !== 'ok' || runs.value.some((run) => run.quiescence !== 'confirmed' || ['running', 'outcome-unknown'].includes(run.state))) {
         throw new WorkflowError('conflict', 'An active or unreconciled workspace run blocks check execution.');
@@ -154,14 +159,14 @@ export class LocalChecks {
       try {
         for (let index = 0; index < ids.length; index += 1) {
           const { registration: r } = await this.registration(slug, ids[index]!);
-          await requireApproval(this.authority, approval, fresh.request, new Date().toISOString());
+          await requireApproval(this.authority, approval, fresh.request, this.now());
           const id = parseId('evidence', `EVD-${randomUUID()}`);
           await this.workflow.files.recordRuntime('audit', id, { state: 'check-admitted', runId, approval, request: fresh.request, registration: r });
-          const startedAt = new Date().toISOString();
+          const startedAt = this.now();
           const observation = await this.execute(r);
           const after = await this.workflow.loadChange(slug);
           const unchanged = sameRevisionBinding({ ...after.revisions, effects: fresh.revisions.effects }, fresh.revisions);
-          const output = { ...observation, startedAt, finishedAt: new Date().toISOString(), registration: r, sourceBefore: fresh.revisions.source, sourceAfter: after.revisions.source };
+          const output = { ...observation, startedAt, finishedAt: this.now(), registration: r, sourceBefore: fresh.revisions.source, sourceAfter: after.revisions.source };
           const raw = await this.workflow.files.recordRuntime('evidence', id, {
             schemaVersion: 1, evidenceId: id, basis: 'executed',
             result: observation.exitCode === 0 && !observation.interrupted && unchanged ? 'passed' : 'failed',

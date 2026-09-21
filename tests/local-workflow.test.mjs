@@ -154,7 +154,7 @@ test('explicit expanded verification is part of the one tasks artifact and canno
       const store = ok(await openRuntimeStore({ directory: path.join(f.root, '.missionspec/state'), mode: 'create', expectedWorkspace: (await f.app.project()).workspace }));
       t.after(() => store.close());
       f.app = await LocalWorkflow.open(f.root, { store, authority: f.authority, now: () => now });
-      const checks = new LocalChecks(f.app, store, f.authority);
+      const checks = new LocalChecks(f.app, store, f.authority, { now: () => now });
       const input = { checkId: 'CHK-filter', program: await realpath(process.execPath), argv: ['-e', 'console.log("real subprocess output")'], cwd: '.', controlFiles: [], timeoutMs: 2000, guarantees: 'trusted-local-process' };
       const register = async (value) => {
         const preview = await checks.previewRegistration('filters', value);
@@ -193,6 +193,15 @@ test('explicit expanded verification is part of the one tasks artifact and canno
       assert.equal(ok(await f.store.readRun('RUN-check-scope')), null);
       await writeFile(path.join(f.root, 'check.mjs'), 'console.log("changed")');
       await assert.rejects(f.checks.previewCollection('filters', 'RUN-check-scope', [id]), { code: 'stale-revision' });
+    });
+
+    test('local check confirmation expiry uses the injected wall clock without extending authority', async (t) => {
+      const f = await checkFixture(t);
+      const preview = await f.checks.previewRegistration('filters', f.input);
+      const reference = f.authority.issue(preview.request);
+      const expired = new LocalChecks(f.app, f.store, f.authority, { now: () => '2026-09-22T12:00:00.000Z' });
+      await assert.rejects(expired.register('filters', f.input, reference), { code: 'authority-expired' });
+      assert.deepEqual(await f.app.files.list('.missionspec/checks'), []);
     });
 
     test('timed-out real local processes persist unknown outcome and never permit acceptance or unchecked retry', async (t) => {

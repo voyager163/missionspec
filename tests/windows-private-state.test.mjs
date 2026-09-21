@@ -16,7 +16,6 @@ import {
 import { openRuntimeStore } from '../dist/adapters/persistence/index.js';
 import { LocalWorkspace, makeFilePlan, writeMutation } from '../dist/adapters/filesystem/local-workspace.js';
 import { LocalWorkflow } from '../dist/application/local-workflow.js';
-import { removePreparedEvidence, withEvidencePruneLock } from '../dist/adapters/persistence/evidence-files.js';
 import { createUserTelemetryPreferenceStore } from '../dist/adapters/telemetry/preferences.js';
 import { createAuthorizedJsonlSink } from '../dist/adapters/logging/jsonl.js';
 import { serializeDiagnosticEvent } from '../dist/adapters/logging/diagnostics.js';
@@ -522,7 +521,7 @@ test('preferences and JSONL use SID ACLs, real SQLite reopen and bounded explici
   assert.equal(readFileSync(logPath).length, 0);
 });
 
-test('source effects, runtime records, authority, prune deletion and journal recovery stay unavailable without writes', windows, async (t) => {
+test('unapproved file effects, journal recovery and terminal confirmation refuse without writes', windows, async (t) => {
   const f = await fixture(t);
   const identity = path.join(f.runtime, 'workspace.json');
   privateEntry(identity, false, true);
@@ -557,11 +556,6 @@ test('source effects, runtime records, authority, prune deletion and journal rec
   const rawFile = path.join(evidenceDirectory, 'EVD-retained.json');
   privateEntry(rawFile, false, true);
   writeFileSync(rawFile, 'private raw bytes retained through denied pruning');
-  const pruneTarget = {
-    id: 'EVD-retained', runId: 'RUN-windows', runRevision: digestContent('revision'),
-    evidenceDigest: digestContent('evidence'), path: '.missionspec/evidence/EVD-retained.json',
-    rawDigest: digestContent(readFileSync(rawFile)),
-  };
   const transactions = path.join(f.runtime, 'transactions');
   privateEntry(transactions, true, true);
   const id = randomUUID();
@@ -571,36 +565,26 @@ test('source effects, runtime records, authority, prune deletion and journal rec
   assert.deepEqual(await f.files.identity(), f.workspace);
   assert.deepEqual(await f.files.pending(), [id]);
   const before = inventory(f.root);
-  await assert.rejects(f.files.commit(plan, { id: 'APR-no-authority' }), { code: 'capability-unavailable' });
-  await assert.rejects(f.files.commit(sourcePlan, { id: 'APR-no-authority' }), { code: 'capability-unavailable' });
-  await assert.rejects(f.files.recover(id, { id: 'APR-no-authority' }), { code: 'capability-unavailable' });
-  await assert.rejects(f.files.recordRuntime('evidence', 'EVD-blocked', { sensitive: 'must not write' }), { code: 'capability-unavailable' });
-  let entered = false;
-  await assert.rejects(f.files.withRuntimeLock(async () => { entered = true; }), { code: 'capability-unavailable' });
-  await assert.rejects(withEvidencePruneLock(f.files, f.workspace, digestContent('plan'), async () => { entered = true; }), { code: 'capability-unavailable' });
-  await assert.rejects(removePreparedEvidence(f.files, f.workspace, pruneTarget), { code: 'capability-unavailable' });
-  assert.equal(entered, false);
-  let confirmed = false;
-  const authority = await openLocalAuthority({ directory: f.root, transport: {
-    channel: 'trusted-callback', protocolIdentity: { id: 'test-only', version: '1' },
-    async confirm() { confirmed = true; return 'accept'; },
-  } });
+  await assert.rejects(f.files.commit(plan, { id: 'APR-no-authority' }), { code: 'authority-required' });
+  await assert.rejects(f.files.commit(sourcePlan, { id: 'APR-no-authority' }), { code: 'authority-required' });
+  await assert.rejects(f.files.recover(id, { id: 'APR-no-authority' }), { code: 'authority-required' });
+  const authority = await openLocalAuthority({ directory: f.root });
   assert.equal(ok(await authority.requestConfirmation(plan.request)).state, 'unavailable');
+  await assert.rejects(authority.requestConfirmation({ ...plan.request, approved: true }));
   assert.equal(ok(await (await TerminalAuthority.open(f.root)).requestConfirmation(plan.request)).state, 'unavailable');
-  assert.equal(confirmed, false);
   assert.deepEqual(inventory(f.root), before);
   writeFileSync(target, 'user edit');
   await assert.rejects(f.files.recoveryPlan(id), { code: 'stale-revision' });
   assert.equal(readFileSync(target, 'utf8'), 'user edit');
 });
 
-test('new workspace setup is denied before runtime directories or approval receipts are created', windows, async (t) => {
+test('unapproved workspace setup is denied before runtime directories or receipts are created', windows, async (t) => {
   const f = await fixture(t);
   rmdirSync(f.runtime);
   const workflow = await LocalWorkflow.open(f.root);
   const plan = await workflow.previewSetup();
   const before = inventory(f.root);
-  await assert.rejects(workflow.files.commit(plan, { id: 'APR-caller-json' }), { code: 'capability-unavailable' });
+  await assert.rejects(workflow.files.commit(plan, { id: 'APR-caller-json' }), { code: 'authority-required' });
   assert.deepEqual(inventory(f.root), before);
 });
 
