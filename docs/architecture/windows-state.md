@@ -268,6 +268,18 @@ are platform branches in that adapter, not a second controller:
 - A replacement stage is created with the existing file's owner/group/DACL,
   then checked for exact owner/group/DACL and access-affecting label/resource/
   central-policy/filter equivalence.
+  Because Windows creation can process inheritance/control state, the copied
+  descriptor is explicitly applied while the `CREATE_NEW` stage is still empty
+  and held by a non-shared handle. Size and link count are checked before and
+  after this step. This affects only that newly reserved stage; an existing stage
+  or the source is never repaired, and no sensitive bytes are written before
+  privacy and permission equivalence succeed.
+  Comparison parses SDDL into binary descriptors, so SID spelling is not identity.
+  The sole control normalization removes the `SE_DACL_AUTO_INHERITED` history bit
+  **only when that descriptor is protected**: inheritance is blocked and every
+  ordered ACE byte, ACE flag, owner/group SID, protection bit and auto-inherit
+  request remains compared. Unprotected inheritance-control differences are
+  rejected. Access-policy equality remains a separate strict check.
   The helper never changes the existing file's descriptor. If the descriptor
   cannot be preserved by creation/inheritance, the empty stage is retained as
   an explicit uncertain outcome; no sensitive stage bytes or source replacement
@@ -312,15 +324,36 @@ under a replaced lock and recovery cannot steal a lock still leased by that
 helper. Read-only status never reclaims a lock. Partial/unparseable locks require
 manual reconciliation; no force flag or caller assertion grants quiescence.
 
-The new actual-application suite is separately bounded to 13 minutes, suitable
-for a dedicated **at most 15-minute** Windows job:
+The actual-application cases retain stable unique names and are selected into
+separate **at most 15-minute** Windows jobs; do not add their runtimes together
+under the suite's 13-minute aggregate timer:
 
 ```sh
 npm run build
-node --test --test-concurrency=1 tests/windows-local-runtime.test.mjs
+node --test --test-concurrency=1 --test-name-pattern="^real Windows setup, callback receipts," tests/windows-local-runtime.test.mjs
+node --test --test-concurrency=1 --test-name-pattern="^real Windows file journals recover" tests/windows-local-runtime.test.mjs
+node --test --test-concurrency=1 --test-name-pattern="^real Windows evidence-pruning application" tests/windows-local-runtime.test.mjs
 ```
 
-It exercises real `LocalWorkflow`, `openLocalAuthority` and
+Each command above is a separate job, not sequential steps within one 15-minute
+budget. Run this quick, direct security-copy regression first:
+
+```sh
+node --test --test-concurrency=1 --test-name-pattern="^(security-copy diagnostics|Windows security comparison|Windows direct stage copy)" tests/windows-private-state.test.mjs
+```
+
+It covers canonical and explicitly edited protected DACLs, rejects real access
+changes, and tests the limited control normalization independently of workflow
+setup. Failures identify only the differing component
+(`owner`, `group`, `control`, `dacl`, `descriptor`, or `policy`); assertions compare
+bounded permission fingerprints, not raw ACLs, SIDs or paths. Actual differences
+still stop publication and preserve the empty/retained stage. The initial
+application run at `c54ad89` stopped at this comparison after 551 seconds and
+then exhausted its aggregate timeout; it did not qualify source or pruning
+integration. A passing quick rerun and the three actual-application jobs are
+still required; the representation fix is not itself hosted qualification.
+
+The application suite exercises real `LocalWorkflow`, `openLocalAuthority` and
 `LocalEvidencePruning` APIs: declined/malformed and approved setup, persistent
 receipt reopen/revocation, draft and batched capture, replacement/new source
 patches, exact-grant and stale-edit rejection, source DACL preservation, actual

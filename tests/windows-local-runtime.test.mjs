@@ -15,7 +15,8 @@ import { TerminalAuthority } from '../dist/adapters/authority/terminal.js';
 import { openRuntimeStore } from '../dist/adapters/persistence/index.js';
 import { requireWindowsProcessAbsent, windowsPrivateEntries } from '../dist/adapters/platform/windows-private-state.js';
 import { digestContent } from '../dist/kernel/revisions.js';
-import { createPrivateFixtureRoot, removeFixtureRoot, privateEntry, powershell } from './fixtures/windows-private-state.mjs';
+import { createPrivateFixtureRoot, removeFixtureRoot, privateEntry } from './fixtures/windows-private-state.mjs';
+import { windowsFileSecurity } from './fixtures/windows-file-security.mjs';
 
 const windows = { skip: process.platform !== 'win32', timeout: 720_000 };
 const ok = (result) => { assert.equal(result.status, 'ok', JSON.stringify(result)); return result.value; };
@@ -71,25 +72,6 @@ function child(input, status) {
   return result;
 }
 
-const acl = String.raw`
-$ErrorActionPreference = 'Stop'
-$v = [Console]::In.ReadToEnd() | ConvertFrom-Json
-$sections = [Security.AccessControl.AccessControlSections]'Owner, Group, Access'
-$security = [IO.File]::GetAccessControl($v.path, $sections)
-if ($v.removeSystem) {
-  foreach ($rule in @($security.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]))) {
-    if ($rule.IdentityReference.Value -eq 'S-1-5-18') { $security.RemoveAccessRuleSpecific($rule) }
-  }
-}
-if ($v.publicRead) {
-  $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
-    [Security.Principal.SecurityIdentifier]::new('S-1-1-0'), 'Read', 'Allow'))
-}
-if ($null -ne $v.restoreSddl) { $security.SetSecurityDescriptorSddlForm($v.restoreSddl, $sections) }
-if ($v.removeSystem -or $v.publicRead -or $null -ne $v.restoreSddl) { [IO.File]::SetAccessControl($v.path, $security) }
-[Console]::Out.Write((@{sddl=[IO.File]::GetAccessControl($v.path, $sections).GetSecurityDescriptorSddlForm($sections)} | ConvertTo-Json -Compress))
-`;
-
 describe('Windows real application integration', { ...windows, timeout: 780_000 }, () => {
 test('real Windows setup, callback receipts, draft/capture and exact source patches preserve private data and ACLs', windows, async (t) => {
   const f = await fixture(t);
@@ -119,7 +101,7 @@ test('real Windows setup, callback receipts, draft/capture and exact source patc
   privateEntry(source, false, true);
   const original = 'export const filter = "before";\n';
   writeExisting(source, original);
-  const permissions = powershell(acl, { path: source, removeSystem: true }).sddl;
+  const permissions = windowsFileSecurity({ path: source, removeSystem: true }).fingerprint;
   const change = await f.workflow.previewNewChange({
     slug: 'filters', id: 'CHG-remember-filter', specs: ['filters', 'reset'],
     sourcePaths: ['src/filter-preference.ts', 'tests/filter-preference.test.ts'],
@@ -159,7 +141,7 @@ test('real Windows setup, callback receipts, draft/capture and exact source patc
   await f.workflow.commitSourcePatch('filters', 'TSK-filter', proposal, patch, approval);
   assert.equal(readFileSync(source, 'utf8'), proposal.changes[0].content);
   assert.equal(readFileSync(path.join(f.root, proposal.changes[1].path), 'utf8'), proposal.changes[1].content);
-  assert.equal(powershell(acl, { path: source }).sddl, permissions);
+  assert.equal(windowsFileSecurity({ path: source }).fingerprint, permissions);
   assert.equal(lstatSync(source).nlink, 1);
   const reopened = await openLocalAuthority({ directory: f.root, transport: f.transport });
   assert.equal(ok(await reopened.resolve(approval)).state, 'current');
@@ -236,13 +218,13 @@ test('real Windows file journals recover after process exit, preserve edits, and
   assert.equal(readFileSync(stage, 'utf8'), first.content);
   assert.equal(existsSync(destination), false);
   unlinkSync(`${stage}:user`);
-  const stageSecurity = powershell(acl, { path: stage }).sddl;
-  const changedSecurity = powershell(acl, { path: stage, publicRead: true }).sddl;
+  const stageSecurity = windowsFileSecurity({ path: stage }).sddl;
+  const changedSecurity = windowsFileSecurity({ path: stage, publicRead: true }).fingerprint;
   await assert.rejects(failure.workflow.files.recover(stageId, stageGrant), { code: 'effect-outcome-unknown' });
-  assert.equal(powershell(acl, { path: stage }).sddl, changedSecurity);
+  assert.equal(windowsFileSecurity({ path: stage }).fingerprint, changedSecurity);
   assert.equal(readFileSync(stage, 'utf8'), first.content);
   assert.equal(existsSync(destination), false);
-  powershell(acl, { path: stage, restoreSddl: stageSecurity });
+  windowsFileSecurity({ path: stage, restoreSddl: stageSecurity });
   const replaced = child({
     mode: 'recovery-stage-replace', root: failure.root, transactionId: stageId,
     approval: stageGrant, stage, stageContent: first.content,

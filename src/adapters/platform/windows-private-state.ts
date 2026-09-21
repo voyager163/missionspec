@@ -21,6 +21,8 @@ const diagnosticPhases = [
   'entry-inheritance', 'json-module', 'json-input', 'access-policy',
   'directory-identity', 'directory-flush', 'directory-close', 'flush-options',
   'file-metadata', 'file-security', 'process-inspection', 'process-present',
+  'file-security-owner', 'file-security-group', 'file-security-control', 'file-security-dacl',
+  'file-security-descriptor', 'file-security-policy',
   'writer-lease', 'lease-close',
 ];
 const exceptionTypes = [

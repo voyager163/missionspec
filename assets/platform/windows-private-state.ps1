@@ -290,9 +290,31 @@ try {
         if ($entry.directory) {
           if (!$native::CreateDirectoryW($p, $attributes)) { throw 'create' }
         } else {
-          $handle = $native::CreateFileW($p, 0x40000000, 7, $attributes, 1, 0x80, [IntPtr]::Zero)
+          $sharing = if ($null -ne $security) { 0 } else { 7 }
+          $creationAccess = if ($null -ne $security) { 0x40020080 } else { 0x40000000 }
+          $handle = $native::CreateFileW($p, $creationAccess, $sharing, $attributes, 1, 0x80, [IntPtr]::Zero)
           if ($handle -eq [IntPtr](-1)) { throw 'create' }
-          if (!$native::CloseHandle($handle)) { throw 'close' }
+          try {
+            if ($null -ne $security) {
+              $phase = 'file-security'
+              $createdInfo = [Runtime.InteropServices.Marshal]::AllocHGlobal(52)
+              try {
+                if (!$native::GetFileInformationByHandle($handle, $createdInfo) -or
+                    [Runtime.InteropServices.Marshal]::ReadInt32($createdInfo, 32) -ne 0 -or
+                    [Runtime.InteropServices.Marshal]::ReadInt32($createdInfo, 36) -ne 0 -or
+                    [Runtime.InteropServices.Marshal]::ReadInt32($createdInfo, 40) -ne 1) { throw 'file-security' }
+                # Apply the exact template only to this CREATE_NEW, still-empty,
+                # non-shared stage; never repair an existing path or the source.
+                $copied = [Security.AccessControl.FileSecurity]::new()
+                $copied.SetSecurityDescriptorSddlForm($security, [Security.AccessControl.AccessControlSections]'Owner, Group, Access')
+                [IO.File]::SetAccessControl($p, $copied)
+                if (!$native::GetFileInformationByHandle($handle, $createdInfo) -or
+                    [Runtime.InteropServices.Marshal]::ReadInt32($createdInfo, 32) -ne 0 -or
+                    [Runtime.InteropServices.Marshal]::ReadInt32($createdInfo, 36) -ne 0 -or
+                    [Runtime.InteropServices.Marshal]::ReadInt32($createdInfo, 40) -ne 1) { throw 'file-security' }
+              } finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($createdInfo) }
+            }
+          } finally { if (!$native::CloseHandle($handle)) { throw 'close' } }
         }
       } finally {
         [void]$native::LocalFree($descriptor)
@@ -300,7 +322,12 @@ try {
       }
     }
     CheckEntry $p $true ([bool]$entry.directory) ([bool]$entry.writable) $false $entry.flushIdentity ([bool]$entry.ordinaryFile)
-    if ($null -ne $security -and ((FileSecurity $p) -cne $security -or (FilePolicy $p) -cne $label)) { throw 'file-security' }
+    if ($null -ne $security) {
+      $phase = 'file-security'
+      $component = Compare-MissionSpecFileSecurity $security (FileSecurity $p)
+      if ($component -cne 'equal') { throw ('file-security-' + $component) }
+      if ((FilePolicy $p) -cne $label) { throw 'file-security-policy' }
+    }
   }
   if ($leaseHandle -ne [IntPtr]::Zero) {
     $closing = $leaseHandle
@@ -314,6 +341,8 @@ try {
   if ($reason -notin @('system-executable','open','identity','type','links','alias','acl','owner','unsupported-ace','public-access',
       'user-access','inheritance','close','volume','descriptor','create','directory-identity','directory-flush','directory-close','flush-options',
       'file-metadata','file-security','process-inspection','process-present','writer-lease','lease-close')) { $reason = $phase }
+  if ($failure.Exception.Message -in @('file-security-owner','file-security-group','file-security-control',
+      'file-security-dacl','file-security-descriptor','file-security-policy')) { $reason = $failure.Exception.Message }
   $knownTypes = @('RuntimeException', 'MethodException', 'MethodInvocationException', 'PSInvalidCastException',
     'ParameterBindingException', 'ArgumentException', 'ArgumentNullException', 'InvalidOperationException',
     'NotSupportedException', 'TypeLoadException', 'MissingMethodException', 'IOException', 'UnauthorizedAccessException',

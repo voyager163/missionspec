@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { parse } from '@babel/parser';
 import {
   checkIssueForm, checkLocalLink, checkRepository, checkWorkflow, markdownInfo, parseYaml
 } from '../scripts/check-repository.mjs';
@@ -23,6 +24,37 @@ function validWorkflow() {
     } }
   };
 }
+
+test('Windows workflow selectors cover every application scenario exactly once without matching the whole suite', async () => {
+  const source = await readFile(new URL('./windows-local-runtime.test.mjs', import.meta.url), 'utf8');
+  const tree = parse(source, { sourceType: 'module' });
+  const names = [];
+  function visit(node) {
+    if (node === null || typeof node !== 'object') return;
+    if (node.type === 'CallExpression' && node.callee.type === 'Identifier' && node.callee.name === 'test') {
+      assert.equal(node.arguments[0]?.type, 'StringLiteral', 'Windows scenarios require stable literal names.');
+      names.push(node.arguments[0].value);
+    }
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) value.forEach(visit);
+      else if (value !== null && typeof value === 'object') visit(value);
+    }
+  }
+  visit(tree);
+  const workflow = parseYaml(await readFile(new URL('../.github/workflows/repository.yml', import.meta.url), 'utf8'), 'repository workflow');
+  const matrix = workflow.jobs['windows-workflow'].strategy.matrix.include;
+  assert.equal(matrix.length, names.length);
+  assert(names.length > 0);
+  const covered = new Set();
+  for (const { pattern } of matrix) {
+    const selector = new RegExp(pattern, 'u');
+    assert.equal(selector.test('Windows real application integration'), false, 'Matching a parent suite runs all its children.');
+    const matches = names.filter((name) => selector.test(name));
+    assert.equal(matches.length, 1);
+    assert.equal(covered.has(matches[0]), false);
+    covered.add(matches[0]);
+  }
+});
 
 test('Markdown parser handles reference links, code fences and duplicate GitHub headings', () => {
   const info = markdownInfo('# Overview\n# Overview\n[Guide][ref]\n\n[ref]: docs/guide.md#intro\n\n```\n[fake](missing.md)\n```\n');

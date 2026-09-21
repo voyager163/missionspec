@@ -84,9 +84,19 @@ jobs:
       - name: Qualify actual Windows ACLs and storage boundaries
         run: node --test --test-concurrency=1 tests/windows-private-state.test.mjs tests/windows-directory-durability.test.mjs
   windows-workflow:
-    name: Windows reviewed workflow qualification
+    name: Windows workflow (${{ matrix.scenario }})
     runs-on: windows-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - scenario: source
+            pattern: 'real Windows setup, callback'
+          - scenario: recovery
+            pattern: 'real Windows file journals'
+          - scenario: pruning
+            pattern: 'real Windows evidence-pruning'
     steps:
       - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -101,4 +111,4 @@ jobs:
       - name: Build the reviewed workflow integration
         run: npm run build
       - name: Qualify real Windows workflow and recovery APIs
-        run: node --test --test-concurrency=1 tests/windows-local-runtime.test.mjs
+        run: node --test --test-concurrency=1 --test-name-pattern="${{ matrix.pattern }}" tests/windows-local-runtime.test.mjs

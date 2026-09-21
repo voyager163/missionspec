@@ -22,6 +22,7 @@ import { serializeDiagnosticEvent } from '../dist/adapters/logging/diagnostics.j
 import { openLocalAuthority } from '../dist/adapters/authority/local-authority.js';
 import { TerminalAuthority } from '../dist/adapters/authority/terminal.js';
 import { digestContent } from '../dist/kernel/revisions.js';
+import { windowsFileSecurity } from './fixtures/windows-file-security.mjs';
 
 const windows = { skip: process.platform !== 'win32', timeout: 240_000 };
 const ok = (result) => { assert.equal(result.status, 'ok', JSON.stringify(result)); return result.value; };
@@ -231,6 +232,84 @@ test('Windows helper diagnostics expose only fixed phases, exception categories 
     reason: 'owner', phase: 'PRIVATE path', boundary: 'PRIVATE SID',
     exceptionType: 'PRIVATE ACL', innerType: 'PRIVATE secret', line: Infinity,
   }), 'owner');
+});
+
+test('security-copy diagnostics expose bounded component names, not descriptors', () => {
+  for (const component of ['owner', 'group', 'control', 'dacl', 'descriptor', 'policy']) {
+    const reason = `file-security-${component}`;
+    assert.equal(windowsFailureDiagnostic({ reason, phase: 'file-security' }), `${reason}; phase=file-security`);
+  }
+  assert.equal(windowsFailureDiagnostic({ reason: 'file-security-PRIVATE-SID-or-path' }), 'unavailable');
+});
+
+test('Windows security comparison normalizes only protected auto-inheritance bookkeeping', windows, () => {
+  const results = powershell(String.raw`
+$ErrorActionPreference = 'Stop'
+$policy = [Console]::In.ReadToEnd() | ConvertFrom-Json
+. $policy
+$source = 'O:SYG:BAD:P(A;;FA;;;SY)(A;;FR;;;BA)'
+$cases = @(
+  'O:S-1-5-18G:S-1-5-32-544D:PAI(A;;FA;;;SY)(A;;FR;;;BA)',
+  'O:BAG:BAD:P(A;;FA;;;SY)(A;;FR;;;BA)',
+  'O:SYG:SYD:P(A;;FA;;;SY)(A;;FR;;;BA)',
+  'O:SYG:BAD:(A;;FA;;;SY)(A;;FR;;;BA)',
+  'O:SYG:BAD:PAR(A;;FA;;;SY)(A;;FR;;;BA)',
+  'O:SYG:BAD:P(A;;FR;;;SY)(A;;FR;;;BA)',
+  'O:SYG:BAD:P(A;CI;FA;;;SY)(A;;FR;;;BA)',
+  'O:SYG:BAD:P(A;;FR;;;BA)(A;;FA;;;SY)'
+)
+$results = @()
+foreach ($candidate in $cases) { $results += Compare-MissionSpecFileSecurity $source $candidate }
+$results += Compare-MissionSpecFileSecurity 'O:SYG:BAD:(A;;FA;;;SY)' 'O:SYG:BAD:AI(A;;FA;;;SY)'
+[Console]::Out.Write((ConvertTo-Json -InputObject $results -Compress))
+`, fileURLToPath(new URL('../assets/platform/windows-access-policy.ps1', import.meta.url)));
+  assert.deepEqual(results, ['equal', 'owner', 'group', 'control', 'control', 'dacl', 'dacl', 'dacl', 'control']);
+});
+
+test('Windows direct stage copy preserves canonical and edited protected source security', windows, (t) => {
+  const f = createPrivateFixtureRoot();
+  t.after(() => removeFixtureRoot(f.root, f.identity));
+  for (const removeSystem of [false, true]) {
+    const name = removeSystem ? 'edited' : 'canonical';
+    const source = path.join(f.root, `${name}.txt`);
+    const stage = path.join(f.root, `${name}.stage`);
+    privateEntry(source, false, true);
+    writeFileSync(source, 'source bytes must not change');
+    const before = windowsFileSecurity({ path: source, removeSystem });
+    windowsPrivateEntries([{
+      path: stage, directory: false, writable: true, create: true, ordinaryFile: true, copySecurityFrom: source,
+    }]);
+    assert.equal(readFileSync(stage).length, 0);
+    windowsPrivateEntries([{ path: stage, directory: false, writable: true, ordinaryFile: true, sameSecurityAs: source }]);
+    assert.equal(windowsFileSecurity({ path: stage }).fingerprint, before.fingerprint, name);
+    assert.equal(windowsFileSecurity({ path: source }).fingerprint, before.fingerprint, name);
+    assert.equal(readFileSync(source, 'utf8'), 'source bytes must not change');
+    writeFileSync(stage, 'reviewed stage bytes');
+    assert.throws(() => windowsPrivateEntries([{
+      path: stage, directory: false, writable: true, create: true, ordinaryFile: true, copySecurityFrom: source,
+    }]));
+    assert.equal(windowsFileSecurity({ path: stage }).fingerprint, before.fingerprint, name);
+    assert.equal(readFileSync(stage, 'utf8'), 'reviewed stage bytes');
+    if (!removeSystem) {
+      windowsFileSecurity({ path: source, removeSystem: true });
+      assert.throws(() => windowsPrivateEntries([{
+        path: stage, directory: false, writable: true, ordinaryFile: true, sameSecurityAs: source,
+      }]), /file-security-dacl/u);
+      assert.equal(readFileSync(stage, 'utf8'), 'reviewed stage bytes');
+      assert.equal(windowsFileSecurity({ path: stage }).fingerprint, before.fingerprint);
+    }
+  }
+  const unsafe = path.join(f.root, 'unsafe.txt');
+  const rejectedStage = path.join(f.root, 'unsafe.stage');
+  privateEntry(unsafe, false, true);
+  writeFileSync(unsafe, 'unadopted source bytes');
+  const changed = windowsFileSecurity({ path: unsafe, publicRead: true });
+  assert.throws(() => windowsPrivateEntries([{
+    path: rejectedStage, directory: false, writable: true, create: true, ordinaryFile: true, copySecurityFrom: unsafe,
+  }]));
+  assert.equal(existsSync(rejectedStage), false);
+  assert.equal(windowsFileSecurity({ path: unsafe }).fingerprint, changed.fingerprint);
+  assert.equal(readFileSync(unsafe, 'utf8'), 'unadopted source bytes');
 });
 
 test('untrusted create-child ACE rights never become write/append grants to an OS file', windows, () => {
