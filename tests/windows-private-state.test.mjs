@@ -33,7 +33,8 @@ const blocked = (result, reason) => {
 const privateEntry = (target, directory = false, create = false) =>
   windowsPrivateEntries([{ path: target, directory, writable: true, create }]);
 const powershell = (source, value) => {
-  const script = "[Console]::InputEncoding = [Text.UTF8Encoding]::new($false, $true)\n" + source;
+  const script = "[Console]::InputEncoding = [Text.UTF8Encoding]::new($false, $true)\n" +
+    "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false, $true)\n" + source;
   const result = spawnSync('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', [
     '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64'),
   ], { input: JSON.stringify(value), encoding: 'utf8', timeout: 30_000, maxBuffer: 65_536, windowsHide: true, shell: false });
@@ -50,6 +51,11 @@ if ($v.action -eq 'public') {
     [Security.Principal.SecurityIdentifier]::new('S-1-1-0'), 'Read', 'Allow')
   $acl.AddAccessRule($rule)
   Set-Acl -LiteralPath $v.path -AclObject $acl
+} elseif ($v.action -eq 'ancestor-write') {
+  $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+    [Security.Principal.SecurityIdentifier]::new('S-1-1-0'), 'DeleteSubdirectoriesAndFiles', 'Allow')
+  $acl.AddAccessRule($rule)
+  Set-Acl -LiteralPath $v.path -AclObject $acl
 } elseif ($v.action -eq 'owner') {
   $acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
   Set-Acl -LiteralPath $v.path -AclObject $acl
@@ -60,8 +66,36 @@ if ($v.action -eq 'public') {
 [Console]::Out.Write((@{sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;before=$before;after=(Get-Acl -LiteralPath $v.path).Sddl} | ConvertTo-Json -Compress))
 `;
 
+let knownUserFolders;
+function privateFixtureBase() {
+  knownUserFolders ??= powershell(String.raw`
+$ErrorActionPreference = 'Stop'
+[Console]::Out.Write((@{
+  profile=[Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+  localAppData=[Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+} | ConvertTo-Json -Compress))
+`, null);
+  const { profile, localAppData } = knownUserFolders;
+  validateWindowsStatePath(profile);
+  validateWindowsStatePath(localAppData);
+  const relative = path.relative(profile, localAppData);
+  assert.ok(relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative), 'Local application data must lie inside the current OS-reported user profile');
+  for (const candidate of [localAppData, profile]) {
+    try {
+      // Existing locations are checked, never re-ACL'd; every fixture operation
+      // independently rechecks this complete ancestry through the real helper.
+      privateEntry(candidate, true);
+      return candidate;
+    } catch (error) {
+      if (error?.code !== 'EPERM') throw error;
+    }
+  }
+  throw new Error('No current-user-owned private local NTFS profile location is available for qualification fixtures');
+}
+
 async function fixture(t) {
-  const root = path.join(realpathSync(process.cwd()), `.windows-state-${randomUUID()}`);
+  const root = path.join(privateFixtureBase(), `.windows-state-${randomUUID()}`);
   const stores = [];
   assert.equal(existsSync(root), false);
   t.after(() => {
@@ -349,6 +383,26 @@ test('unsafe file/directory ACLs, hardlinks and junction/case aliases cannot ope
   assert.throws(() => privateEntry(path.join(junction, 'state'), true));
   rmSync(junction);
   assert.throws(() => privateEntry(f.filename.replace('ledger.sqlite', 'LEDGER.sqlite')));
+});
+
+test('an unsafe test-owned ancestor blocks private creation and ledger reopen without ACL repair', windows, async (t) => {
+  const f = await fixture(t);
+  ok((await f.openStore()).close());
+  const target = path.join(f.root, `blocked-${randomUUID()}`);
+  const original = powershell(aclScript, { path: f.root, action: 'ancestor-write' });
+  try {
+    const before = inventory(f.root);
+    assert.throws(() => privateEntry(target, true, true), /public-access.*boundary=ancestor/u);
+    blocked(await openRuntimeStore({
+      directory: f.directory, mode: 'read-write', expectedWorkspace: f.workspace,
+    }), 'unavailable');
+    assert.equal(existsSync(target), false);
+    assert.deepEqual(inventory(f.root), before);
+    assert.equal(powershell(aclScript, { path: f.root }).after, original.after);
+  } finally {
+    powershell(aclScript, { path: f.root, action: 'restore', sddl: original.before });
+  }
+  privateEntry(f.root, true);
 });
 
 test('preferences and JSONL use SID ACLs, real SQLite reopen and bounded explicit pruning', windows, async (t) => {

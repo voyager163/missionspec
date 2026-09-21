@@ -180,8 +180,9 @@ storage-controller or every-filesystem qualification.
 
 ## Independent hosted validation
 
-With Node **24.21.0**, dependencies already restored and an ACL-safe local NTFS
-checkout, the dedicated command is:
+With Node **24.21.0** and dependencies already restored, run this command from the
+checkout. The helper remains loaded from the built package; sensitive generated
+fixtures use separately validated current-user profile storage:
 
 ```sh
 npm run build
@@ -189,10 +190,23 @@ node --test --test-concurrency=1 tests/windows-private-state.test.mjs
 ```
 
 Do not combine this with the POSIX-specific legacy suites or infer that skipped
-Windows tests on macOS qualify anything. The test creates only exclusive fixture
-directories beneath its working directory, never changes the checkout's ACLs,
-and removes only its fixtures. An unsafe runner ancestor must fail, not be
-silently changed by the adapter or disguised as a skipped success.
+Windows tests on macOS qualify anything. For sensitive fixtures, the test asks
+the OS for the current user's `LocalApplicationData` and `UserProfile` known
+folders—not unchecked environment paths, `RUNNER_TEMP` or `os.tmpdir()`.
+Local application data must be inside that profile. It selects local application
+data, or the profile itself, only after the unchanged production helper confirms
+current-user ownership, restrictive ACLs, a local NTFS volume and safe ancestors.
+If neither location qualifies, the test fails; it never changes an existing
+profile or checkout ACL to obtain access.
+
+Every private fixture is an exclusively created UUID directory under that
+validated location, and cleanup removes only that exact new directory after its
+SQLite handles close. A controlled negative case grants delete-child access to
+Everyone **only on a newly created test-owned parent**, proves private creation
+and ledger reopening fail without ACL repair or database changes, then restores
+that test parent's original descriptor for cleanup. No OS/profile/checkout ACL
+is modified. The independent primitive probe may still use a new empty,
+nonsensitive checkout directory; its directory contents are not private state.
 
 The first hosted run passed the path grammar and native primitive probe, but all
 nine ACL/storage cases failed before private fixture creation with an unexpected
@@ -201,7 +215,14 @@ of typed `AceFlags` at the `InheritOnly` predicate. The helper now explicitly
 converts both ACE flags and the enum mask to integers, including all subsequent
 inheritance predicates, without changing their values or ACL decisions. A
 32-case synthetic `CommonAce` regression exercises the actual enum representation.
-Storage qualification remains pending a passing hosted rerun. Follow-up
+The [third run, 35576039457](https://github.com/voyager163/missionspec/actions/runs/35576039457),
+passed that regression and advanced to an intentional `public-access` rejection
+in the shared `D:\a` checkout ancestry. **That checkout was not a qualified private
+state location.** Moving only generated fixtures to independently validated
+profile storage does not qualify the public checkout, weaken ancestor policy,
+or enable CLI/workspace mutations there. Storage qualification now targets the
+selected profile-local NTFS directories and remains pending a passing hosted
+rerun. Follow-up
 diagnostics report only allowlisted operation phases, helper/system/ancestor/private
 boundary categories, exception type categories and bounded script line numbers.
 They never copy native exception messages, filesystem paths, ACLs, SIDs, raw
