@@ -42,8 +42,13 @@ APIs, not a native addon, external executable shim or a second workflow engine.
   handle** using `GetSecurityInfo`. Data hashes and stream/attribute checks
   likewise use that handle.
 - A new file receives its private descriptor at allocation. Any copied source
-  descriptor is applied to that newly allocated handle, never to a reopened
-  pathname. Content is written and flushed through the same handle.
+  descriptor is compared immediately on that newly allocated handle. If creation
+  already assigned the exact supported security, there is no redundant ownership
+  setter. Otherwise only differing owner/group components and the required DACL
+  are applied to that handle, never to a reopened pathname. Exact owner, group,
+  protected-DACL/control, ordered-ACE and access-policy comparisons still gate
+  content writing, and the held source is checked again for security drift.
+  Content is written and flushed through the same handle.
 - Deletion uses `SetFileInformationByHandle(FileDispositionInfoEx)` on the
   verified read/delete handle. No read-only-attribute override or legacy
   pathname-unlink fallback is used.
@@ -116,6 +121,22 @@ Run the focused held-handle regression first on actual Windows:
 npm run build
 node --test --test-concurrency=1 tests/windows-file-races.test.mjs
 ```
+
+For a quick check of the source-security-copy path specifically:
+
+```sh
+node --test --test-concurrency=1 --test-name-pattern="^held creation copies exact" tests/windows-file-races.test.mjs
+```
+
+The first hosted held-handle run at `406ef73` passed allocation/ancestor
+substitution and competing lock deletion, then failed the combined security
+setter before publication. The correction avoids re-requesting unchanged
+ownership and distinguishes descriptor extraction, setter status and actual
+security drift. A setter failure reports its directly returned numeric Windows
+status; it does not interpret a cached `GetLastError`, dump ACLs/SIDs/paths, or
+relax fingerprint equality. Canonical and explicitly edited private descriptors
+are both tested directly before the longer publication scenarios. Fresh Windows
+evidence is still required.
 
 Separate processes attempt file writes, renames, ancestor replacement and
 competing lock reclamation at held-handle checkpoints. Further cases create a

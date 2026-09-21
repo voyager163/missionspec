@@ -16,8 +16,13 @@ native proposal bridges, MCP transport, focused clarification, consistency/gap
 reports, reviewed lessons, explicit import and recoverable evidence pruning.
 **Native autonomous execution remains unqualified and disabled in the CLI.**
 Synthetic protocol tests and installed skills are not live-host qualification.
-Windows private-state writes, live native execution qualification and production
-telemetry deployment remain separate release gates.
+Windows private-state APIs have dedicated native qualification; interactive
+Windows terminal confirmation remains disabled. The current held-handle file
+protocol must pass its own race and recovery gates before it is qualified.
+See the [Windows capability boundary](docs/architecture/windows-state.md).
+Live native execution and production telemetry deployment remain separate
+release gates. Ordinary Claude Code skills and CLI/MCP integration do not
+require the optional programmatic Claude SDK bridge.
 
 The root package manifest is private at version `0.0.0` for local development;
 it does not represent a product release.
@@ -67,6 +72,9 @@ and retained third-party notices. Package checks do not publish anything.
 The full effectful suite targets macOS/Linux. `npm run check:portable` exercises
 the explicitly bounded Windows read-only/contract surface without pretending
 that POSIX persistence or pseudo-terminal tests qualify Windows writes.
+Separate Windows jobs exercise private storage, concurrent file replacement
+and the actual setup/source, recovery and pruning APIs. Application scenarios
+run only after the held-handle race regressions pass.
 
 These are source-checkout development commands, not product installation.
 Compilation and static import checks do not demonstrate complete engines,

@@ -40,7 +40,7 @@ read back these hosted controls:
 
 The effective branch-rules API confirms both branches inherit these rules.
 The implementation has been committed and published through a pull request.
-After observing successful hosted runs, seven required check contexts were bound
+After observing successful hosted runs, eight required check contexts were bound
 to their actual GitHub Apps, with strict up-to-date-branch enforcement:
 
 | Required context | GitHub App ID |
@@ -48,12 +48,13 @@ to their actual GitHub Apps, with strict up-to-date-branch enforcement:
 | Repository checks (ubuntu-latest) | 15368 (`github-actions`) |
 | Repository checks (macos-latest) | 15368 (`github-actions`) |
 | Windows read-only compatibility | 15368 (`github-actions`) |
+| Windows private-state qualification | 15368 (`github-actions`) |
 | Dependency review | 15368 (`github-actions`) |
 | CodeQL (javascript-typescript) | 15368 (`github-actions`) |
 | CodeQL (actions) | 15368 (`github-actions`) |
 | CodeQL | 57789 (`github-advanced-security`) |
 
-Qualification revision: `2f92429cf508912eeae89a7aa964d5708aeb97dd`, with
+Initial qualification revision: `2f92429cf508912eeae89a7aa964d5708aeb97dd`, with
 GitHub's tested merge revision `4f1db30b1eba870612ed1d10b397e81e68cd4223`.
 [Repository checks](https://github.com/voyager163/missionspec/actions/runs/35570034629),
 [CodeQL analysis](https://github.com/voyager163/missionspec/actions/runs/35570034539)
@@ -68,7 +69,16 @@ assertion and a Dependency Graph licensing discrepancy; both were addressed
 before requiring the check identities. The
 [exact-version license guard](licensing.md#reviewed-dependency-graph-metadata-discrepancy)
 documents the latter. Successful scans are not a security certification or proof
-of native-model behavior. Windows private writes remain separately unqualified.
+of native-model behavior.
+
+Subsequent Windows private-storage and directory-barrier qualification passed
+at `d684dbb`; the source, recovery and pruning application scenarios passed at
+`bbd2f97`. That application revision also produced six CodeQL filesystem-race
+findings, correctly blocking merge. The PR remains draft while the replacement
+[held-handle protocol](architecture/windows-file-races.md) is qualified against
+real Windows races and all existing application scenarios. Earlier passing
+runs do not qualify a changed protocol. Windows terminal/ConPTY confirmation
+and native execution remain separate disabled capabilities.
 
 ## 1. Validate locally
 
@@ -145,6 +155,14 @@ and `macos-latest`. A separate `Windows read-only compatibility` job runs
 write/TTY tests or implying Windows ACL qualification. The observed required
 identities above are specific to the qualified revision. Matrix expansion and
 workflow revisions can alter the names; coordinate any rename with the ruleset.
+
+`Windows private-state qualification` exercises actual NTFS/SID/ACL storage and
+directory barriers. `Windows held-handle race qualification` exercises concurrent
+file/ancestor replacement and recoverable publication; it is a prerequisite for
+the three `Windows workflow (source|recovery|pruning)` jobs. Each native job has
+its own 15-minute bound. Add new contexts to required checks only after observing
+their actual successful reports and GitHub App identities; never substitute
+local Windows skips or an older protocol's results.
 
 The local definition uses full-SHA-pinned actions and a read-only token, without
 secrets or caches. Its isolated service and static infrastructure checks do not

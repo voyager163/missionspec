@@ -24,6 +24,7 @@ const diagnosticPhases = [
   'file-metadata', 'file-security', 'process-inspection', 'process-present',
   'file-security-owner', 'file-security-group', 'file-security-control', 'file-security-dacl',
   'file-security-descriptor', 'file-security-policy',
+  'file-security-copy', 'file-security-set',
   'writer-lease', 'lease-close',
   'file-operation', 'effect-root', 'effect-path', 'effect-open', 'effect-read', 'effect-write', 'effect-size',
   'effect-identity', 'effect-preimage', 'effect-flush', 'effect-rename', 'effect-delete', 'effect-cancelled',

@@ -376,7 +376,7 @@ try {
       'user-access','inheritance','close','volume','descriptor','create','directory-identity','directory-flush','directory-close','flush-options',
       'file-metadata','file-security','process-inspection','process-present','writer-lease','lease-close')) { $reason = $phase }
   if ($failure.Exception.Message -in @('file-security-owner','file-security-group','file-security-control',
-      'file-security-dacl','file-security-descriptor','file-security-policy')) { $reason = $failure.Exception.Message }
+      'file-security-dacl','file-security-descriptor','file-security-policy','file-security-set')) { $reason = $failure.Exception.Message }
   if ($failure.Exception.Message -in @('effect-root','effect-path','effect-open','effect-read','effect-write','effect-size',
       'effect-identity','effect-preimage','effect-flush','effect-rename','effect-delete','effect-cancelled','effect-operation',
       'handle-close','publication-intent','publication-state')) { $reason = $failure.Exception.Message }

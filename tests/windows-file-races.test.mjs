@@ -8,10 +8,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import {
-  ensureWindowsPrivateDirectories, removeWindowsPrivateFile, windowsPublication, writeWindowsPrivateFile,
+  ensureWindowsPrivateDirectories, inspectWindowsPrivateFile, removeWindowsPrivateFile, windowsPublication, writeWindowsPrivateFile,
 } from '../dist/adapters/platform/windows-private-state.js';
 import { digestContent } from '../dist/kernel/revisions.js';
 import { createPrivateFixtureRoot, removeFixtureRoot } from './fixtures/windows-private-state.mjs';
+import { windowsFileSecurity } from './fixtures/windows-file-security.mjs';
 
 const windows = { skip: process.platform !== 'win32', timeout: 240_000 };
 const helper = fileURLToPath(new URL('../assets/platform/windows-private-state.ps1', import.meta.url));
@@ -141,6 +142,26 @@ test('held lock deletion excludes concurrent recoverers and preserves a later re
   assert.throws(() => removeWindowsPrivateFile(f.scope, lock, reference.digest, reference, exited.pid));
   assert.equal(readFileSync(lock, 'utf8'), 'replacement writer lock');
   removeWindowsPrivateFile(f.scope, lock, next.digest, next);
+});
+
+test('held creation copies exact canonical and edited source security before writing', windows, (t) => {
+  const f = fixture(t);
+  for (const edited of [false, true]) {
+    const source = path.join(f.root, edited ? 'edited-source.txt' : 'canonical-source.txt');
+    const stage = `${source}.stage`;
+    writeWindowsPrivateFile(f.scope, source, 'source bytes retained');
+    if (edited) windowsFileSecurity({ path: source, removeSystem: true });
+    const before = inspectWindowsPrivateFile(f.scope, source);
+    const created = writeWindowsPrivateFile(f.scope, stage, 'reviewed stage bytes', source);
+    assert.equal(created.security, before.security);
+    assert.equal(created.digest, digestContent('reviewed stage bytes'));
+    assert.equal(readFileSync(source, 'utf8'), 'source bytes retained');
+    assert.deepEqual(inspectWindowsPrivateFile(f.scope, source), before);
+    assert.equal(inspectWindowsPrivateFile(f.scope, stage).security, before.security);
+    assert.throws(() => writeWindowsPrivateFile(f.scope, stage, 'must not overwrite', source));
+    assert.equal(readFileSync(stage, 'utf8'), 'reviewed stage bytes');
+    assert.equal(inspectWindowsPrivateFile(f.scope, stage).security, before.security);
+  }
 });
 
 function publicationFixture(t, present = true) {

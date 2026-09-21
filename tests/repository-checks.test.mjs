@@ -42,6 +42,10 @@ test('Windows workflow selectors cover every application scenario exactly once w
   }
   visit(tree);
   const workflow = parseYaml(await readFile(new URL('../.github/workflows/repository.yml', import.meta.url), 'utf8'), 'repository workflow');
+  assert.equal(workflow.jobs['windows-workflow'].needs, 'windows-file-races');
+  const races = workflow.jobs['windows-file-races'];
+  assert.equal(races['runs-on'], 'windows-latest');
+  assert(races.steps.some((step) => step.run === 'node --test --test-concurrency=1 tests/windows-file-races.test.mjs'));
   const matrix = workflow.jobs['windows-workflow'].strategy.matrix.include;
   assert.equal(matrix.length, names.length);
   assert(names.length > 0);

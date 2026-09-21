@@ -192,31 +192,52 @@ function Effect-Progress([string]$phaseName) {
 
 function Effect-CreateFile($context, [string]$p, [string]$content, $template = $null) {
   $parent = Effect-PinDirectory $context ([IO.Path]::GetDirectoryName($p))
-  $security = if ($null -ne $template) { (Effect-Security $template).descriptor } else { $null }
+  $original = if ($null -ne $template) { Effect-Security $template } else { $null }
+  $security = if ($null -ne $original) { $original.descriptor } else { $null }
   $item = Effect-OpenRelative $context $parent ([IO.Path]::GetFileName($p)) $false $true 0x1F018B 0 $security
   CheckEntry $p $true $false $true $false $null $true $item.handle
   if ($null -ne $security) {
+    $script:phase = 'file-security-copy'
+    $actual = Effect-Security $item
+    $component = Compare-MissionSpecFileSecurity $security $actual.descriptor
     $descriptor = [IntPtr]::Zero
     try {
-      $length = [uint32]0
-      if (!$native::ConvertStringSecurityDescriptorToSecurityDescriptorW($security, 1, [ref]$descriptor, [ref]$length)) { throw 'descriptor' }
-      $raw = [Security.AccessControl.RawSecurityDescriptor]::new($security)
-      $information = [uint32]7
-      if (([int]$raw.ControlFlags -band 0x1000) -ne 0) { $information = [uint32]2147483655 } else { $information = [uint32]536870919 }
-      $owner = [IntPtr]::Zero
-      $group = [IntPtr]::Zero
-      $dacl = [IntPtr]::Zero
-      $defaulted = $false
-      $present = $false
-      if (!$native::GetSecurityDescriptorOwner($descriptor, [ref]$owner, [ref]$defaulted) -or
-          !$native::GetSecurityDescriptorGroup($descriptor, [ref]$group, [ref]$defaulted) -or
-          !$native::GetSecurityDescriptorDacl($descriptor, [ref]$present, [ref]$dacl, [ref]$defaulted) -or
-          !$present -or $dacl -eq [IntPtr]::Zero -or
-          $native::SetSecurityInfo($item.handle, 1, $information, $owner, $group, $dacl, [IntPtr]::Zero) -ne 0) { throw 'file-security' }
+      if ($component -cne 'equal') {
+        $length = [uint32]0
+        if (!$native::ConvertStringSecurityDescriptorToSecurityDescriptorW($security, 1, [ref]$descriptor, [ref]$length)) { throw 'descriptor' }
+        $expected = [Security.AccessControl.RawSecurityDescriptor]::new($security)
+        $created = [Security.AccessControl.RawSecurityDescriptor]::new($actual.descriptor)
+        $information = if (([int]$expected.ControlFlags -band 0x1000) -ne 0) { [uint32]2147483652 } else { [uint32]536870916 }
+        $owner = [IntPtr]::Zero
+        $group = [IntPtr]::Zero
+        $dacl = [IntPtr]::Zero
+        $defaulted = $false
+        $present = $false
+        # Creation already assigns owner/group in the common case. Re-requesting
+        # unchanged ownership needlessly invokes WRITE_OWNER privilege rules.
+        if ($expected.Owner.Value -cne $created.Owner.Value) {
+          if (!$native::GetSecurityDescriptorOwner($descriptor, [ref]$owner, [ref]$defaulted)) { throw 'file-security-owner' }
+          $information = $information -bor [uint32]1
+        }
+        if ($expected.Group.Value -cne $created.Group.Value) {
+          if (!$native::GetSecurityDescriptorGroup($descriptor, [ref]$group, [ref]$defaulted)) { throw 'file-security-group' }
+          $information = $information -bor [uint32]2
+        }
+        if (!$native::GetSecurityDescriptorDacl($descriptor, [ref]$present, [ref]$dacl, [ref]$defaulted) -or
+            !$present -or $dacl -eq [IntPtr]::Zero) { throw 'file-security-dacl' }
+        $status = $native::SetSecurityInfo($item.handle, 1, $information, $owner, $group, $dacl, [IntPtr]::Zero)
+        if ($status -ne 0) {
+          $script:nativeStatus = [int]$status
+          throw 'file-security-set'
+        }
+      }
       $actual = Effect-Security $item
-      $original = Effect-Security $template
-      if ((Compare-MissionSpecFileSecurity $original.descriptor $actual.descriptor) -cne 'equal' -or
-          $original.policy -cne $actual.policy) { throw 'file-security' }
+      $component = Compare-MissionSpecFileSecurity $original.descriptor $actual.descriptor
+      if ($component -cne 'equal') { throw ('file-security-' + $component) }
+      if ($original.policy -cne $actual.policy) { throw 'file-security-policy' }
+      $currentSource = Effect-Security $template
+      if ((Compare-MissionSpecFileSecurity $original.descriptor $currentSource.descriptor) -cne 'equal' -or
+          $original.policy -cne $currentSource.policy) { throw 'effect-preimage' }
     } finally { [void]$native::LocalFree($descriptor) }
   }
   Effect-Progress 'created-held'
