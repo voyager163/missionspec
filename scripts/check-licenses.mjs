@@ -319,6 +319,11 @@ export function collectScope(repositoryRoot, scope) {
     }
   }
   const graph = runtimeGraph(lock.packages);
+  for (const location of Object.keys(lock.packages)) {
+    if (location && nameAt(location) === 'json-schema-typed' && !graph.has(location)) {
+      throw new Error('The Dependency Graph metadata exception cannot cover an unaudited development-only json-schema-typed package.');
+    }
+  }
   const documents = new Map();
   const runtimePackages = [...graph.keys()].filter(Boolean).sort(compare).map((location) => {
     const locked = lock.packages[location];

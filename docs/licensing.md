@@ -156,7 +156,9 @@ names without versions, so a version suffix would falsely imply a narrower
 match. The separate required local/hosted `check:licenses` enforces version
 `8.0.2`, the exact registry URL/tarball integrity and both source and retained
 legal-file hashes. A version, tarball, declared license, added legal file or text
-change fails that guard. Do not broaden or remove the guard to make a future
+change fails that guard. Moving that package name into the otherwise unaudited
+development-only closure also fails, rather than bypassing the pin. Do not
+broaden or remove the guard to make a future
 upgrade pass; reassess the discrepancy and remove the exception when corrected.
 
 The root package's `files` allowlist includes `THIRD_PARTY_NOTICES` and the CLI

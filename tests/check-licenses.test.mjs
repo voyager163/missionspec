@@ -146,6 +146,14 @@ test('fails closed on missing dependency edges and incorrect development classif
   assert.throws(() => runtimeGraph({ '': {}, 'node_modules/unexpected': {} }), /Unclassified/);
 });
 
+test('moving the metadata-exempt name outside the audited runtime closure does not bypass its pin', (t) => {
+  const state = fixture(t);
+  state.manifest.devDependencies['json-schema-typed'] = '9.0.0';
+  state.add('node_modules/json-schema-typed', { version: '9.0.0', dev: true });
+  state.save();
+  assert.throws(() => collectScope(state.root, 'cli'), /unaudited development-only/u);
+});
+
 test('rejects missing, unreviewed, and GPL license expressions before regeneration', (t) => {
   for (const license of [undefined, 'UNLICENSED', 'GPL-3.0-only', '(MIT OR GPL-3.0-only)']) {
     const state = fixture(t);
