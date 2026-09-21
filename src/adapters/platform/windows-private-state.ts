@@ -6,12 +6,46 @@ import { fileURLToPath } from 'node:url';
 const systemRoot = 'C:\\Windows';
 const systemPowerShell = `${systemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`;
 const helper = fileURLToPath(new URL('../../../assets/platform/windows-private-state.ps1', import.meta.url));
+const accessPolicy = fileURLToPath(new URL('../../../assets/platform/windows-access-policy.ps1', import.meta.url));
 
 export class WindowsPrivateStateError extends Error {
   readonly code = 'EPERM';
   constructor(reason = 'unavailable') {
     super(`Windows private state requires a canonical current-user-owned local NTFS path and restrictive inheritable SID ACLs (${reason}).`);
   }
+}
+
+const diagnosticPhases = [
+  'input', 'native-bindings', 'entry', 'creation', 'volume', 'entry-open', 'entry-information', 'entry-attributes',
+  'entry-final-path', 'entry-acl-read', 'entry-acl-parse', 'entry-owner', 'entry-aces', 'entry-user-access',
+  'entry-inheritance', 'json-module', 'json-input', 'access-policy',
+];
+const exceptionTypes = [
+  'none', 'other', 'RuntimeException', 'MethodException', 'MethodInvocationException', 'PSInvalidCastException',
+  'ParameterBindingException', 'ArgumentException', 'ArgumentNullException', 'InvalidOperationException',
+  'NotSupportedException', 'TypeLoadException', 'MissingMethodException', 'IOException', 'UnauthorizedAccessException',
+  'FileNotFoundException', 'DirectoryNotFoundException', 'CmdletInvocationException', 'ActionPreferenceStopException',
+];
+
+export function windowsFailureDiagnostic(output: unknown): string {
+  if (typeof output !== 'object' || output === null) return 'unavailable';
+  const allowedReason = [
+    ...diagnosticPhases, 'system-executable', 'open', 'identity', 'type', 'links', 'alias', 'acl', 'owner',
+    'unsupported-ace', 'public-access', 'user-access', 'inheritance', 'close', 'descriptor', 'create',
+  ];
+  const reason: unknown = Reflect.get(output, 'reason');
+  if (typeof reason !== 'string' || !allowedReason.includes(reason)) return 'unavailable';
+  const parts = [reason];
+  for (const [field, values] of [
+    ['phase', diagnosticPhases], ['boundary', ['helper', 'system', 'ancestor', 'private']],
+    ['exceptionType', exceptionTypes], ['innerType', exceptionTypes],
+  ] as const) {
+    const value: unknown = Reflect.get(output, field);
+    if (typeof value === 'string' && values.some((allowed) => allowed === value)) parts.push(`${field}=${value}`);
+  }
+  const line: unknown = Reflect.get(output, 'line');
+  if (typeof line === 'number' && Number.isSafeInteger(line) && line > 0 && line <= 10_000) parts.push(`line=${line}`);
+  return parts.join('; ');
 }
 
 export function requireWindowsPrivateState(): void {
@@ -36,9 +70,11 @@ function validateSystemPowerShell(): void {
         throw new WindowsPrivateStateError('system-executable');
       }
     }
-    const resource = lstatSync(helper);
-    if (!resource.isFile() || resource.isSymbolicLink()) {
-      throw new WindowsPrivateStateError('helper-resource');
+    for (const filename of [helper, accessPolicy]) {
+      const resource = lstatSync(filename);
+      if (!resource.isFile() || resource.isSymbolicLink()) {
+        throw new WindowsPrivateStateError('helper-resource');
+      }
     }
   } catch (error) {
     if (error instanceof WindowsPrivateStateError) throw error;
@@ -77,11 +113,7 @@ export function windowsPrivateEntries(entries: readonly WindowsPrivateEntry[]): 
   if (result.error !== undefined || result.status !== 0 || result.stdout !== '{"ok":true}') {
     try {
       const output: unknown = JSON.parse(result.stdout);
-      const reason: unknown = typeof output === 'object' && output !== null ? Reflect.get(output, 'reason') : undefined;
-      if (typeof reason === 'string' && [
-        'input', 'native-bindings', 'entry', 'creation', 'system-executable', 'open', 'identity', 'type', 'links', 'alias', 'acl', 'owner',
-        'unsupported-ace', 'public-access', 'user-access', 'inheritance', 'close', 'volume', 'descriptor', 'create',
-      ].includes(reason)) throw new WindowsPrivateStateError(reason);
+      throw new WindowsPrivateStateError(windowsFailureDiagnostic(output));
     } catch (error) { if (error instanceof WindowsPrivateStateError) throw error; }
     throw new WindowsPrivateStateError();
   }

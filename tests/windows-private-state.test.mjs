@@ -7,10 +7,11 @@ import {
 } from 'node:fs';
 import { open } from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import {
-  validateWindowsStatePath, windowsPrivateEntries,
+  validateWindowsStatePath, windowsFailureDiagnostic, windowsPrivateEntries,
 } from '../dist/adapters/platform/windows-private-state.js';
 import { openRuntimeStore } from '../dist/adapters/persistence/index.js';
 import { LocalWorkspace, makeFilePlan, writeMutation } from '../dist/adapters/filesystem/local-workspace.js';
@@ -109,6 +110,50 @@ test('Windows path grammar rejects namespaces, alternate streams, aliases and de
   validateWindowsStatePath(String.raw`C:\private\literal '$()[]; folder\ledger.sqlite`);
   const resource = new URL('../assets/platform/windows-private-state.ps1', import.meta.url);
   assert.ok(readFileSync(resource, 'utf8').startsWith("$ErrorActionPreference = 'Stop'"));
+  assert.ok(readFileSync(new URL('../assets/platform/windows-access-policy.ps1', import.meta.url), 'utf8')
+    .startsWith('function Test-MissionSpecUntrustedMutation'));
+});
+
+test('Windows helper diagnostics expose only fixed phases, exception categories and bounded line numbers', () => {
+  assert.equal(windowsFailureDiagnostic(null), 'unavailable');
+  assert.equal(windowsFailureDiagnostic({ reason: 'PRIVATE path SID ACL secret' }), 'unavailable');
+  assert.equal(windowsFailureDiagnostic({
+    reason: 'entry-acl-read', phase: 'entry-acl-read', boundary: 'system',
+    exceptionType: 'MethodInvocationException', innerType: 'UnauthorizedAccessException', line: 61,
+    message: 'PRIVATE path SID ACL secret',
+  }), 'entry-acl-read; phase=entry-acl-read; boundary=system; exceptionType=MethodInvocationException; innerType=UnauthorizedAccessException; line=61');
+  assert.equal(windowsFailureDiagnostic({
+    reason: 'owner', phase: 'PRIVATE path', boundary: 'PRIVATE SID',
+    exceptionType: 'PRIVATE ACL', innerType: 'PRIVATE secret', line: Infinity,
+  }), 'owner');
+});
+
+test('untrusted create-child ACE rights never become write/append grants to an OS file', windows, () => {
+  const cases = powershell(String.raw`
+$ErrorActionPreference = 'Stop'
+$policy = [Console]::In.ReadToEnd() | ConvertFrom-Json
+. $policy
+$results = @()
+foreach ($right in @(1, 2, 4, 6, 8, 16, 32, 64, 128, 256, 65536, 131072, 262144, 524288, 1048576, 268435456, 1073741824)) {
+  $results += @{
+    right=$right
+    directory=(Test-MissionSpecUntrustedMutation $right $true)
+    file=(Test-MissionSpecUntrustedMutation $right $false)
+  }
+}
+[Console]::Out.Write((ConvertTo-Json -InputObject $results -Compress))
+`, fileURLToPath(new URL('../assets/platform/windows-access-policy.ps1', import.meta.url)));
+  for (const result of cases) {
+    if ([2, 4, 6].includes(result.right)) {
+      assert.equal(result.directory, false);
+      assert.equal(result.file, true);
+    } else {
+      const allowedRead = [1, 8, 32, 128, 131072, 1048576].includes(result.right);
+      assert.equal(result.directory, !allowedRead);
+      assert.equal(result.file, !allowedRead);
+    }
+  }
+  assert.equal(cases.length, 17);
 });
 
 test('project cwd/PATH cannot select PowerShell and SystemRoot cannot redirect its fixed OS path', windows, async (t) => {
@@ -409,41 +454,151 @@ $p = [Console]::In.ReadToEnd() | ConvertFrom-Json
 $a = [AppDomain]::CurrentDomain.DefineDynamicAssembly(
   [Reflection.AssemblyName]::new('MissionSpec.DirectoryProbe'), [Reflection.Emit.AssemblyBuilderAccess]::Run)
 $t = $a.DefineDynamicModule('Native').DefineType('Native', 'Public, Sealed, Abstract')
-function Bind($name, $result, [Type[]]$parameters) {
-  $m = $t.DefinePInvokeMethod($name, 'kernel32.dll', 'Public, Static, PinvokeImpl',
+function Bind($name, $result, [Type[]]$parameters, [string]$dll = 'kernel32.dll') {
+  $m = $t.DefinePInvokeMethod($name, $dll, 'Public, Static, PinvokeImpl',
     [Reflection.CallingConventions]::Standard, $result, $parameters,
     [Runtime.InteropServices.CallingConvention]::Winapi, [Runtime.InteropServices.CharSet]::Unicode)
   $m.SetImplementationFlags([Reflection.MethodImplAttributes]::PreserveSig)
   $d = [Runtime.InteropServices.DllImportAttribute]
   $m.SetCustomAttribute([Reflection.Emit.CustomAttributeBuilder]::new(
-    $d.GetConstructor([Type[]]@([string])), [object[]]@('kernel32.dll'),
+    $d.GetConstructor([Type[]]@([string])), [object[]]@($dll),
     [Reflection.FieldInfo[]]@($d.GetField('SetLastError'), $d.GetField('CharSet'), $d.GetField('ExactSpelling')),
     [object[]]@($true, [Runtime.InteropServices.CharSet]::Unicode, $true)))
+  return $m
 }
-Bind 'CreateFileW' ([IntPtr]) @([string], [uint32], [uint32], [IntPtr], [uint32], [uint32], [IntPtr])
-Bind 'FlushFileBuffers' ([bool]) @([IntPtr])
-Bind 'CloseHandle' ([bool]) @([IntPtr])
+$create = Bind 'CreateFileW' ([IntPtr]) @([string], [uint32], [uint32], [IntPtr], [uint32], [uint32], [IntPtr])
+$flush = Bind 'FlushFileBuffers' ([bool]) @([IntPtr])
+$close = Bind 'CloseHandle' ([bool]) @([IntPtr])
+$restrict = Bind 'CreateRestrictedToken' ([bool]) @([IntPtr], [uint32], [uint32], [IntPtr], [uint32], [IntPtr], [uint32], [IntPtr], [IntPtr].MakeByRefType()) 'advapi32.dll'
+$sidConvert = Bind 'ConvertStringSidToSidW' ([bool]) @([string], [IntPtr].MakeByRefType()) 'advapi32.dll'
+$localFree = Bind 'LocalFree' ([IntPtr]) @([IntPtr])
+$tokenInfo = Bind 'GetTokenInformation' ([bool]) @([IntPtr], [int], [IntPtr], [uint32], [uint32].MakeByRefType()) 'advapi32.dll'
+$lookup = Bind 'LookupPrivilegeValueW' ([bool]) @([string], [string], [IntPtr]) 'advapi32.dll'
+# Capture the marshaler's last error inside the same managed method. Returning
+# through PowerShell before reading it allows intervening runtime calls to reset it.
+$openResult = $t.DefineMethod('OpenResult', 'Public, Static', [IntPtr],
+  [Type[]]@([string], [uint32], [uint32], [int].MakeByRefType()))
+$il = $openResult.GetILGenerator()
+$handleLocal = $il.DeclareLocal([IntPtr])
+$zero = [IntPtr].GetField('Zero')
+$lastError = [Runtime.InteropServices.Marshal].GetMethod('GetLastWin32Error')
+$il.Emit([Reflection.Emit.OpCodes]::Ldarg_0)
+$il.Emit([Reflection.Emit.OpCodes]::Ldarg_1)
+$il.Emit([Reflection.Emit.OpCodes]::Ldc_I4_7)
+$il.Emit([Reflection.Emit.OpCodes]::Ldsfld, $zero)
+$il.Emit([Reflection.Emit.OpCodes]::Ldc_I4_3)
+$il.Emit([Reflection.Emit.OpCodes]::Ldarg_2)
+$il.Emit([Reflection.Emit.OpCodes]::Ldsfld, $zero)
+$il.Emit([Reflection.Emit.OpCodes]::Call, $create)
+$il.Emit([Reflection.Emit.OpCodes]::Stloc, $handleLocal)
+$il.Emit([Reflection.Emit.OpCodes]::Ldarg_3)
+$il.Emit([Reflection.Emit.OpCodes]::Call, $lastError)
+$il.Emit([Reflection.Emit.OpCodes]::Stind_I4)
+$il.Emit([Reflection.Emit.OpCodes]::Ldloc, $handleLocal)
+$il.Emit([Reflection.Emit.OpCodes]::Ret)
+$flushResult = $t.DefineMethod('FlushResult', 'Public, Static', [bool], [Type[]]@([IntPtr], [int].MakeByRefType()))
+$il = $flushResult.GetILGenerator()
+$booleanLocal = $il.DeclareLocal([bool])
+$il.Emit([Reflection.Emit.OpCodes]::Ldarg_0)
+$il.Emit([Reflection.Emit.OpCodes]::Call, $flush)
+$il.Emit([Reflection.Emit.OpCodes]::Stloc, $booleanLocal)
+$il.Emit([Reflection.Emit.OpCodes]::Ldarg_1)
+$il.Emit([Reflection.Emit.OpCodes]::Call, $lastError)
+$il.Emit([Reflection.Emit.OpCodes]::Stind_I4)
+$il.Emit([Reflection.Emit.OpCodes]::Ldloc, $booleanLocal)
+$il.Emit([Reflection.Emit.OpCodes]::Ret)
 $n = $t.CreateType()
-$results = @()
-foreach ($access in @([uint32]2147483648, [uint32]1073741824)) {
-  foreach ($flags in @([uint32]33554432, [uint32]2181038080)) {
-    $h = $n::CreateFileW($p, $access, 7, [IntPtr]::Zero, 3, $flags, [IntPtr]::Zero)
-    $opened = $h -ne [IntPtr](-1)
-    $openError = if ($opened) { 0 } else { [Runtime.InteropServices.Marshal]::GetLastWin32Error() }
-    $flushed = $false
-    $flushError = $null
-    if ($opened) {
-      try {
-        $flushed = $n::FlushFileBuffers($h)
-        $flushError = if ($flushed) { 0 } else { [Runtime.InteropServices.Marshal]::GetLastWin32Error() }
-      } finally { if (!$n::CloseHandle($h)) { throw 'CloseHandle failed' } }
+function ObserveFlush {
+  $results = @()
+  foreach ($access in @([uint32]2147483648, [uint32]1073741824)) {
+    foreach ($flags in @([uint32]33554432, [uint32]2181038080)) {
+      $openError = [int]0
+      $h = $n::OpenResult($p, $access, $flags, [ref]$openError)
+      $opened = $h -ne [IntPtr](-1)
+      if ($opened) { $openError = 0 }
+      $flushed = $false
+      $flushError = $null
+      if ($opened) {
+        try {
+          $flushError = [int]0
+          $flushed = $n::FlushResult($h, [ref]$flushError)
+          if ($flushed) { $flushError = 0 }
+        } finally { if (!$n::CloseHandle($h)) { throw 'CloseHandle failed' } }
+      }
+      $results += @{access=$access;flags=$flags;opened=$opened;openError=$openError;flushed=$flushed;flushError=$flushError}
     }
-    $results += @{access=$access;flags=$flags;opened=$opened;openError=$openError;flushed=$flushed;flushError=$flushError}
   }
+  return $results
 }
-[Console]::Out.Write((ConvertTo-Json -InputObject $results -Compress))
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent([Security.Principal.TokenAccessLevels]'Query, Duplicate, Impersonate')
+$principal = [Security.Principal.WindowsPrincipal]::new($identity)
+# Only this newly created empty probe directory is changed, never a project root.
+$acl = [Security.AccessControl.DirectorySecurity]::new()
+$acl.SetOwner($identity.User)
+$acl.SetAccessRuleProtection($true, $false)
+$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+  $identity.User, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))
+[IO.Directory]::SetAccessControl($p, $acl)
+$results = @(ObserveFlush)
+$token = @{
+  administratorEnabled = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+  currentUserOwnsDirectory = [IO.Directory]::GetAccessControl($p).GetOwner([Security.Principal.SecurityIdentifier]).Value -eq $identity.User.Value
+}
+$admin = [IntPtr]::Zero
+$restricted = [IntPtr]::Zero
+$sidEntry = [Runtime.InteropServices.Marshal]::AllocHGlobal(2 * [IntPtr]::Size)
+$privileges = [Runtime.InteropServices.Marshal]::AllocHGlobal(4096)
+$changeNotify = [Runtime.InteropServices.Marshal]::AllocHGlobal(8)
+$context = $null
+try {
+  if (!$n::ConvertStringSidToSidW('S-1-5-32-544', [ref]$admin)) { throw 'SID conversion failed' }
+  [Runtime.InteropServices.Marshal]::WriteIntPtr($sidEntry, 0, $admin)
+  [Runtime.InteropServices.Marshal]::WriteInt32($sidEntry, [IntPtr]::Size, 0)
+  if (!$n::CreateRestrictedToken($identity.Token, 1, 1, $sidEntry, 0, [IntPtr]::Zero, 0, [IntPtr]::Zero, [ref]$restricted)) { throw 'Token reduction failed' }
+  $size = [uint32]0
+  if (!$n::GetTokenInformation($restricted, 3, $privileges, 4096, [ref]$size) -or
+      !$n::LookupPrivilegeValueW($null, 'SeChangeNotifyPrivilege', $changeNotify)) { throw 'Privilege observation failed' }
+  $count = [Runtime.InteropServices.Marshal]::ReadInt32($privileges)
+  if ($count -lt 0 -or $count -gt 128 -or $size -lt 4 + 12 * $count) { throw 'Invalid privilege buffer' }
+  $privilegesDisabled = $true
+  for ($index = 0; $index -lt $count; $index++) {
+    $offset = 4 + 12 * $index
+    if (([Runtime.InteropServices.Marshal]::ReadInt32($privileges, $offset + 8) -band 2) -ne 0 -and
+        [Runtime.InteropServices.Marshal]::ReadInt64($privileges, $offset) -ne [Runtime.InteropServices.Marshal]::ReadInt64($changeNotify)) {
+      $privilegesDisabled = $false
+    }
+  }
+  $context = [Security.Principal.WindowsIdentity]::Impersonate($restricted)
+  $restrictedIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+  try {
+    $restrictedPrincipal = [Security.Principal.WindowsPrincipal]::new($restrictedIdentity)
+    $restrictedToken = @{
+      administratorEnabled = $restrictedPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+      currentUserOwnsDirectory = [IO.Directory]::GetAccessControl($p).GetOwner([Security.Principal.SecurityIdentifier]).Value -eq $restrictedIdentity.User.Value
+      privilegesDisabledExceptTraverse = $privilegesDisabled
+    }
+    $restrictedResults = @(ObserveFlush)
+  } finally { $restrictedIdentity.Dispose() }
+} finally {
+  if ($null -ne $context) { $context.Undo(); $context.Dispose() }
+  if ($restricted -ne [IntPtr]::Zero -and !$n::CloseHandle($restricted)) { throw 'Token close failed' }
+  [void]$n::LocalFree($admin)
+  [Runtime.InteropServices.Marshal]::FreeHGlobal($sidEntry)
+  [Runtime.InteropServices.Marshal]::FreeHGlobal($privileges)
+  [Runtime.InteropServices.Marshal]::FreeHGlobal($changeNotify)
+  $identity.Dispose()
+}
+[Console]::Out.Write((ConvertTo-Json -Depth 5 -InputObject @{
+  results=$results;token=$token;restricted=@{results=$restrictedResults;token=$restrictedToken}
+} -Compress))
 `, root);
   t.diagnostic(JSON.stringify({ platform: process.platform, node: process.version, nodeDirectory: { api, result }, nativeDirectory: native }));
-  assert.equal(native.length, 4);
+  assert.equal(native.results.length, 4);
+  assert.equal(typeof native.token.administratorEnabled, 'boolean');
+  assert.equal(native.token.currentUserOwnsDirectory, true);
+  assert.equal(native.restricted.results.length, 4);
+  assert.deepEqual(native.restricted.token, {
+    administratorEnabled: false, currentUserOwnsDirectory: true, privilegesDisabledExceptTraverse: true,
+  });
   assert.notEqual(result, 'unexpected-success', 'If Node adds directory barriers, requalify the native semantics; do not silently enable effects.');
 });

@@ -2,11 +2,14 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Console]::InputEncoding = [Text.UTF8Encoding]::new($false, $true)
 $phase = 'input'
+$boundary = 'helper'
 try {
   if (![string]::Equals([Environment]::SystemDirectory, 'C:\Windows\System32', [StringComparison]::OrdinalIgnoreCase) -or
       ![string]::Equals($PSHOME, 'C:\Windows\System32\WindowsPowerShell\v1.0', [StringComparison]::OrdinalIgnoreCase) -or
       ![string]::Equals([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName,
         'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', [StringComparison]::OrdinalIgnoreCase)) { throw 'system-executable' }
+  $phase = 'access-policy'
+  . ($PSScriptRoot + '\windows-access-policy.ps1')
   $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
   $osTrusted = @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
   $trusted = @($sid) + $osTrusted
@@ -36,25 +39,33 @@ try {
   Native 'ConvertStringSecurityDescriptorToSecurityDescriptorW' 'advapi32.dll' ([bool]) @([string], [uint32], [IntPtr].MakeByRefType(), [uint32].MakeByRefType())
   $native = $type.CreateType()
   function CheckEntry([string]$p, [bool]$private, [bool]$directory, [bool]$writable, [bool]$system = $false) {
-    $script:phase = 'entry'
+    $script:boundary = if ($system) { 'system' } elseif ($private) { 'private' } else { 'ancestor' }
+    $script:phase = 'entry-open'
     $entryTrusted = if ($system) { $osTrusted } else { $trusted }
     $handle = $native::CreateFileW($p, 0x20080, 7, [IntPtr]::Zero, 3, 0x02200000, [IntPtr]::Zero)
     if ($handle -eq [IntPtr](-1)) { throw 'open' }
     $info = [Runtime.InteropServices.Marshal]::AllocHGlobal(52)
     try {
+      $script:phase = 'entry-information'
       if (!$native::GetFileInformationByHandle($handle, $info)) { throw 'identity' }
+      $script:phase = 'entry-attributes'
       $attributes = [Runtime.InteropServices.Marshal]::ReadInt32($info, 0)
       if (($attributes -band 0x400) -ne 0 -or (($attributes -band 0x10) -ne 0) -ne $directory) { throw 'type' }
       if ($private -and !$directory -and [Runtime.InteropServices.Marshal]::ReadInt32($info, 40) -ne 1) { throw 'links' }
       $final = [Text.StringBuilder]::new(1024)
+      $script:phase = 'entry-final-path'
       $length = $native::GetFinalPathNameByHandleW($handle, $final, 1024, 0)
       if ($length -eq 0 -or $length -ge 1024 -or ![string]::Equals($final.ToString(), ('\\?\' + $p), [StringComparison]::Ordinal)) { throw 'alias' }
       $sections = [Security.AccessControl.AccessControlSections]'Owner, Access'
+      $script:phase = 'entry-acl-read'
       $acl = if ($directory) { [IO.Directory]::GetAccessControl($p, $sections) } else { [IO.File]::GetAccessControl($p, $sections) }
+      $script:phase = 'entry-acl-parse'
       $raw = [Security.AccessControl.RawSecurityDescriptor]::new($acl.GetSecurityDescriptorBinaryForm(), 0)
+      $script:phase = 'entry-owner'
       if ($null -eq $raw.DiscretionaryAcl -or $null -eq $raw.Owner) { throw 'acl' }
       if (($private -and $raw.Owner.Value -ne $sid) -or (!$private -and $raw.Owner.Value -notin $entryTrusted)) { throw 'owner' }
       $own = 0
+      $script:phase = 'entry-aces'
       foreach ($ace in $raw.DiscretionaryAcl) {
         if ($ace -isnot [Security.AccessControl.CommonAce] -or $ace.IsCallback -or
             $ace.AceQualifier -ne [Security.AccessControl.AceQualifier]::AccessAllowed) { throw 'unsupported-ace' }
@@ -63,16 +74,16 @@ try {
         if ($principal -eq $sid) { $own = $own -bor $ace.AccessMask }
         if ($private -and $principal -notin @($sid, 'S-1-5-18', 'S-1-5-32-544')) { throw 'public-access' }
         if ($principal -notin $entryTrusted) {
-          # Public ancestor traversal/create-child is allowed, never replacement,
-          # delete-child, metadata/ACL changes, or an untrusted owner.
-          if ($private -or ($ace.AccessMask -band 0xD00D0150) -ne 0) { throw 'public-access' }
+          if ($private -or (Test-MissionSpecUntrustedMutation $ace.AccessMask $directory)) { throw 'public-access' }
         }
       }
       if ($private) {
+        $script:phase = 'entry-user-access'
         $required = if ($writable) { 0x1F01FF } elseif ($directory) { 0x1200A9 } else { 0x120089 }
         if (($own -band $required) -ne $required) { throw 'user-access' }
         # New SQLite sidecars must not inherit a grant to another principal.
         if ($directory) {
+          $script:phase = 'entry-inheritance'
           $inherit = 0
           foreach ($ace in $raw.DiscretionaryAcl) {
             if (($ace.AceFlags -band 3) -ne 0) {
@@ -91,7 +102,10 @@ try {
   foreach ($osDirectory in @('C:\', 'C:\Windows', 'C:\Windows\System32', 'C:\Windows\System32\WindowsPowerShell',
       'C:\Windows\System32\WindowsPowerShell\v1.0')) { CheckEntry $osDirectory $false $true $false $true }
   CheckEntry 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' $false $false $false $true
+  $phase = 'json-module'
+  $boundary = 'helper'
   Import-Module -Name 'C:\Windows\System32\WindowsPowerShell\v1.0\Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1' -ErrorAction Stop
+  $phase = 'json-input'
   $inputObject = [Console]::In.ReadToEnd() | Microsoft.PowerShell.Utility\ConvertFrom-Json
   foreach ($entry in $inputObject.entries) {
     $phase = 'volume'
@@ -136,9 +150,23 @@ try {
   }
   [Console]::Out.Write('{"ok":true}')
 } catch {
+  $failure = $_
   $reason = $_.Exception.Message
   if ($reason -notin @('system-executable','open','identity','type','links','alias','acl','owner','unsupported-ace','public-access',
       'user-access','inheritance','close','volume','descriptor','create')) { $reason = $phase }
-  [Console]::Out.Write('{"ok":false,"reason":"' + $reason + '"}')
+  $knownTypes = @('RuntimeException', 'MethodException', 'MethodInvocationException', 'PSInvalidCastException',
+    'ParameterBindingException', 'ArgumentException', 'ArgumentNullException', 'InvalidOperationException',
+    'NotSupportedException', 'TypeLoadException', 'MissingMethodException', 'IOException', 'UnauthorizedAccessException',
+    'FileNotFoundException', 'DirectoryNotFoundException', 'CmdletInvocationException', 'ActionPreferenceStopException')
+  $exceptionType = $failure.Exception.GetType().Name
+  if ($exceptionType -notin $knownTypes) { $exceptionType = 'other' }
+  $innerType = 'none'
+  if ($null -ne $failure.Exception.InnerException) {
+    $innerType = $failure.Exception.InnerException.GetType().Name
+    if ($innerType -notin $knownTypes) { $innerType = 'other' }
+  }
+  $line = [int]$failure.InvocationInfo.ScriptLineNumber
+  [Console]::Out.Write('{"ok":false,"reason":"' + $reason + '","phase":"' + $phase +
+    '","boundary":"' + $boundary + '","exceptionType":"' + $exceptionType + '","innerType":"' + $innerType + '","line":' + $line + '}')
   exit 1
 }

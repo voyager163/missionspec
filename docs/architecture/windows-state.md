@@ -43,9 +43,16 @@ select another binary. Before inspecting input or creating state, the helper
 also checks the actual OS system directory, executing process image, PowerShell
 home, and OS path/binary ACLs. OS ownership and mutating rights must belong to
 SYSTEM, Administrators or TrustedInstaller, not an ordinary current-user shim.
+The create-child exception applies only to ancestor **directories**. On OS
+**files**, untrusted `FILE_WRITE_DATA` and `FILE_APPEND_DATA` grants are rejected
+as well as delete, metadata and security-descriptor mutation rights. The shared
+pure mask decision is exercised on synthetic ACE masks; tests never modify
+an actual OS executable or its ACL. This self-inspection remains an OS-trust
+boundary, not cryptographic binary attestation.
 
 The fixed helper lives at **`assets/platform/windows-private-state.ps1`**, included
-by the existing package `assets` rule. Its path is resolved relative to the
+with its pure **`assets/platform/windows-access-policy.ps1`** policy function
+by the existing package `assets` rule. Their paths are resolved relative to the
 installed module, not the project working directory. It runs with `-File`,
 without `-ExecutionPolicy`, `Set-ExecutionPolicy`, elevation or an inline-command
 fallback. Machine policy that disallows the script is a capability blocker.
@@ -119,13 +126,43 @@ Relevant Microsoft API contracts:
    demonstrated barrier for all of the existing same-volume create/link/rename/
    unlink operations, and cannot be substituted for directory fsync by assertion.
 
-The Windows test emits actual Node directory-open/sync errors and an independent
-four-case Win32 `CreateFileW`/`FlushFileBuffers` probe (read/write access, with/
-without write-through). This is evidence to investigate, **not a claim that every
-Windows namespace primitive is impossible**. A successful individual native call
-would still need its directory-ordering contract and interrupted-operation
-qualification before enabling the whole protocol. Unsupported probes never
-fall back to returning durability success.
+The first genuine hosted run, [35573315470 / job 106249457486](https://github.com/voyager163/missionspec/actions/runs/35573315470/job/106249457486),
+on Node 24.21.0 established that opening a directory through Node succeeded,
+but `FileHandle.sync()` returned `EPERM`. **Native `CreateFileW` with
+`GENERIC_WRITE` followed by `FlushFileBuffers` succeeded**, both with and without
+`FILE_FLAG_WRITE_THROUGH`. Read-handle flushing failed. The original probe read
+the cached Win32 error after returning through PowerShell; its error 203 may be
+stale and must not be used to identify the native failure.
+
+These results do **not** establish a Windows platform impossibility. The
+documented [`CreateFileW`](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew)
+directory handle (`FILE_FLAG_BACKUP_SEMANTICS`) and writable-file flush are a
+viable implementation path to qualify. Microsoft's
+[file caching contract](https://learn.microsoft.com/en-us/windows/win32/fileio/file-caching)
+explicitly directs callers to `FlushFileBuffers` for cached metadata;
+[`IRP_MJ_FLUSH_BUFFERS`](https://learn.microsoft.com/en-us/previous-versions/windows/drivers/ifs/irp-mj-flush-buffers)
+requires the filesystem to flush important data and metadata associated with
+the file object. Node's read-only directory descriptor is not equivalent to
+that writable Win32 handle.
+
+The updated probe captures error codes within a single emitted managed method,
+before PowerShell can overwrite the thread's cached error. It repeats the
+read/write and write-through matrix using a **restricted version of the same
+user's token**: Administrators is deny-only and `DISABLE_MAX_PRIVILEGE` removes
+all enabled privileges except directory-traverse notification. It verifies these
+conditions and uses only a newly created empty test directory with an explicit
+current-user owner/full-control DACL. This neither creates an account nor enables
+privileges or bypasses machine policy. See
+[`CreateRestrictedToken`](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-createrestrictedtoken).
+It is not a substitute for qualifying a separate ordinary-user installation,
+and its new results remain pending the next hosted run.
+
+Before the general protocol can be enabled, qualification still needs current-user
+directory handles without backup/restore privilege bypass, stable native identity
+checks around flushes, create/link/rename/unlink ordering, interrupted journal and
+recovery cases, and propagation of failed/unknown flush outcomes. Authority and
+process/console checks have their own remaining gates. Failed probes never fall
+back to reporting durability success.
 
 SQLite continues using its built-in Windows VFS, rollback/DELETE journaling and
 the existing `synchronous=FULL` contract (preferences use `EXTRA`). JSONL continues
@@ -148,6 +185,14 @@ Windows tests on macOS qualify anything. The test creates only exclusive fixture
 directories beneath its working directory, never changes the checkout's ACLs,
 and removes only its fixtures. An unsafe runner ancestor must fail, not be
 silently changed by the adapter or disguised as a skipped success.
+
+The first hosted run passed the path grammar and native primitive probe, but all
+nine ACL/storage cases failed before private fixture creation with an unexpected
+helper exception. Consequently it did **not** qualify private storage. Follow-up
+diagnostics report only allowlisted operation phases, helper/system/ancestor/private
+boundary categories, exception type categories and bounded script line numbers.
+They never copy native exception messages, filesystem paths, ACLs, SIDs, raw
+records or secrets into an error.
 
 Coverage includes genuine SID/DACL creation, foreign owner and public-read
 rejection without repair, literal Unicode/metacharacter paths, SQLite schema-3
