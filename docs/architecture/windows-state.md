@@ -146,7 +146,7 @@ the file object. Node's read-only directory descriptor is not equivalent to
 that writable Win32 handle.
 
 The updated probe captures error codes within a single emitted managed method,
-before PowerShell can overwrite the thread's cached error. It repeats the
+before returning to PowerShell. It repeats the
 read/write and write-through matrix using a **restricted version of the same
 user's token**: Administrators is deny-only and `DISABLE_MAX_PRIVILEGE` removes
 all enabled privileges except directory-traverse notification. It verifies these
@@ -154,8 +154,16 @@ conditions and uses only a newly created empty test directory with an explicit
 current-user owner/full-control DACL. This neither creates an account nor enables
 privileges or bypasses machine policy. See
 [`CreateRestrictedToken`](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-createrestrictedtoken).
-It is not a substitute for qualifying a separate ordinary-user installation,
-and its new results remain pending the next hosted run.
+The [second hosted run, 35575442548](https://github.com/voyager163/missionspec/actions/runs/35575442548),
+confirmed `currentUserOwnsDirectory: true`,
+`privilegesDisabledExceptTraverse: true` and `administratorEnabled: false`.
+Both writable directory-handle variants still opened and flushed successfully
+under that restricted token. Thus this primitive did not require administrator
+grants or enabled backup/restore privileges on the observed NTFS filesystem.
+That is not a substitute for qualifying a separate ordinary-user installation
+or the complete journal/effect ordering protocol. Read-handle flushing still
+returned false with error 203 even after immediate capture; no capability or
+failure classification depends on interpreting that code.
 
 Before the general protocol can be enabled, qualification still needs current-user
 directory handles without backup/restore privilege bypass, stable native identity
@@ -188,7 +196,12 @@ silently changed by the adapter or disguised as a skipped success.
 
 The first hosted run passed the path grammar and native primitive probe, but all
 nine ACL/storage cases failed before private fixture creation with an unexpected
-helper exception. Consequently it did **not** qualify private storage. Follow-up
+helper exception. The second run isolated it to PowerShell 5.1's bitwise handling
+of typed `AceFlags` at the `InheritOnly` predicate. The helper now explicitly
+converts both ACE flags and the enum mask to integers, including all subsequent
+inheritance predicates, without changing their values or ACL decisions. A
+32-case synthetic `CommonAce` regression exercises the actual enum representation.
+Storage qualification remains pending a passing hosted rerun. Follow-up
 diagnostics report only allowlisted operation phases, helper/system/ancestor/private
 boundary categories, exception type categories and bounded script line numbers.
 They never copy native exception messages, filesystem paths, ACLs, SIDs, raw

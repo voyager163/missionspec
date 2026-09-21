@@ -65,11 +65,13 @@ try {
       if ($null -eq $raw.DiscretionaryAcl -or $null -eq $raw.Owner) { throw 'acl' }
       if (($private -and $raw.Owner.Value -ne $sid) -or (!$private -and $raw.Owner.Value -notin $entryTrusted)) { throw 'owner' }
       $own = 0
+      $inheritOnly = [int][Security.AccessControl.AceFlags]::InheritOnly
       $script:phase = 'entry-aces'
       foreach ($ace in $raw.DiscretionaryAcl) {
         if ($ace -isnot [Security.AccessControl.CommonAce] -or $ace.IsCallback -or
             $ace.AceQualifier -ne [Security.AccessControl.AceQualifier]::AccessAllowed) { throw 'unsupported-ace' }
-        if (($ace.AceFlags -band [Security.AccessControl.AceFlags]::InheritOnly) -ne 0) { continue }
+        $flags = [int]$ace.AceFlags
+        if (($flags -band $inheritOnly) -ne 0) { continue }
         $principal = $ace.SecurityIdentifier.Value
         if ($principal -eq $sid) { $own = $own -bor $ace.AccessMask }
         if ($private -and $principal -notin @($sid, 'S-1-5-18', 'S-1-5-32-544')) { throw 'public-access' }
@@ -86,9 +88,10 @@ try {
           $script:phase = 'entry-inheritance'
           $inherit = 0
           foreach ($ace in $raw.DiscretionaryAcl) {
-            if (($ace.AceFlags -band 3) -ne 0) {
-              if ($ace.SecurityIdentifier.Value -notin @($sid, 'S-1-5-18', 'S-1-5-32-544') -or ($ace.AceFlags -band 4) -ne 0) { throw 'inheritance' }
-              if ($ace.SecurityIdentifier.Value -eq $sid -and ($ace.AceFlags -band 3) -eq 3) { $inherit = $inherit -bor $ace.AccessMask }
+            $flags = [int]$ace.AceFlags
+            if (($flags -band 3) -ne 0) {
+              if ($ace.SecurityIdentifier.Value -notin @($sid, 'S-1-5-18', 'S-1-5-32-544') -or ($flags -band 4) -ne 0) { throw 'inheritance' }
+              if ($ace.SecurityIdentifier.Value -eq $sid -and ($flags -band 3) -eq 3) { $inherit = $inherit -bor $ace.AccessMask }
             }
           }
           if ($writable -and ($inherit -band 0x1F01FF) -ne 0x1F01FF) { throw 'inheritance' }

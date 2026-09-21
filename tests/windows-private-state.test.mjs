@@ -109,7 +109,9 @@ test('Windows path grammar rejects namespaces, alternate streams, aliases and de
   ]) assert.throws(() => validateWindowsStatePath(target), target);
   validateWindowsStatePath(String.raw`C:\private\literal '$()[]; folder\ledger.sqlite`);
   const resource = new URL('../assets/platform/windows-private-state.ps1', import.meta.url);
-  assert.ok(readFileSync(resource, 'utf8').startsWith("$ErrorActionPreference = 'Stop'"));
+  const helperSource = readFileSync(resource, 'utf8');
+  assert.ok(helperSource.startsWith("$ErrorActionPreference = 'Stop'"));
+  assert.doesNotMatch(helperSource, /\.AceFlags\s+-band/u, 'PowerShell enum flags require an explicit numeric conversion');
   assert.ok(readFileSync(new URL('../assets/platform/windows-access-policy.ps1', import.meta.url), 'utf8')
     .startsWith('function Test-MissionSpecUntrustedMutation'));
 });
@@ -154,6 +156,35 @@ foreach ($right in @(1, 2, 4, 6, 8, 16, 32, 64, 128, 256, 65536, 131072, 262144,
     }
   }
   assert.equal(cases.length, 17);
+});
+
+test('PowerShell 5.1 CommonAce inheritance enums retain exact numeric flag predicates', windows, () => {
+  const cases = powershell(String.raw`
+$ErrorActionPreference = 'Stop'
+$results = @()
+$inheritOnly = [int][Security.AccessControl.AceFlags]::InheritOnly
+$sid = [Security.Principal.SecurityIdentifier]::new('S-1-1-0')
+foreach ($bits in 0..31) {
+  $ace = [Security.AccessControl.CommonAce]::new(
+    [Security.AccessControl.AceFlags]$bits, [Security.AccessControl.AceQualifier]::AccessAllowed,
+    0x1F01FF, $sid, $false, $null)
+  $flags = [int]$ace.AceFlags
+  $results += @{
+    bits=$bits; inheritOnly=(($flags -band $inheritOnly) -ne 0)
+    hasInheritance=(($flags -band 3) -ne 0)
+    noPropagate=(($flags -band 4) -ne 0)
+    inheritsBoth=(($flags -band 3) -eq 3)
+  }
+}
+[Console]::Out.Write((ConvertTo-Json -InputObject $results -Compress))
+`, null);
+  assert.equal(cases.length, 32);
+  for (const { bits, ...flags } of cases) {
+    assert.deepEqual(flags, {
+      inheritOnly: (bits & 8) !== 0, hasInheritance: (bits & 3) !== 0,
+      noPropagate: (bits & 4) !== 0, inheritsBoth: (bits & 3) === 3,
+    });
+  }
 });
 
 test('project cwd/PATH cannot select PowerShell and SystemRoot cannot redirect its fixed OS path', windows, async (t) => {
