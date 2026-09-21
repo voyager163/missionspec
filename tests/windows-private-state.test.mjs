@@ -34,7 +34,8 @@ const privateEntry = (target, directory = false, create = false) =>
   windowsPrivateEntries([{ path: target, directory, writable: true, create }]);
 const powershell = (source, value) => {
   const script = "[Console]::InputEncoding = [Text.UTF8Encoding]::new($false, $true)\n" +
-    "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false, $true)\n" + source;
+    "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false, $true)\n" +
+    "Import-Module -Name 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules\\Microsoft.PowerShell.Utility\\Microsoft.PowerShell.Utility.psd1' -ErrorAction Stop\n" + source;
   const result = spawnSync('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', [
     '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64'),
   ], { input: JSON.stringify(value), encoding: 'utf8', timeout: 30_000, maxBuffer: 65_536, windowsHide: true, shell: false });
@@ -44,26 +45,34 @@ const powershell = (source, value) => {
 const aclScript = String.raw`
 $ErrorActionPreference = 'Stop'
 $v = [Console]::In.ReadToEnd() | ConvertFrom-Json
-$acl = Get-Acl -LiteralPath $v.path
-$before = $acl.Sddl
+$directory = [IO.Directory]::Exists($v.path)
+$sections = [Security.AccessControl.AccessControlSections]'Owner, Group, Access'
+function ReadFixtureAcl {
+  if ($directory) { return [IO.Directory]::GetAccessControl($v.path, $sections) }
+  return [IO.File]::GetAccessControl($v.path, $sections)
+}
+$acl = ReadFixtureAcl
+$before = $acl.GetSecurityDescriptorSddlForm($sections)
+$changed = $true
 if ($v.action -eq 'public') {
   $rule = [Security.AccessControl.FileSystemAccessRule]::new(
     [Security.Principal.SecurityIdentifier]::new('S-1-1-0'), 'Read', 'Allow')
   $acl.AddAccessRule($rule)
-  Set-Acl -LiteralPath $v.path -AclObject $acl
 } elseif ($v.action -eq 'ancestor-write') {
   $rule = [Security.AccessControl.FileSystemAccessRule]::new(
     [Security.Principal.SecurityIdentifier]::new('S-1-1-0'), 'DeleteSubdirectoriesAndFiles', 'Allow')
   $acl.AddAccessRule($rule)
-  Set-Acl -LiteralPath $v.path -AclObject $acl
 } elseif ($v.action -eq 'owner') {
   $acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
-  Set-Acl -LiteralPath $v.path -AclObject $acl
 } elseif ($v.action -eq 'restore') {
-  $acl.SetSecurityDescriptorSddlForm($v.sddl)
-  Set-Acl -LiteralPath $v.path -AclObject $acl
+  $acl.SetSecurityDescriptorSddlForm($v.sddl, $sections)
+} else { $changed = $false }
+if ($changed) {
+  if ($directory) { [IO.Directory]::SetAccessControl($v.path, $acl) }
+  else { [IO.File]::SetAccessControl($v.path, $acl) }
 }
-[Console]::Out.Write((@{sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;before=$before;after=(Get-Acl -LiteralPath $v.path).Sddl} | ConvertTo-Json -Compress))
+$after = (ReadFixtureAcl).GetSecurityDescriptorSddlForm($sections)
+[Console]::Out.Write((@{sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;before=$before;after=$after} | ConvertTo-Json -Compress))
 `;
 
 let knownUserFolders;
@@ -287,23 +296,36 @@ test('project cwd/PATH cannot select PowerShell and SystemRoot cannot redirect i
   writeFileSync(shim, 'not an executable: a project shim must never be selected');
   const source = `
     import {readFileSync} from 'node:fs';
-    import {windowsPrivateEntries} from ${JSON.stringify(new URL('../dist/adapters/platform/windows-private-state.js', import.meta.url).href)};
-    const path = JSON.parse(readFileSync(0, 'utf8'));
-    windowsPrivateEntries([{path,directory:true,writable:true}]);
-    process.stdout.write('checked');
+    import {windowsPrivateEntries,WindowsPrivateStateError} from ${JSON.stringify(new URL('../dist/adapters/platform/windows-private-state.js', import.meta.url).href)};
+    const {path,redirect} = JSON.parse(readFileSync(0, 'utf8'));
+    if (redirect) {
+      process.env.SystemRoot = path;
+      try {
+        windowsPrivateEntries([{path,directory:true,writable:true}]);
+        throw new Error('SystemRoot redirection was not rejected');
+      } catch (error) {
+        if (!(error instanceof WindowsPrivateStateError) || error.code !== 'EPERM' ||
+            !error.message.endsWith('(system-executable).')) throw error;
+        process.stdout.write('blocked-system-executable');
+      }
+    } else {
+      windowsPrivateEntries([{path,directory:true,writable:true}]);
+      process.stdout.write('checked');
+    }
   `;
   const before = inventory(f.root);
   const accepted = spawnSync(process.execPath, ['--input-type=module', '-e', source], {
-    cwd: f.root, env: { ...process.env, PATH: f.root }, input: JSON.stringify(f.root), encoding: 'utf8', timeout: 30_000,
+    cwd: f.root, env: { ...process.env, PATH: f.root },
+    input: JSON.stringify({ path: f.root, redirect: false }), encoding: 'utf8', timeout: 30_000,
   });
   assert.equal(accepted.status, 0, accepted.stderr);
   assert.equal(accepted.stdout, 'checked');
   const rejected = spawnSync(process.execPath, ['--input-type=module', '-e', source], {
-    cwd: f.root, env: { ...process.env, SystemRoot: f.root, PATH: f.root },
-    input: JSON.stringify(f.root), encoding: 'utf8', timeout: 30_000,
+    cwd: f.root, env: { ...process.env, PATH: f.root },
+    input: JSON.stringify({ path: f.root, redirect: true }), encoding: 'utf8', timeout: 30_000,
   });
-  assert.notEqual(rejected.status, 0);
-  assert.match(rejected.stderr, /system-executable/u);
+  assert.equal(rejected.status, 0, rejected.stderr);
+  assert.equal(rejected.stdout, 'blocked-system-executable');
   assert.deepEqual(inventory(f.root), before);
 });
 
@@ -571,7 +593,7 @@ test('source effects, runtime records, authority, prune deletion and journal rec
 
 test('new workspace setup is denied before runtime directories or approval receipts are created', windows, async (t) => {
   const f = await fixture(t);
-  rmSync(f.runtime);
+  rmdirSync(f.runtime);
   const workflow = await LocalWorkflow.open(f.root);
   const plan = await workflow.previewSetup();
   const before = inventory(f.root);

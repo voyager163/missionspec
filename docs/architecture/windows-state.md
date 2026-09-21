@@ -242,6 +242,20 @@ boundary categories, exception type categories and bounded script line numbers.
 They never copy native exception messages, filesystem paths, ACLs, SIDs, raw
 records or secrets into an error.
 
+The [fifth run, 35578139448](https://github.com/voyager163/missionspec/actions/runs/35578139448),
+successfully created protected roots under `local-app-data` and passed real NTFS
+SQLite CAS/ABA/reopen, lock/sidecar/path-replacement checks, child-exit journal
+retention, blocked-effects no-write checks and the restricted-token directory
+probe. Six remaining failures were isolated to test-harness behavior: changing
+`SystemRoot` before Node startup crashed Node's cryptographic initialization;
+Windows PowerShell 5.1 ACL cmdlet autoload followed an inherited PowerShell 7
+module path; and `rmSync` was used on an empty directory. The tests now change
+`SystemRoot` only inside an already-started child and require the helper's exact
+controlled rejection, use framework ACL methods with the JSON utility explicitly
+loaded from its OS path, and remove the exact empty directory with `rmdirSync`.
+No production predicate or fixture placement changed. Full qualification still
+requires the remaining positive and negative cases to pass together.
+
 Coverage includes genuine SID/DACL creation, foreign owner and public-read
 rejection without repair, literal Unicode/metacharacter paths, SQLite schema-3
 reopen, two-handle CAS/ABA, immutable evidence, foreign root binding, read-only
