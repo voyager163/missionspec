@@ -77,6 +77,10 @@ try {
     $limits = Memory 144
     [Runtime.InteropServices.Marshal]::WriteInt32($limits, 16, 0x2000)
     if (!$native::SetInformationJobObject($job, 9, $limits, 144)) { throw 'job' }
+    $observedLimits = Memory 144
+    if (!$native::QueryInformationJobObject($job, 9, $observedLimits, 144, [IntPtr]::Zero)) { throw 'job' }
+    $limitFlags = [Runtime.InteropServices.Marshal]::ReadInt32($observedLimits, 16)
+    if (($limitFlags -band 0x2000) -eq 0 -or ($limitFlags -band 0x1800) -ne 0) { throw 'job' }
     $phase = 'pipes'
     $sa = Memory 24
     [Runtime.InteropServices.Marshal]::WriteInt32($sa, 0, 24)

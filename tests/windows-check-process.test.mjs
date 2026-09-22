@@ -166,14 +166,38 @@ test('Windows executable preimage and held executable/cwd reject concurrent repl
   for (const pid of pids) requireWindowsProcessAbsent(pid);
 });
 
-test('Windows owned job does not grant CREATE_BREAKAWAY_FROM_JOB', windows, async (t) => {
-  const f = fixture(t);
+test('Windows owned job retains or refuses children requesting CREATE_BREAKAWAY_FROM_JOB', windows, async (t) => {
+  const f = createPrivateFixtureRoot();
+  const program = realpathSync.native(process.execPath);
+  t.after(() => {
+    try {
+      const recordPath = path.join(f.root, 'breakaway-child.json');
+      if (existsSync(recordPath)) {
+        const child = JSON.parse(readFileSync(recordPath, 'utf8'));
+        assert(Number.isSafeInteger(child.pid) && child.pid > 0);
+        assert.match(child.createdAt, /^[1-9][0-9]{0,18}$/u);
+        powershell(String.raw`
+$request = [Console]::In.ReadToEnd() | Microsoft.PowerShell.Utility\ConvertFrom-Json
+try { $child = [Diagnostics.Process]::GetProcessById([int]$request.pid) }
+catch [ArgumentException] { [Console]::Out.Write('{"state":"absent"}'); return }
+try {
+  if ($child.StartTime.ToUniversalTime().ToFileTimeUtc().ToString() -cne [string]$request.createdAt) {
+    [Console]::Out.Write('{"state":"different-process"}'); return
+  }
+  $child.Kill()
+  if (!$child.WaitForExit(5000)) { throw 'test-child-cleanup' }
+  [Console]::Out.Write('{"state":"test-child-stopped"}')
+} finally { $child.Dispose() }
+`, child);
+      }
+    } finally { removeFixtureRoot(f.root, f.identity); }
+  });
   windowsExecutionAsset('windows-check-process.ps1');
   t.diagnostic(`Fixed OS host: canonicalSpelling=${realpathSync.native(windowsPowerShell) === windowsPowerShell}; links=${lstatSync(windowsPowerShell).nlink}`);
   // Fixed machine-host validation does not prove an ordinary, single-link image.
   // Keep the held canonical Node image as the check and launch the fixed probe
   // as its real ordinary descendant, which must inherit the same job.
-  const result = await executeWindowsCheck({ ...f.input, argv: ['-e', `
+  const result = await executeWindowsCheck({ program, programDigest: digest(program), cwd: f.root, timeoutMs: 10_000, argv: ['-e', `
     const result = require('node:child_process').spawnSync(process.argv[1],
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', process.argv[2],
         '-Program', process.argv[3], '-WorkingDirectory', process.cwd()],
@@ -181,12 +205,24 @@ test('Windows owned job does not grant CREATE_BREAKAWAY_FROM_JOB', windows, asyn
     process.stdout.write(result.stdout ?? '');
     process.stderr.write(result.stderr ?? '');
     if (result.error || result.signal || result.status !== 0) throw new Error('breakaway-probe-failed');
-  `, '--', windowsPowerShell, path.resolve('tests/fixtures/windows-breakaway.ps1'), f.input.program] });
+  `, '--', windowsPowerShell, path.resolve('tests/fixtures/windows-breakaway.ps1'), program] });
   const failure = result.stdout.match(/^WINDOWS_BREAKAWAY_FAILURE:\{"phase":"(bootstrap|control-create|breakaway-create)","line":([0-9]{1,4}),"nativeStatus":(-?[0-9]{1,10})\}$/u);
   assert.equal(result.exitCode, 0, failure
     ? `breakaway phase=${failure[1]}; line=${failure[2]}; nativeStatus=${failure[3]}`
     : `breakaway helper failed; stderrPresent=${result.stderr.length !== 0}`);
-  assert.equal(result.interrupted, false);
-  assert.equal(result.stdout, 'breakaway-denied');
   assert.equal(result.quiescence, 'confirmed');
+  assert.equal(result.stderr, '');
+  const observation = JSON.parse(result.stdout);
+  if (observation.state === 'denied') {
+    assert.deepEqual(observation, { state: 'denied', nativeStatus: 5 });
+    assert.equal(result.interrupted, false);
+    assert.equal(existsSync(path.join(f.root, 'breakaway-child.json')), false);
+  } else {
+    assert.equal(observation.state, 'created');
+    assert.deepEqual(Object.keys(observation).sort(), ['createdAt', 'pid', 'state']);
+    assert(Number.isSafeInteger(observation.pid) && observation.pid > 0);
+    assert.match(observation.createdAt, /^[1-9][0-9]{0,18}$/u);
+    assert.equal(result.interrupted, true, 'The owned job must retain the long-lived child until its deadline');
+    requireWindowsProcessAbsent(observation.pid);
+  }
 });

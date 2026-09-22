@@ -75,6 +75,10 @@ Even observed termination remains an interrupted result, never passing evidence.
 Unexpected supervisor death closes its sole job handle; the caller records
 unknown, not assumed quiescence. Parent death is also observed through a held
 process handle.
+The supervisor reads the actual limit flags back before launch: kill-on-close
+must be present and both breakaway permissions absent. With nested jobs,
+acceptance of `CREATE_BREAKAWAY_FROM_JOB` is not by itself evidence of escape;
+Windows can retain the child in a non-breakaway ancestor job.
 The claimed parent must still be alive and have an OS creation time preceding
 the helper's own creation, so PID reuse after the caller exits is rejected.
 
@@ -129,13 +133,17 @@ child failures use distinct fixed frames with bounded static/numeric diagnostics
 unexpected output or a helper failure cannot substitute for a successful result.
 The breakaway probe runs the fixed machine-trusted PowerShell host as an ordinary
 descendant of the held canonical Node check, not as a claimed single-link
-registered OS image. The same command must first succeed without the breakaway
-flag before refusal with the flag counts as evidence. Both calls use the same
-explicit working directory, and the failure must be `ERROR_ACCESS_DENIED`.
+registered OS image. Ordinary process creation must first succeed. The flagged
+request must either fail with `ERROR_ACCESS_DENIED`, or its long-lived child must
+keep the owned job active after the root exits and be gone after the owned-job
+deadline terminates it. Returning successfully while that child survives fails
+the regression. Both calls use the same explicit working directory.
 The test-only compiled P/Invoke stub returns creation status and the native error
 together before returning to PowerShell. A deliberately nonexistent working
 directory must first produce its documented path error; a zero or otherwise
-unexplained last-error value cannot qualify breakaway denial. This fixture does
+unexplained last-error value cannot qualify breakaway denial. If creation
+succeeds, the fixture retains the exact PID and native creation time for
+identity-checked cleanup of only that test child. This fixture does
 not add a compiler or generated binary dependency to the production adapter.
 The process cases launch real programs and
 ordinary descendants, test output/timeout cancellation, parent death,
@@ -148,6 +156,7 @@ Windows skips do **not** qualify these native capabilities.
 ## Native API references
 
 - [Job objects and their explicit broker/WMI limitation](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)
+- [Nested job inheritance and breakaway behavior](https://learn.microsoft.com/en-us/windows/win32/procthread/nested-jobs)
 - [Process attributes, job list and explicit inherited handles](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute)
 - [CreateProcessW application, command line and environment contracts](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw)
 - [Console handle validation](https://learn.microsoft.com/en-us/windows/console/getconsolemode)

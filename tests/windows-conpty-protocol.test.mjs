@@ -57,7 +57,7 @@ test('ConPTY fixture clears inherited redirection only around its own native chi
   assert.match(source, /\$protocolOutput\.WriteLine\(\('MISSIONSPEC_CONPTY_DRIVER:'/u);
 });
 
-test('Breakaway fixture proves the same command works normally before asserting flag refusal', () => {
+test('Breakaway fixture proves normal creation and retains the identity of an accepted request', () => {
   const source = readFileSync(new URL('./fixtures/windows-breakaway.ps1', import.meta.url), 'utf8');
   const ordinary = source.indexOf('[BreakawayProbe]::Create($Program, $ordinary');
   const observed = source.indexOf('$native::IsProcessInJob($control');
@@ -72,6 +72,12 @@ test('Breakaway fixture proves the same command works normally before asserting 
   const errorCapture = source.indexOf('int error = Marshal.GetLastWin32Error()');
   const wrapperReturn = source.indexOf('return new BreakawayCreation');
   assert(nativeCall >= 0 && errorCapture > nativeCall && wrapperReturn > errorCapture && ordinary > wrapperReturn);
+  assert.match(source, /setTimeout\(\(\)=>process\.exit\(0\),60000\)/u);
+  assert.match(source, /\$native::GetProcessTimes\(\$child/u);
+  assert.match(source, /'breakaway-child\.json'/u);
   const native = readFileSync(new URL('../assets/platform/windows-execution-native.ps1', import.meta.url), 'utf8');
   assert.match(native, /\$attribute\.GetField\('SetLastError'\)/u);
+  const supervisor = readFileSync(new URL('../assets/platform/windows-check-process.ps1', import.meta.url), 'utf8');
+  assert.match(supervisor, /QueryInformationJobObject\(\$job, 9, \$observedLimits/u);
+  assert.match(supervisor, /\(\$limitFlags -band 0x1800\) -ne 0/u);
 });
