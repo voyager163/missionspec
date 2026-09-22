@@ -80,4 +80,8 @@ test('Breakaway fixture proves normal creation and retains the identity of an ac
   const supervisor = readFileSync(new URL('../assets/platform/windows-check-process.ps1', import.meta.url), 'utf8');
   assert.match(supervisor, /QueryInformationJobObject\(\$job, 9, \$observedLimits/u);
   assert.match(supervisor, /\(\$limitFlags -band 0x1800\) -ne 0/u);
+  const cases = readFileSync(new URL('./windows-check-process.test.mjs', import.meta.url), 'utf8');
+  assert.match(cases, /stdio: \['ignore', 'inherit', 'inherit'\]/u);
+  assert.match(cases, /helper\.once\('exit',/u);
+  assert.doesNotMatch(cases, /\.spawnSync\(/u);
 });
