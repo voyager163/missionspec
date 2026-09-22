@@ -341,11 +341,17 @@ under the suite's 13-minute aggregate timer:
 npm run build
 node --test --test-concurrency=1 --test-name-pattern="^real Windows setup, callback receipts," tests/windows-local-runtime.test.mjs
 node --test --test-concurrency=1 --test-name-pattern="^real Windows file journals recover" tests/windows-local-runtime.test.mjs
-node --test --test-concurrency=1 --test-name-pattern="^real Windows evidence-pruning application" tests/windows-local-runtime.test.mjs
+node --test --test-concurrency=1 --test-name-pattern="^real Windows evidence-pruning preparation recovery" tests/windows-local-runtime.test.mjs
+node --test --test-concurrency=1 --test-name-pattern="^real Windows evidence-pruning partial-deletion recovery" tests/windows-local-runtime.test.mjs
 ```
 
 Each command above is a separate job, not sequential steps within one 15-minute
-budget. Run this quick, direct security-copy regression first:
+budget. The formerly combined pruning case reached its 12-minute test budget
+under runner contention. Preparation-exit and partial-deletion recovery now
+have independent fixtures/jobs; both retain edited-byte, revoked-grant,
+immutable-history and no-replay assertions, plus preservation of unselected raw
+evidence. No production deadline or test-budget increase substitutes for these
+cases. Run this quick, direct security-copy regression first:
 
 ```sh
 node --test --test-concurrency=1 --test-name-pattern="^(security-copy diagnostics|Windows security comparison|Windows direct stage copy|Windows ordinary files)" tests/windows-private-state.test.mjs

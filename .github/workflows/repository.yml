@@ -97,7 +97,9 @@ jobs:
           - scenario: recovery
             pattern: 'real Windows file journals'
           - scenario: pruning
-            pattern: 'real Windows evidence-pruning'
+            pattern: '^real Windows evidence-pruning preparation recovery'
+          - scenario: pruning-delete
+            pattern: '^real Windows evidence-pruning partial-deletion recovery'
     steps:
       - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6

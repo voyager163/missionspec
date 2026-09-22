@@ -241,7 +241,7 @@ test('real Windows file journals recover after process exit, preserve edits, and
   assert.equal(existsSync(stage), false);
 });
 
-test('real Windows evidence-pruning application preserves history through preparation, exit, recovery and replay', windows, async (t) => {
+async function pruningRecoveryScenario(t, mode, index) {
   const f = await initialized(t);
   const directory = path.join(f.root, '.missionspec', 'state');
   const openStore = async (mode = 'read-write') => {
@@ -281,42 +281,50 @@ test('real Windows evidence-pruning application preserves history through prepar
   };
   ok(await store.recordAcceptance(acceptance));
   let pruning = new LocalEvidencePruning(workflow, store, f.authority);
-  for (const [index, mode] of [[0, 'prune-prepare-exit'], [2, 'prune-delete-exit']]) {
-    const selected = evidence.slice(index, index + 2);
-    const preview = await pruning.preview(selected.map((item) => item.id));
-    const approval = issued(await pruning.confirm(preview)).reference;
-    ok(store.close());
-    child({ mode, root: f.root, preview, approval }, 75);
-    store = await openStore();
-    workflow = await LocalWorkflow.open(f.root, { authority: f.authority, store });
-    pruning = new LocalEvidencePruning(workflow, store, f.authority);
-    assert.equal((await pruning.status(preview.id)).state, 'prepared');
-    assert.equal(ok(await store.readEvidence(selected[0].id)).storage.state, 'unavailable');
-    const recovery = await pruning.previewRecovery(preview.id);
-    assert.deepEqual(recovery.remaining.map((item) => item.state),
-      mode === 'prune-prepare-exit' ? ['retained', 'retained'] : ['already-absent', 'retained']);
-    const remaining = path.join(f.root, selected[1].storage.path);
-    const original = readFileSync(remaining);
-    writeExisting(remaining, 'user changed retained evidence');
-    await assert.rejects(pruning.recover(preview.id, approval), { code: 'stale-revision' });
-    assert.equal(readFileSync(remaining, 'utf8'), 'user changed retained evidence');
-    writeExisting(remaining, original);
-    await f.authority.revoke(approval);
-    await assert.rejects(pruning.recover(preview.id, approval), { code: 'authority-required' });
-    const current = issued(await pruning.confirm(await pruning.previewRecovery(preview.id))).reference;
-    const completed = await pruning.recover(preview.id, current);
-    assert.equal(completed.state, 'pruned');
-    assert.equal(completed.prepared.approval.id, approval.id);
-    assert.equal(completed.completion.approval.id, current.id);
-    for (const item of selected) assert.equal(existsSync(path.join(f.root, item.storage.path)), false);
-    const replacement = path.join(f.root, selected[0].storage.path);
-    privateEntry(replacement, false, true);
-    writeExisting(replacement, 'new user-retained replacement');
-    assert.equal((await pruning.recover(preview.id, current)).state, 'pruned');
-    assert.equal(readFileSync(replacement, 'utf8'), 'new user-retained replacement');
-  }
+  const selected = evidence.slice(index, index + 2);
+  const preview = await pruning.preview(selected.map((item) => item.id));
+  const approval = issued(await pruning.confirm(preview)).reference;
+  ok(store.close());
+  child({ mode, root: f.root, preview, approval }, 75);
+  store = await openStore();
+  workflow = await LocalWorkflow.open(f.root, { authority: f.authority, store });
+  pruning = new LocalEvidencePruning(workflow, store, f.authority);
+  assert.equal((await pruning.status(preview.id)).state, 'prepared');
+  assert.equal(ok(await store.readEvidence(selected[0].id)).storage.state, 'unavailable');
+  const recovery = await pruning.previewRecovery(preview.id);
+  assert.deepEqual(recovery.remaining.map((item) => item.state),
+    mode === 'prune-prepare-exit' ? ['retained', 'retained'] : ['already-absent', 'retained']);
+  const remaining = path.join(f.root, selected[1].storage.path);
+  const original = readFileSync(remaining);
+  writeExisting(remaining, 'user changed retained evidence');
+  await assert.rejects(pruning.recover(preview.id, approval), { code: 'stale-revision' });
+  assert.equal(readFileSync(remaining, 'utf8'), 'user changed retained evidence');
+  writeExisting(remaining, original);
+  await f.authority.revoke(approval);
+  await assert.rejects(pruning.recover(preview.id, approval), { code: 'authority-required' });
+  const current = issued(await pruning.confirm(await pruning.previewRecovery(preview.id))).reference;
+  const completed = await pruning.recover(preview.id, current);
+  assert.equal(completed.state, 'pruned');
+  assert.equal(completed.prepared.approval.id, approval.id);
+  assert.equal(completed.completion.approval.id, current.id);
+  for (const item of selected) assert.equal(existsSync(path.join(f.root, item.storage.path)), false);
+  const replacement = path.join(f.root, selected[0].storage.path);
+  privateEntry(replacement, false, true);
+  writeExisting(replacement, 'new user-retained replacement');
+  assert.equal((await pruning.recover(preview.id, current)).state, 'pruned');
+  assert.equal(readFileSync(replacement, 'utf8'), 'new user-retained replacement');
   assert.deepEqual(ok(await store.readRun('RUN-windows-prune')).snapshot, snapshot);
   assert.deepEqual(ok(await store.readAcceptance(acceptance.approval)), acceptance);
-  assert.deepEqual(ok(await store.readRunEvidence(snapshot.id)), []);
-});
+  const untouched = evidence.filter((item) => !selected.includes(item));
+  assert.deepEqual(ok(await store.readRunEvidence(snapshot.id)), untouched.map((item) => item.id));
+  for (const item of untouched) {
+    assert.equal(ok(await store.readEvidence(item.id)).storage.state, 'retained');
+    assert.equal(digestContent(readFileSync(path.join(f.root, item.storage.path))), item.storage.digest);
+  }
+}
+
+test('real Windows evidence-pruning preparation recovery preserves edits, authority, history and replay', windows,
+  async (t) => pruningRecoveryScenario(t, 'prune-prepare-exit', 0));
+test('real Windows evidence-pruning partial-deletion recovery preserves edits, authority, history and replay', windows,
+  async (t) => pruningRecoveryScenario(t, 'prune-delete-exit', 2));
 });

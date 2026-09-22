@@ -180,7 +180,7 @@ workflow revisions can alter the names; coordinate any rename with the ruleset.
 `Windows private-state qualification` exercises actual NTFS/SID/ACL storage and
 directory barriers. `Windows held-handle race qualification` exercises concurrent
 file/ancestor replacement and recoverable publication; it is a prerequisite for
-the three `Windows workflow (source|recovery|pruning)` jobs. Each native job has
+the `Windows workflow (source|recovery|pruning|pruning-delete)` jobs. Each native job has
 its own 15-minute bound. Add new contexts to required checks only after observing
 their actual successful reports and GitHub App identities; never substitute
 local Windows skips or an older protocol's results.
