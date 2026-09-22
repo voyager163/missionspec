@@ -40,7 +40,11 @@ test('Windows native private runtime backup, raw restore, migration and external
   };
   const workflow = await LocalWorkflow.open(fixture.root, { authority });
   const setup = await workflow.previewSetup();
-  await workflow.apply(setup, await approve(setup.request));
+  await assert.rejects(authority.requestConfirmation(setup.request), { code: 'scope-exceeded' });
+  assert.deepEqual(readdirSync(fixture.root), []);
+  const confirmedSetup = ok(await authority.confirmPlan(setup));
+  assert.equal(confirmedSetup.state, 'issued');
+  await workflow.apply(setup, confirmedSetup.approval.reference);
   const workspace = (await workflow.project()).workspace;
   const store = ok(await openRuntimeStore({ directory: path.join(fixture.root, '.missionspec/state'), expectedWorkspace: workspace, mode: 'create' }));
   stores.push(store);

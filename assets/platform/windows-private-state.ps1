@@ -219,6 +219,11 @@ try {
   Import-Module -Name 'C:\Windows\System32\WindowsPowerShell\v1.0\Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1' -ErrorAction Stop
   $phase = 'json-input'
   $inputObject = [Console]::In.ReadLine() | Microsoft.PowerShell.Utility\ConvertFrom-Json
+  if ($inputObject.kind -ceq 'validate-system-host') {
+    if (@($inputObject.PSObject.Properties).Count -ne 1) { throw 'json-input' }
+    [Console]::Out.Write('{"ok":true}')
+    return
+  }
   if ($null -ne $inputObject.operation) {
     . ($PSScriptRoot + '\windows-file-operations.ps1')
     $result = Invoke-MissionSpecFileOperation $inputObject.operation

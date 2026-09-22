@@ -90,6 +90,9 @@ The original interop is packaged under `assets/platform/`; there is no downloade
 native addon, compiler, execution-policy bypass, elevation or global install.
 The launcher reuses the already-qualified fixed OS executable/ACL validation for
 `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, never cwd/PATH.
+A dedicated read-only `validate-system-host` request completes only after those
+OS executable and ancestor ACL checks. It does not use an empty private-entry
+request or a dummy PID; the private-entry API still requires one to eight entries.
 The native layout is for a 64-bit OS PowerShell process; other layouts fail
 closed. Job-list creation requires Windows 10 / Server 2016 or newer. ConPTY
 requires Windows 10 version 1809 / Server 2019 or newer. OS policy denying a

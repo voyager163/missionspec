@@ -76,6 +76,30 @@ test('transport receives detached deeply frozen exact review; backend persists b
   assert.equal((await readerWithoutTransport.resolve(approval.reference)).value.state, 'current');
 });
 
+test('workspace bootstrap requires the complete exact setup plan, not its request alone', async (t) => {
+  const reviews = [];
+  const f = await fixture(t, async (review) => { reviews.push(review); return 'accept'; });
+  await assert.rejects(f.authority.requestConfirmation(f.plan.request), { code: 'scope-exceeded' });
+  assert.equal(reviews.length, 0);
+  assert.deepEqual(await readdir(f.root), []);
+  assert.equal(await f.workflow.files.identity(), null);
+
+  const result = await f.authority.confirmPlan(f.plan);
+  assert.equal(result.status, 'ok');
+  assert.equal(result.value.state, 'issued');
+  assert.equal(reviews.length, 1);
+  assert.deepEqual(reviews[0].workspace, f.plan.workspace);
+  assert.deepEqual(reviews[0].display.detail.filePlan, f.plan);
+  assert.equal(result.value.approval.requestDigest, digestApprovalRequest(f.plan.request));
+  assert.equal(await f.workflow.files.identity(), null);
+  await assert.rejects(f.authority.requestConfirmation(f.plan.request), { code: 'scope-exceeded' });
+  assert.equal(reviews.length, 1);
+
+  await f.workflow.apply(f.plan, result.value.approval.reference);
+  assert.equal((await f.workflow.project()).state, 'initialized');
+  assert.deepEqual(await f.workflow.files.identity(), f.plan.workspace);
+});
+
 test('root binding rejects foreign requests before callback, and JSON approval fields cannot issue authority', async (t) => {
   let called = 0;
   const f = await fixture(t, async () => { called++; return 'accept'; });

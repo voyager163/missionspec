@@ -277,6 +277,12 @@ export function syncWindowsPrivateDirectory(directory: string, expected: { reado
   }
 }
 
+/** Read-only validation of the fixed OS host and its ancestor ACLs; no workspace or process effect. */
+export function validateWindowsSystemHost(): void {
+  requireWindowsPrivateState();
+  invokeWindowsHelper({ kind: 'validate-system-host' });
+}
+
 /** Private-entry checks and the separately requested, identity-guarded directory barrier; never authority. */
 export function windowsPrivateEntries(entries: readonly WindowsPrivateEntry[], lease?: WindowsWriterLease): void {
   requireWindowsPrivateState();

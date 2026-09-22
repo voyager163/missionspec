@@ -2,14 +2,13 @@ import { spawn } from 'node:child_process';
 import { lstatSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { WorkflowError } from '../../application/errors.js';
-import { requireWindowsPrivateState, windowsPrivateEntries } from './windows-private-state.js';
+import { validateWindowsSystemHost, windowsPrivateEntries } from './windows-private-state.js';
 
 export const windowsPowerShell = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
 
 /** Uses the already-qualified fixed OS executable/ACL check, never PATH or an override. */
 export function windowsExecutionAsset(name: 'windows-check-process.ps1' | 'windows-console.ps1'): string {
-  requireWindowsPrivateState();
-  windowsPrivateEntries([]);
+  validateWindowsSystemHost();
   const filename = fileURLToPath(new URL(`../../../assets/platform/${name}`, import.meta.url));
   for (const resource of [filename, fileURLToPath(new URL('../../../assets/platform/windows-execution-native.ps1', import.meta.url))]) {
     const entry = lstatSync(resource);

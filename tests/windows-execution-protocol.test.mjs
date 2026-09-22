@@ -4,6 +4,20 @@ import test from 'node:test';
 import { parseWindowsCheckObservation, windowsExecutionFailure, executeWindowsCheck } from '../dist/adapters/platform/windows-execution.js';
 import { confirmWindowsConsole } from '../dist/adapters/platform/windows-console.js';
 
+test('Windows execution host validation uses an explicit path, not an empty private-entry request', () => {
+  const execution = readFileSync(new URL('../src/adapters/platform/windows-execution.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(execution, /\bwindowsPrivateEntries\(\s*\[\s*\]\s*\)/u,
+    'The private-entry API rejects zero entries before it reaches OS validation');
+  assert.match(execution, /validateWindowsSystemHost\(\);/u);
+  const platform = readFileSync(new URL('../src/adapters/platform/windows-private-state.ts', import.meta.url), 'utf8');
+  assert.match(platform,
+    /export function validateWindowsSystemHost\(\): void \{\s*requireWindowsPrivateState\(\);\s*invokeWindowsHelper\(\{ kind: 'validate-system-host' \}\);\s*\}/u);
+  const helper = readFileSync(new URL('../assets/platform/windows-private-state.ps1', import.meta.url), 'utf8');
+  const check = helper.indexOf("CheckEntry 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' $false $false $false $true");
+  const dispatch = helper.indexOf("if ($inputObject.kind -ceq 'validate-system-host')");
+  assert.ok(check >= 0 && dispatch > check, 'Host-only success must follow the existing OS executable and ancestor ACL checks');
+});
+
 test('Windows Open-Parent is a script-scope function available before native cleanup', () => {
   const source = readFileSync(new URL('../assets/platform/windows-execution-native.ps1', import.meta.url), 'utf8');
   const release = source.match(/^function Release-Native \{([\s\S]*?)^\}/mu);

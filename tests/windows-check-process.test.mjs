@@ -8,8 +8,8 @@ import {
 import path from 'node:path';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
-import { executeWindowsCheck, windowsPowerShell } from '../dist/adapters/platform/windows-execution.js';
-import { requireWindowsProcessAbsent } from '../dist/adapters/platform/windows-private-state.js';
+import { executeWindowsCheck, windowsExecutionAsset, windowsPowerShell } from '../dist/adapters/platform/windows-execution.js';
+import { requireWindowsProcessAbsent, windowsPrivateEntries, WindowsPrivateStateError } from '../dist/adapters/platform/windows-private-state.js';
 import { createPrivateFixtureRoot, powershell, removeFixtureRoot } from './fixtures/windows-private-state.mjs';
 
 const windows = { skip: process.platform !== 'win32', timeout: 240_000 };
@@ -36,6 +36,22 @@ const child = require('node:child_process').spawn(process.execPath, ['-e', 'setI
 fs.writeFileSync('owned-pids.json', JSON.stringify([process.pid, child.pid]));
 setInterval(() => {}, 100);
 `;
+
+test('Windows execution asset preflight validates the real OS host without private entries', { ...windows, timeout: 60_000 }, () => {
+  assert.throws(() => windowsPrivateEntries([]), WindowsPrivateStateError, 'The private-entry contract must still reject empty input');
+  for (const name of ['windows-console.ps1', 'windows-check-process.ps1']) {
+    assert.equal(windowsExecutionAsset(name), path.resolve('assets/platform', name));
+  }
+  const systemRoot = process.env.SystemRoot;
+  try {
+    process.env.SystemRoot = 'C:\\not-the-reviewed-system';
+    assert.throws(() => windowsExecutionAsset('windows-console.ps1'), /system-executable/u);
+    assert.throws(() => windowsExecutionAsset('windows-check-process.ps1'), /system-executable/u);
+  } finally {
+    if (systemRoot === undefined) delete process.env.SystemRoot;
+    else process.env.SystemRoot = systemRoot;
+  }
+});
 
 test('Windows dot-sourced parent inspection is callable before any cleanup', windows, () => {
   const result = powershell(String.raw`
