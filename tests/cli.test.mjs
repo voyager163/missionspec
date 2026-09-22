@@ -29,6 +29,7 @@ test('development CLI lists all twelve sources without claiming runtime support'
   assert.equal(capabilities.executionAvailable, false);
   assert.equal(capabilities.approvalIssuanceAvailable, true);
   assert.equal(capabilities.approvalChannel, 'interactive-local-terminal-only');
+  assert(capabilities.utilities.includes('state'));
   assert(capabilities.hosts.every((host) => host.qualifiedVersions.length === 0));
 });
 

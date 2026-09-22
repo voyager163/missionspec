@@ -28,12 +28,15 @@ POSIX success or mocked `process.platform` results are not Windows qualification
 | Workspace setup, source/artifact writes, immutable runtime records, file journals/recovery | Qualified through the existing `LocalWorkspace` APIs; restricted private current-user NTFS roots, atomic private allocation and mandatory namespace barriers |
 | Raw-evidence removal and dead-prune-lock recovery | Qualified through the existing pruning application and filesystem adapter; no change to SQLite prepare/complete or exact-grant requirements |
 | Trusted callback/MCP receipt issuance and revocation | Persisted broker receipts/revocation exercised through trusted callbacks; callbacks remain independently trusted composition and human presence remains **not attested** |
-| Terminal confirmation | **Blocked** on Windows regardless of TTY booleans; actual console/ConPTY challenge behavior remains unqualified |
-| Real registered checks / native-host execution and cancellation | Unchanged, independently blocked; storage capability never establishes execution, completion or quiescence |
+| Terminal confirmation | Independently qualified OS-console/ConPTY challenge, deadline, cancellation, exact review and durable receipt/revocation paths; no TTY-boolean or environment override |
+| Real registered trusted-local checks | Independently qualified owned-job execution and bounded output/deadline behavior; no filesystem/network sandbox or broker/remote-descendant ownership claim |
+| Native AI-host execution and cancellation | Independently blocked; storage, console and trusted-process capabilities do not establish agent/model qualification |
 
-This does not qualify interactive Windows CLI setup: terminal issuance is still
-unavailable, and native checks/hosts remain independently gated. These
-application operations require trusted library composition and exact current
+The separate [console and process qualification](windows-execution.md) passed
+at `924f383` in
+[run 35710089600](https://github.com/voyager163/missionspec/actions/runs/35710089600).
+Interactive setup can use the actual console transport; redirected handles still
+fail closed. Application operations require exact current
 grants, not `approved` input or an environment switch. SQLite's pruning
 tables can store supplied immutable lifecycle records; that is **not** a new
 filesystem-deletion capability or an authority issuer.

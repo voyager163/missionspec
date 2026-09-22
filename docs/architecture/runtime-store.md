@@ -87,11 +87,13 @@ The Linux tests used the already-local immutable image
 with no network, no image pull, and a read-only container root filesystem.
 The factory accepts the Node 24 line starting at 24.21; qualification is not a
 claim that every future patch or filesystem behaves identically.
-Windows has a narrowly scoped SID/ACL-validated local-NTFS storage candidate;
+Windows has qualified, narrowly scoped SID/ACL-validated local-NTFS storage;
 see [Windows state and its independent qualification command](windows-state.md).
 The recorded Windows qualification includes private storage, held-handle source
 and runtime-record effects, callback-backed receipts, recovery and pruning.
-It does not qualify console authority or native execution. A mocked-platform
+Storage evidence does not qualify console authority or native execution.
+Separate [console/check-process evidence](windows-execution.md) covers the
+local terminal and trusted-check paths, not native AI hosts. A mocked-platform
 subprocess test is not a Windows platform-readiness claim. Other non-POSIX models
 fail explicitly.
 Network filesystems and Docker Desktop

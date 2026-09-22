@@ -368,14 +368,14 @@ not success or destructive cleanup.
 Same-UID adversarial confinement is **not provided**. Portable Node filesystem
 APIs do not supply race-proof directory-relative compare-and-swap. Keep the
 workspace private and trust its local composition. Windows now has a separate
-[real application integration candidate](windows-state.md) over the qualified
+[qualified real application integration](windows-state.md) over the qualified
 SID/ACL and directory-barrier primitives. It restricts writes to private
 current-user NTFS roots, preserves supported source security, and still requires
-exact current grants. That integration awaits its own hosted end-to-end result;
-terminal/ConPTY and native execution remain independently unavailable.
-This phase's new file/controller tests
-were run locally on macOS; prior Linux SQLite qualification is not new native-host
-or file-transaction qualification. Network filesystems are not qualified.
+exact current grants. Independent
+[console/ConPTY and owned-job check qualification](windows-execution.md) also
+passed on actual Windows. Native AI-host execution remains gated. Local macOS or
+Linux tests do not substitute for Windows evidence or native-host qualification.
+Network filesystems are not qualified.
 
 ## Execution, verification and acceptance
 
@@ -576,9 +576,10 @@ closure are separate approvals. Other closure outcomes remain explicitly
 rejected/cancelled/incomplete. Known change files are copied exactly; unrelated
 files/edits remain in place, and nonempty archive destinations block.
 
-External capability gates: exact native-host permission/limit/cancellation/fencing
-qualification, Windows storage/namespace/console qualification, and mandatory adversarial
-check confinement. No model or live paid host calls were made. Unknown local
+External capability gates remain for exact native AI-host
+permission/limit/cancellation/fencing qualification and mandatory adversarial
+check confinement. Windows storage, namespace, console and trusted owned-process
+evidence are documented separately above. No model or live paid host calls were made. Unknown local
 process outcomes cannot be auto-cleared without inspection evidence that the
 portable process adapter cannot supply.
 
@@ -588,7 +589,8 @@ can explicitly review setup plus only the known native skill destinations.
 It never grants native host execution or changes host configuration. Updates
 and removal preserve unowned/modified files and require ownership comparison.
 
-Separate workstreams remain semantic/model review,
-cross-file fact relocation/rebase assistance, lesson promotion and explicitly
-authorized hosted/cloud activation. Those are not simulated by the local
-runtime. The whole approved product is not claimed complete.
+Reviewed lesson capture, evidence evaluation, activation, retirement and rollback
+are implemented; model-backed semantic effectiveness is not established.
+Semantic/model qualification and cloud deployment remain separate workstreams.
+Cross-file fact relocation/rebase assistance is not an implicit feature of
+conflict-aware sync. The whole approved product is not claimed complete.

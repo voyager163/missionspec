@@ -18,7 +18,9 @@ reports, reviewed lessons, explicit import and recoverable evidence pruning.
 Synthetic protocol tests and installed skills are not live-host qualification.
 Windows private-state APIs have passed native held-handle race, setup, source,
 recovery and pruning qualification in the documented private NTFS scope.
-Interactive Windows terminal confirmation remains disabled.
+OS-console/ConPTY confirmation, owned-job trusted local checks and the bounded
+runtime-state lifecycle also have actual Windows qualification. These do not
+qualify native AI-host execution, human presence or a subprocess sandbox.
 See the [Windows capability boundary](docs/architecture/windows-state.md).
 Live native execution and production telemetry deployment remain separate
 release gates. Ordinary Claude Code skills and CLI/MCP integration do not

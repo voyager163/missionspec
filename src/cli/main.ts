@@ -275,7 +275,7 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
       const capabilities = {
         version,
         stage: 'local-workflow',
-        utilities: ['capabilities', 'skills:list', 'skills:render', 'skills:inspect', 'skills:install', 'skills:update', 'skills:remove', 'validate:supplied-document-set', 'mcp', 'telemetry', 'logs', ...localCommands, ...reviewCommands],
+        utilities: ['capabilities', 'skills:list', 'skills:render', 'skills:inspect', 'skills:install', 'skills:update', 'skills:remove', 'validate:supplied-document-set', 'mcp', 'telemetry', 'logs', 'state', ...localCommands, ...reviewCommands],
         mcpTransport: 'stdio',
         mcpConfirmation: 'independent-reviewer-only-not-arbitrary-client-accept',
         engines: ENGINE_IDS.map((id) => ({

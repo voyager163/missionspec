@@ -1,10 +1,13 @@
 # Windows console and registered-check execution
 
-The three actual console/ConPTY scenarios passed at `074dd8b` and `85aa76f`.
-Owned-job qualification remains pending its complete breakaway regression.
-Registered-check integration passed at `074dd8b`; a later aggregate run exceeded
-its test budget, so successful collection/revocation and timeout/expiry now run
-as separately bounded scenarios with the same assertions. The private NTFS
+The three actual console/ConPTY scenarios, complete owned-process suite and both
+registered-check scenarios passed at **`924f383`** in
+[run 35710089600](https://github.com/voyager163/missionspec/actions/runs/35710089600).
+That includes a created breakaway-requested descendant remaining inside the
+owned lifetime and being absent after job termination, not merely an assumed
+meaning of the process-creation return code.
+Successful collection/revocation and timeout/expiry run as separately bounded
+scenarios after an earlier aggregate run exceeded its test budget. The private NTFS
 state, source publication, recovery and pruning qualifications remain
 independent. This change does not qualify native agent hosts, model calls,
 paid-usage cancellation, a sandbox, or human presence.

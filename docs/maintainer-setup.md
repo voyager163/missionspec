@@ -40,7 +40,7 @@ read back these hosted controls:
 
 The effective branch-rules API confirms both branches inherit these rules.
 The implementation has been committed and published through a pull request.
-After observing successful hosted runs, twelve required check contexts were bound
+After observing successful hosted runs, twenty required check contexts were bound
 to their actual GitHub Apps, with strict up-to-date-branch enforcement:
 
 | Required context | GitHub App ID |
@@ -53,6 +53,14 @@ to their actual GitHub Apps, with strict up-to-date-branch enforcement:
 | Windows workflow (source) | 15368 (`github-actions`) |
 | Windows workflow (recovery) | 15368 (`github-actions`) |
 | Windows workflow (pruning) | 15368 (`github-actions`) |
+| Windows workflow (pruning-delete) | 15368 (`github-actions`) |
+| Windows runtime lifecycle qualification | 15368 (`github-actions`) |
+| Windows execution (owned-process) | 15368 (`github-actions`) |
+| Windows execution (console-challenge) | 15368 (`github-actions`) |
+| Windows execution (console-deadline) | 15368 (`github-actions`) |
+| Windows execution (console-authority) | 15368 (`github-actions`) |
+| Windows execution (registered-checks-success) | 15368 (`github-actions`) |
+| Windows execution (registered-checks-timeout) | 15368 (`github-actions`) |
 | Dependency review | 15368 (`github-actions`) |
 | CodeQL (javascript-typescript) | 15368 (`github-actions`) |
 | CodeQL (actions) | 15368 (`github-actions`) |
@@ -98,8 +106,16 @@ eight native race/setup cases passed with zero skips, followed by the full
 source, recovery and pruning jobs. Both CodeQL categories and the native CodeQL
 check passed with zero open alerts on the PR merge ref. GitHub reported the
 revision clean under the active protections, without a merge bypass. Windows
-terminal/ConPTY confirmation and native execution remain separate disabled
-capabilities; this is development qualification, not a product release.
+terminal/ConPTY confirmation and native execution were separate gates at that
+revision; this was development qualification, not a product release.
+
+At `924f383`, actual Windows console/ConPTY, owned-job checks, runtime lifecycle
+and both independently bounded pruning scenarios passed their dedicated jobs.
+The eight additional contexts above were then required using their observed
+successful reports and App IDs. Effective readback confirms twenty strict
+contexts on both protected branches. Console transport is not human-presence
+attestation, trusted checks are not a sandbox, and native AI-host execution
+remains separately unqualified.
 
 ## 1. Validate locally
 

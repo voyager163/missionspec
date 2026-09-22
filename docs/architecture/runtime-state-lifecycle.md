@@ -193,6 +193,9 @@ remain available for diagnosis; no capacity failure triggers pruning or reset.
 The lifecycle suite exercises actual SQLite, private POSIX files, changed
 authority/state, malformed/foreign backups, stale selection, read-only previews,
 prune suppression, real page exhaustion, and actual child exits during restore,
-replica creation and activation. POSIX test results do **not** qualify Windows:
-the Windows helper-backed candidate requires independent hosted Windows
-execution, including durability and failure paths.
+replica creation and activation. Independent real Windows qualification also
+passed at `924f383` in
+[run 35710089600](https://github.com/voyager163/missionspec/actions/runs/35710089600),
+including backup/raw restore, nonactive native conversion, external selection,
+quota failure after selector publication and journal recovery. POSIX tests and
+locally skipped Windows cases are not substitutes for that hosted evidence.
