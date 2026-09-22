@@ -1,8 +1,12 @@
 # Windows console and registered-check execution
 
-This is a **hosted-qualification candidate**, not evidence of a Windows pass.
-The private NTFS state, source publication, recovery and pruning qualifications
-remain independent. This change does not qualify native agent hosts, model calls,
+The three actual console/ConPTY scenarios passed at `074dd8b` and `85aa76f`.
+Owned-job qualification remains pending its complete breakaway regression.
+Registered-check integration passed at `074dd8b`; a later aggregate run exceeded
+its test budget, so successful collection/revocation and timeout/expiry now run
+as separately bounded scenarios with the same assertions. The private NTFS
+state, source publication, recovery and pruning qualifications remain
+independent. This change does not qualify native agent hosts, model calls,
 paid-usage cancellation, a sandbox, or human presence.
 
 ## Console confirmation
@@ -112,7 +116,8 @@ node --test --test-concurrency=1 tests/windows-check-process.test.mjs
 node --test --test-concurrency=1 --test-name-pattern="^Windows ConPTY exact challenge, replay, JSON refusal and redirected OS handles$" tests/windows-console.test.mjs
 node --test --test-concurrency=1 --test-name-pattern="^Windows ConPTY deadlines and AbortSignal cannot issue late confirmation$" tests/windows-console.test.mjs
 node --test --test-concurrency=1 --test-name-pattern="^Windows ConPTY real terminal receipts bind setup display, reopen and reviewed revocation$" tests/windows-console.test.mjs
-node --test --test-concurrency=1 tests/windows-checks-integration.test.mjs
+node --test --test-concurrency=1 --test-name-pattern="^Windows registered checks bind successful job output, source controls, reopen and revocation$" tests/windows-checks-integration.test.mjs
+node --test --test-concurrency=1 --test-name-pattern="^Windows registered checks enforce expiry and retain interrupted runs as outcome unknown$" tests/windows-checks-integration.test.mjs
 ```
 
 The original test-only ConPTY driver types real console input; synthetic input
@@ -125,10 +130,13 @@ unexpected output or a helper failure cannot substitute for a successful result.
 The breakaway probe runs the fixed machine-trusted PowerShell host as an ordinary
 descendant of the held canonical Node check, not as a claimed single-link
 registered OS image. The same command must first succeed without the breakaway
-flag before refusal with the flag counts as evidence.
+flag before refusal with the flag counts as evidence. Both calls use the same
+explicit working directory, and the failure must be `ERROR_ACCESS_DENIED`.
+The native error is captured inside one managed wrapper before PowerShell's
+dynamic binder can replace its thread-local value.
 The process cases launch real programs and
 ordinary descendants, test output/timeout cancellation, parent death,
-breakaway refusal and held-path replacement. The integration case uses the real
+breakaway refusal and held-path replacement. The integration cases use the real
 workflow, persistent callback authority, SQLite reopen and raw evidence,
 including interrupted retention and blocked retry. Protocol-only tests run on
 all platforms in `tests/windows-execution-protocol.test.mjs`; they and macOS

@@ -168,8 +168,10 @@ jobs:
             command: node --test --test-concurrency=1 --test-name-pattern="^Windows ConPTY deadlines and AbortSignal cannot issue late confirmation$" tests/windows-console.test.mjs
           - scenario: console-authority
             command: node --test --test-concurrency=1 --test-name-pattern="^Windows ConPTY real terminal receipts bind setup display, reopen and reviewed revocation$" tests/windows-console.test.mjs
-          - scenario: registered-checks
-            command: node --test --test-concurrency=1 tests/windows-checks-integration.test.mjs
+          - scenario: registered-checks-success
+            command: node --test --test-concurrency=1 --test-name-pattern="^Windows registered checks bind successful job output, source controls, reopen and revocation$" tests/windows-checks-integration.test.mjs
+          - scenario: registered-checks-timeout
+            command: node --test --test-concurrency=1 --test-name-pattern="^Windows registered checks enforce expiry and retain interrupted runs as outcome unknown$" tests/windows-checks-integration.test.mjs
     steps:
       - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6

@@ -69,33 +69,36 @@ test('Windows lifecycle qualification runs the complete native suite behind the 
   assert(lifecycle.steps.some((step) => step.run === 'node --test --test-concurrency=1 tests/windows-runtime-lifecycle.test.mjs'));
 });
 
-test('Windows execution matrix covers each console case once and both complete process suites', async () => {
-  const source = await readFile(new URL('./windows-console.test.mjs', import.meta.url), 'utf8');
-  const tree = parse(source, { sourceType: 'module' });
-  const names = tree.program.body.filter((node) => node.type === 'ExpressionStatement' &&
-    node.expression.type === 'CallExpression' && node.expression.callee.type === 'Identifier' &&
-    node.expression.callee.name === 'test').map((node) => node.expression.arguments[0].value);
+test('Windows execution matrix covers each console and registered-check case once and the complete process suite', async () => {
   const workflow = parseYaml(await readFile(new URL('../.github/workflows/repository.yml', import.meta.url), 'utf8'), 'repository workflow');
   const job = workflow.jobs['windows-execution'];
   assert.equal(job['runs-on'], 'windows-latest');
   assert(job['timeout-minutes'] > 0 && job['timeout-minutes'] <= 15);
   const entries = job.strategy.matrix.include;
-  assert.equal(entries.length, names.length + 2);
   assert.equal(new Set(entries.map((entry) => entry.scenario)).size, entries.length);
   const commands = entries.map((entry) => entry.command);
-  for (const file of ['windows-check-process', 'windows-checks-integration']) {
-    assert.equal(commands.filter((command) => command === `node --test --test-concurrency=1 tests/${file}.test.mjs`).length, 1);
+  assert.equal(commands.filter((command) => command === 'node --test --test-concurrency=1 tests/windows-check-process.test.mjs').length, 1);
+  let scenarios = 1;
+  for (const file of ['windows-console', 'windows-checks-integration']) {
+    const source = await readFile(new URL(`./${file}.test.mjs`, import.meta.url), 'utf8');
+    const tree = parse(source, { sourceType: 'module' });
+    const names = tree.program.body.filter((node) => node.type === 'ExpressionStatement' &&
+      node.expression.type === 'CallExpression' && node.expression.callee.type === 'Identifier' &&
+      node.expression.callee.name === 'test').map((node) => node.expression.arguments[0].value);
+    assert(names.length > 0);
+    scenarios += names.length;
+    const covered = new Set();
+    for (const command of commands.filter((command) => command.endsWith(` tests/${file}.test.mjs`))) {
+      const pattern = /^node --test --test-concurrency=1 --test-name-pattern="([^"]+)" tests\/[a-z-]+\.test\.mjs$/u.exec(command)?.[1];
+      assert(pattern);
+      const matches = names.filter((name) => new RegExp(pattern, 'u').test(name));
+      assert.equal(matches.length, 1);
+      assert.equal(covered.has(matches[0]), false);
+      covered.add(matches[0]);
+    }
+    assert.deepEqual([...covered].sort(), names.sort());
   }
-  const covered = new Set();
-  for (const command of commands.filter((command) => command.endsWith(' tests/windows-console.test.mjs'))) {
-    const pattern = /^node --test --test-concurrency=1 --test-name-pattern="([^"]+)" tests\/windows-console\.test\.mjs$/u.exec(command)?.[1];
-    assert(pattern);
-    const matches = names.filter((name) => new RegExp(pattern, 'u').test(name));
-    assert.equal(matches.length, 1);
-    assert.equal(covered.has(matches[0]), false);
-    covered.add(matches[0]);
-  }
-  assert.deepEqual([...covered].sort(), names.sort());
+  assert.equal(entries.length, scenarios);
   assert(job.steps.some((step) => step.run === '${{ matrix.command }}'));
 });
 

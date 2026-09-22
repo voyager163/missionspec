@@ -12,7 +12,7 @@ const windows = { skip: process.platform !== 'win32', timeout: 840_000 };
 const ok = (result) => { assert.equal(result.status, 'ok', JSON.stringify(result)); return result.value; };
 const issued = (result) => { const value = ok(result); assert.equal(value.state, 'issued'); return value.approval.reference; };
 
-test('Windows registered checks bind real job output, controls, authority and persistent unknown outcomes', windows, async (t) => {
+async function fixture(t) {
   const f = createPrivateFixtureRoot();
   let store;
   t.after(() => { try { if (store) ok(store.close()); } finally { removeFixtureRoot(f.root, f.identity); } });
@@ -41,7 +41,7 @@ test('Windows registered checks bind real job output, controls, authority and pe
   const workspace = (await workflow.project()).workspace;
   store = ok(await openRuntimeStore({ directory: path.join(f.root, '.missionspec/state'), mode: 'create', expectedWorkspace: workspace }));
   workflow = await LocalWorkflow.open(f.root, { store, authority });
-  let checks = new LocalChecks(workflow, store, authority);
+  const checks = new LocalChecks(workflow, store, authority);
   const control = path.join(f.root, 'selected-control.txt');
   privateEntry(control, false, true);
   writeFileSync(control, 'reviewed control');
@@ -53,6 +53,22 @@ test('Windows registered checks bind real job output, controls, authority and pe
     const approval = issued(await authority.requestConfirmation(preview.request));
     return { ...await checks.register('filters', value, approval), approval };
   };
+  return {
+    root: f.root, authority, workflow, checks, control, input, register,
+    get store() { return store; },
+    async reopen() {
+      ok(store.close()); store = undefined;
+      store = ok(await openRuntimeStore({ directory: path.join(f.root, '.missionspec/state'), mode: 'read-write', expectedWorkspace: workspace }));
+      workflow = await LocalWorkflow.open(f.root, { store, authority });
+      return new LocalChecks(workflow, store, authority);
+    },
+  };
+}
+
+test('Windows registered checks bind successful job output, source controls, reopen and revocation', windows, async (t) => {
+  const f = await fixture(t);
+  const { authority, control, input, register } = f;
+  let { checks } = f;
   await assert.rejects(checks.previewRegistration('filters', { ...input, approved: true }));
   await assert.rejects(checks.previewRegistration('filters', { ...input, guarantees: 'hard-confinement' }), { code: 'check-unqualified' });
   const registered = await register(input);
@@ -64,7 +80,7 @@ test('Windows registered checks bind real job output, controls, authority and pe
   const collected = await checks.collect('filters', 'RUN-windows-check', [registered.id], approval);
   assert.equal(collected.state, 'collected');
   assert.equal(collected.evidence.length, 1);
-  const evidence = ok(await store.readEvidence(collected.evidence[0]));
+  const evidence = ok(await f.store.readEvidence(collected.evidence[0]));
   const raw = JSON.parse(readFileSync(path.join(f.root, evidence.storage.path), 'utf8'));
   assert.equal(raw.result, 'passed');
   const output = JSON.parse(raw.output);
@@ -73,14 +89,16 @@ test('Windows registered checks bind real job output, controls, authority and pe
   assert.equal(output.interrupted, false);
   assert.equal(output.sourceBefore, output.sourceAfter);
   assert.match(output.registration.limitations, /No filesystem\/network confinement/u);
-  assert.equal(ok(await store.readRun('RUN-windows-check')).snapshot.quiescence, 'confirmed');
-  ok(store.close()); store = undefined;
-  store = ok(await openRuntimeStore({ directory: path.join(f.root, '.missionspec/state'), mode: 'read-write', expectedWorkspace: workspace }));
-  workflow = await LocalWorkflow.open(f.root, { store, authority });
-  checks = new LocalChecks(workflow, store, authority);
-  assert.equal(ok(await store.readEvidence(collected.evidence[0])).storage.digest, evidence.storage.digest);
+  assert.equal(ok(await f.store.readRun('RUN-windows-check')).snapshot.quiescence, 'confirmed');
+  checks = await f.reopen();
+  assert.equal(ok(await f.store.readEvidence(collected.evidence[0])).storage.digest, evidence.storage.digest);
   await checks.previewCollection('filters', 'RUN-windows-check', [registered.id]);
+  await authority.revoke(registered.approval);
+  await assert.rejects(checks.previewCollection('filters', 'RUN-windows-check', [registered.id]), { code: 'authority-required' });
+});
 
+test('Windows registered checks enforce expiry and retain interrupted runs as outcome unknown', windows, async (t) => {
+  const { checks, workflow, store, authority, input, register } = await fixture(t);
   const expiringPreview = await checks.previewRegistration('filters', input);
   const expiring = issued(await authority.requestConfirmation(expiringPreview.request));
   const expired = new LocalChecks(workflow, store, authority, { now: () => new Date(Date.now() + 31 * 60_000).toISOString() });
@@ -97,6 +115,4 @@ test('Windows registered checks bind real job output, controls, authority and pe
   const interruptedRaw = await Promise.all(retained.map(async (file) => JSON.parse((await workflow.files.read(file)).content)));
   assert.ok(interruptedRaw.some((record) => record.result === 'failed' && JSON.parse(record.output).interrupted === true));
   await assert.rejects(checks.previewCollection('filters', 'RUN-windows-timeout', [timed.id]), { code: 'stale-revision' });
-  await authority.revoke(registered.approval);
-  await assert.rejects(checks.previewCollection('filters', 'RUN-windows-check', [registered.id]), { code: 'authority-required' });
 });
