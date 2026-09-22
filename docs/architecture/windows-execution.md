@@ -132,8 +132,11 @@ descendant of the held canonical Node check, not as a claimed single-link
 registered OS image. The same command must first succeed without the breakaway
 flag before refusal with the flag counts as evidence. Both calls use the same
 explicit working directory, and the failure must be `ERROR_ACCESS_DENIED`.
-The native error is captured inside one managed wrapper before PowerShell's
-dynamic binder can replace its thread-local value.
+The test-only compiled P/Invoke stub returns creation status and the native error
+together before returning to PowerShell. A deliberately nonexistent working
+directory must first produce its documented path error; a zero or otherwise
+unexplained last-error value cannot qualify breakaway denial. This fixture does
+not add a compiler or generated binary dependency to the production adapter.
 The process cases launch real programs and
 ordinary descendants, test output/timeout cancellation, parent death,
 breakaway refusal and held-path replacement. The integration cases use the real
