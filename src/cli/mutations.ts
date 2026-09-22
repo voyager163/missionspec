@@ -1,9 +1,8 @@
-import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { LocalWorkflow } from '../application/local-workflow.js';
 import { TerminalAuthority } from '../adapters/authority/terminal.js';
 import { LocalChecks, type LocalCheckInput } from '../adapters/authority/local-checks.js';
-import { openRuntimeStore, type SqliteRuntimeStore } from '../adapters/persistence/index.js';
+import { openWorkspaceRuntimeStore, runtimeStateExists, type SqliteRuntimeStore } from '../adapters/persistence/index.js';
 import { parseId, parseProjectPath } from '../kernel/identifiers.js';
 import { parseApprovalReference, type ApprovalReference, type ApprovalRequest } from '../kernel/authority.js';
 import { requireApproval } from '../application/authority.js';
@@ -36,9 +35,9 @@ export async function runMutation(
     if (store !== undefined) return;
     const workspace = await workflow.files.identity();
     if (workspace === null) throw new WorkflowError('not-found', 'Initialize this workspace first.');
-    const exists = (await workflow.files.list(parseProjectPath('.missionspec/state'))).includes(parseProjectPath('.missionspec/state/ledger.sqlite'));
+    const exists = await runtimeStateExists(workflow.files.root, workspace);
     if (!exists && !create) return;
-    const result = await openRuntimeStore({ directory: path.join(workflow.files.root, '.missionspec/state'), mode: exists ? (values.preview ? 'read-only' : 'read-write') : 'create', expectedWorkspace: workspace });
+    const result = await openWorkspaceRuntimeStore({ workspaceRoot: workflow.files.root, mode: exists ? (values.preview ? 'read-only' : 'read-write') : 'create', expectedWorkspace: workspace });
     if (result.status !== 'ok') throw new WorkflowError('persistence-failed', 'The workspace ledger is unavailable; no success can be recorded.');
     store = result.value;
     workflow = await LocalWorkflow.open(process.cwd(), { authority, store });

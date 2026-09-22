@@ -15,10 +15,8 @@ import type { LocalAuthorityPort, RuntimeStorePort } from '../ports/contracts.js
 import { applySchema, createMcpWorkflows, previewSchema, type McpContextOptions, type McpWorkflowAuthority } from './workflows.js';
 import { assessClarifications } from '../engines/discovery/contracts.js';
 import { parseDigest } from '../kernel/revisions.js';
-import path from 'node:path';
 import { LocalWorkspace } from '../adapters/filesystem/local-workspace.js';
-import { openRuntimeStore, type SqliteRuntimeStore } from '../adapters/persistence/index.js';
-import { parseProjectPath } from '../kernel/identifiers.js';
+import { openWorkspaceRuntimeStore, runtimeStateExists, type SqliteRuntimeStore } from '../adapters/persistence/index.js';
 
 const slug = z.string().min(1).max(80).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/u);
 const selectedChange = z.object({ change: slug }).strict();
@@ -224,9 +222,9 @@ export async function serveMissionSpecStdio(options: MissionSpecMcpOptions): Pro
     if (options.store === undefined) {
       const files = await LocalWorkspace.open(options.root);
       const workspace = await files.identity();
-      if (workspace !== null && (await files.list(parseProjectPath('.missionspec/state'))).includes(parseProjectPath('.missionspec/state/ledger.sqlite'))) {
-        const opened = await openRuntimeStore({
-          directory: path.join(files.root, '.missionspec/state'), mode: 'read-only', expectedWorkspace: workspace,
+      if (workspace !== null && await runtimeStateExists(files.root, workspace)) {
+        const opened = await openWorkspaceRuntimeStore({
+          workspaceRoot: files.root, mode: 'read-only', expectedWorkspace: workspace,
         });
         if (opened.status !== 'ok') throw new WorkflowError('evidence-unavailable', 'The existing evidence ledger is unavailable; MCP never recreates it.');
         ownedStore = opened.value;

@@ -60,6 +60,45 @@ test('Windows workflow selectors cover every application scenario exactly once w
   }
 });
 
+test('Windows lifecycle qualification runs the complete native suite behind the race gate', async () => {
+  const workflow = parseYaml(await readFile(new URL('../.github/workflows/repository.yml', import.meta.url), 'utf8'), 'repository workflow');
+  const lifecycle = workflow.jobs['windows-runtime-lifecycle'];
+  assert.equal(lifecycle['runs-on'], 'windows-latest');
+  assert.equal(lifecycle.needs, 'windows-file-races');
+  assert(lifecycle['timeout-minutes'] > 0 && lifecycle['timeout-minutes'] <= 15);
+  assert(lifecycle.steps.some((step) => step.run === 'node --test --test-concurrency=1 tests/windows-runtime-lifecycle.test.mjs'));
+});
+
+test('Windows execution matrix covers each console case once and both complete process suites', async () => {
+  const source = await readFile(new URL('./windows-console.test.mjs', import.meta.url), 'utf8');
+  const tree = parse(source, { sourceType: 'module' });
+  const names = tree.program.body.filter((node) => node.type === 'ExpressionStatement' &&
+    node.expression.type === 'CallExpression' && node.expression.callee.type === 'Identifier' &&
+    node.expression.callee.name === 'test').map((node) => node.expression.arguments[0].value);
+  const workflow = parseYaml(await readFile(new URL('../.github/workflows/repository.yml', import.meta.url), 'utf8'), 'repository workflow');
+  const job = workflow.jobs['windows-execution'];
+  assert.equal(job['runs-on'], 'windows-latest');
+  assert(job['timeout-minutes'] > 0 && job['timeout-minutes'] <= 15);
+  const entries = job.strategy.matrix.include;
+  assert.equal(entries.length, names.length + 2);
+  assert.equal(new Set(entries.map((entry) => entry.scenario)).size, entries.length);
+  const commands = entries.map((entry) => entry.command);
+  for (const file of ['windows-check-process', 'windows-checks-integration']) {
+    assert.equal(commands.filter((command) => command === `node --test --test-concurrency=1 tests/${file}.test.mjs`).length, 1);
+  }
+  const covered = new Set();
+  for (const command of commands.filter((command) => command.endsWith(' tests/windows-console.test.mjs'))) {
+    const pattern = /^node --test --test-concurrency=1 --test-name-pattern="([^"]+)" tests\/windows-console\.test\.mjs$/u.exec(command)?.[1];
+    assert(pattern);
+    const matches = names.filter((name) => new RegExp(pattern, 'u').test(name));
+    assert.equal(matches.length, 1);
+    assert.equal(covered.has(matches[0]), false);
+    covered.add(matches[0]);
+  }
+  assert.deepEqual([...covered].sort(), names.sort());
+  assert(job.steps.some((step) => step.run === '${{ matrix.command }}'));
+});
+
 test('Markdown parser handles reference links, code fences and duplicate GitHub headings', () => {
   const info = markdownInfo('# Overview\n# Overview\n[Guide][ref]\n\n[ref]: docs/guide.md#intro\n\n```\n[fake](missing.md)\n```\n');
   assert.deepEqual([...info.anchors], ['overview', 'overview-1']);

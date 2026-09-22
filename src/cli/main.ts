@@ -15,6 +15,7 @@ import { runSkillInstallation } from './installation.js';
 import { serveMissionSpecStdio } from '../mcp/server.js';
 import { reviewCommands, runReviewCommand } from './reviews.js';
 import { observeCliOperation, runObservabilityCommand } from './observability.js';
+import { runStateCommand } from './state.js';
 
 const help = `MissionSpec local development CLI
 
@@ -27,6 +28,14 @@ Commands (mutations require local confirmation):
     (or repeat --hosts <host> for an explicit multi-host selection)
   missionspec validate <artifact.md>... [--json]
   missionspec project status | change list [--json]
+  missionspec state status [--json]
+  missionspec state backup [--preview]
+  missionspec state stage|restore --file <private-backup.json> [--preview]
+  missionspec state select <absolute-path/.missionspec/state> [--preview]
+  missionspec state activate <sha256-stage-id> [--preview]
+  missionspec state recover <sha256-stage-id> <transaction-id> [--preview]
+  missionspec state migrate [--preview]
+  missionspec state migrate <absolute-path/.missionspec/state> --file <private-backup.json> [--preview]
   missionspec init [--preview] [--profile standard|compact]
   missionspec change new <slug> --spec <name> [--source <path>] [--verification-plan] [--preview]
   missionspec status|instructions|analyze|clarify|verify <slug> [--json]
@@ -152,6 +161,11 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
       return 0;
     }
     const command = positionals[0];
+    if (command === 'state') {
+      const value = await runStateCommand(positionals, values);
+      io.stdout(`${JSON.stringify(json ? { contractVersion: CONTRACT_VERSION, status: 'ok', value } : value, null, json ? undefined : 2)}\n`);
+      return 0;
+    }
     if (command === 'telemetry' || command === 'logs') {
       const value = await runObservabilityCommand(positionals, values);
       if (typeof value === 'object' && value !== null && 'state' in value && value.state === 'unavailable') {

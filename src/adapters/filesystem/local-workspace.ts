@@ -1,5 +1,5 @@
-import { constants, lstatSync } from 'node:fs';
-import { link, lstat, mkdir, open, readdir, realpath, rename, unlink } from 'node:fs/promises';
+import { constants, lstatSync, type BigIntStats } from 'node:fs';
+import { link, lstat, mkdir, open, readdir, realpath, rename, unlink, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { digestApprovalRequest, parseApprovalReference, parseApprovalRequest, type ApprovalPurpose, type ApprovalReference, type ApprovalRequest } from '../../kernel/authority.js';
@@ -11,6 +11,7 @@ import { array, ContractError, record, text, unique } from '../../kernel/validat
 import type { FileMutation, FileSnapshot, LocalAuthorityPort } from '../../ports/contracts.js';
 import { requireApproval, unavailableAuthority } from '../../application/authority.js';
 import { WorkflowError } from '../../application/errors.js';
+import { requireRuntimeLifecycleLease, type RuntimeLifecycleLease } from '../persistence/lifecycle-lease.js';
 import { parseTaskDefinition, type TaskDefinition } from '../../engines/planning/contracts.js';
 import {
   syncWindowsPrivateDirectory, validateWindowsStatePath, windowsPrivateEntries,
@@ -34,6 +35,12 @@ export interface FilePlan {
   readonly sourcePatch?: SourcePatchBinding;
 }
 
+interface HeldPosixFile {
+  readonly filename: string;
+  readonly handle: FileHandle;
+  readonly identity: BigIntStats;
+}
+
 export interface SourcePatchDependencies {
   readonly runId: RunId;
   readonly evidence: readonly EvidenceId[];
@@ -44,6 +51,29 @@ export interface SourcePatchBinding {
   readonly task: TaskDefinition;
   readonly proposal: { readonly kind: 'inert-proposal'; readonly host: NativeHost; readonly summary: string; readonly digest: ContentDigest };
   readonly dependencies: SourcePatchDependencies | null;
+}
+
+export function runtimeSelectionCompletionRecords(workspace: WorkspaceBinding, selection: FileMutation): readonly FileSnapshot[] {
+  if (selection.effect.path !== '.missionspec/runtime-selection.json' || selection.effect.kind !== 'file-write' ||
+      selection.effect.purpose !== 'configuration' || !('content' in selection)) {
+    throw new ContractError('runtimeSelection', 'expected the exact selector publication');
+  }
+  const value = record(JSON.parse(selection.content) as unknown, 'runtimeSelection', ['schemaVersion', 'workspace', 'directory', 'generation']);
+  if (value.schemaVersion !== 1 || !sameWorkspaceBinding(parseWorkspaceBinding(value.workspace), workspace)) {
+    throw new ContractError('runtimeSelection', 'selector must bind this workspace');
+  }
+  text(value.directory, 'runtimeSelection.directory', 4096);
+  const generation = parseDigest(value.generation);
+  return [
+    {
+      path: parseProjectPath(`.missionspec/recovery/selection-generation-${generation.slice(7)}.json`),
+      content: JSON.stringify({ schemaVersion: 1, workspace, before: selection.effect.expected, after: selection.effect.proposed, generation }),
+    },
+    {
+      path: parseProjectPath('.missionspec/recovery/selection-established.json'),
+      content: JSON.stringify({ schemaVersion: 1, workspace }),
+    },
+  ].map((file) => ({ ...file, digest: digestContent(file.content) }));
 }
 
 function material(plan: Pick<FilePlan, 'workspace' | 'guards' | 'mutations' | 'sourcePatch'>): ContentDigest {
@@ -116,13 +146,21 @@ export function makeFilePlan(input: {
     throw new WorkflowError('limit-reached', 'A recoverable local transaction is limited to 128 mutations, 1024 observations and 6 MB of payload.');
   }
   unique(mutations.map((mutation) => mutation.effect.path.toLowerCase()), 'mutations.paths');
+  const selector = mutations.find((mutation) => mutation.effect.path === '.missionspec/runtime-selection.json');
+  const selectionRecords = selector === undefined ? [] : runtimeSelectionCompletionRecords(workspace, selector);
   for (const mutation of mutations) {
     if (!guards.some((guard) => guard.path === mutation.effect.path && guard.digest === mutation.effect.expected)) {
       throw new ContractError('guards', 'every mutation requires an exact prior observation');
     }
     const installationRecord = mutation.effect.path === '.missionspec/installation.json' &&
       input.operation === 'onboard' && input.purpose === 'integration' && mutation.effect.purpose === 'configuration';
-    if (mutation.effect.path.startsWith('.missionspec/') && mutation.effect.path !== '.missionspec/workspace.json' && !installationRecord) {
+    const runtimeSelection = mutation.effect.path === '.missionspec/runtime-selection.json' &&
+      input.operation === 'onboard' && input.purpose === 'integration' && mutation.effect.purpose === 'configuration';
+    const selectionRecord = selectionRecords.some((file) => file.path === mutation.effect.path &&
+      mutation.effect.kind === 'file-write' && mutation.effect.expected === 'absent' && 'content' in mutation && mutation.content === file.content) &&
+      input.operation === 'onboard' && input.purpose === 'integration' && mutation.effect.purpose === 'configuration';
+    if (mutation.effect.path.startsWith('.missionspec/') && mutation.effect.path !== '.missionspec/workspace.json' &&
+        !installationRecord && !runtimeSelection && !selectionRecord) {
       throw new ContractError('mutation.path', 'runtime journals and ledgers are not editable artifact targets');
     }
   }
@@ -168,6 +206,21 @@ export function writeMutation(file: ProjectPath, expected: ContentDigest | 'abse
   return { effect: { kind: 'file-write', path: file, expected, proposed: digestContent(content), purpose }, content };
 }
 
+export function parseRuntimeSelectionPlan(value: unknown): FilePlan {
+  const plan = parseFilePlan(value);
+  const records = runtimeSelectionCompletionRecords(plan.workspace, plan.mutations[0]!);
+  if (plan.mutations.length < 2 || plan.mutations.length > 3 || records.some((file, index) => {
+    const mutation = plan.mutations[index + 1];
+    return mutation === undefined
+      ? index !== 1 || !plan.guards.some((guard) => guard.path === file.path && guard.digest === file.digest)
+      : mutation.effect.kind !== 'file-write' || mutation.effect.path !== file.path ||
+        mutation.effect.expected !== 'absent' || !('content' in mutation) || mutation.content !== file.content;
+  })) {
+    throw new ContractError('runtimeSelection', 'activation must journal its exact generation receipt and retained marker with the selector');
+  }
+  return plan;
+}
+
 function missing(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT';
 }
@@ -188,6 +241,7 @@ export async function observeWorkspaceRoot(directory: string): Promise<{ root: s
 
 export class LocalWorkspace {
   private windowsLease: WindowsWriterLease | undefined;
+  private runtimeSelectionLease: RuntimeLifecycleLease | undefined;
   private constructor(
     readonly root: string, readonly rootDigest: ContentDigest,
     private readonly authority: LocalAuthorityPort, private readonly now: () => string,
@@ -385,6 +439,45 @@ export class LocalWorkspace {
     try { await directory.sync(); } finally { await directory.close(); }
   }
 
+  private async unchangedPosixFile(file: HeldPosixFile): Promise<void> {
+    const held = await file.handle.stat({ bigint: true });
+    const current = await lstat(file.filename, { bigint: true });
+    if ([held, current].some((stat) => !stat.isFile() || stat.dev !== file.identity.dev || stat.ino !== file.identity.ino ||
+        stat.uid !== file.identity.uid || stat.gid !== file.identity.gid || stat.mode !== file.identity.mode ||
+        stat.nlink !== 1n || stat.size !== file.identity.size ||
+        stat.mtimeNs !== file.identity.mtimeNs || stat.ctimeNs !== file.identity.ctimeNs)) {
+      throw new WorkflowError('stale-revision', 'A retained file changed identity, bytes or security; preserve it for review.');
+    }
+  }
+
+  private async verifiedPosixFile(relative: ProjectPath, content: string, mode: number): Promise<HeldPosixFile> {
+    const filename = await this.target(relative);
+    const handle = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const identity = await handle.stat({ bigint: true });
+      const size = Buffer.byteLength(content);
+      if (!identity.isFile() || identity.nlink !== 1n || identity.uid !== BigInt(process.getuid!()) ||
+          (identity.mode & 0o7777n) !== BigInt(mode) || identity.size !== BigInt(size)) {
+        throw new WorkflowError('stale-revision', 'Retained file size or security differs from the reviewed publication; it is preserved.');
+      }
+      const bytes = Buffer.alloc(size + 1);
+      let length = 0;
+      while (length < bytes.length) {
+        const read = await handle.read(bytes, length, bytes.length - length, length);
+        if (read.bytesRead === 0) break;
+        length += read.bytesRead;
+      }
+      if (length !== size || digestContent(bytes.subarray(0, length)) !== digestContent(content)) {
+        throw new WorkflowError('stale-revision', 'Retained file content differs from the exact reviewed bytes; it is preserved.');
+      }
+      const file = { filename, handle, identity };
+      await this.unchangedPosixFile(file);
+      await handle.sync();
+      await this.unchangedPosixFile(file);
+      return file;
+    } catch (error) { await handle.close(); throw error; }
+  }
+
   private async exclusive(relative: ProjectPath, content: string, mode = 0o600, securityFrom?: string): Promise<WindowsFileReference | undefined> {
     if (process.platform === 'win32') {
       await this.writeRoot();
@@ -409,8 +502,8 @@ export class LocalWorkspace {
   }
 
   /** Trusted adapter composition only; never expose as an arbitrary client write tool. */
-  async recordRuntime(area: 'approvals' | 'checks' | 'evidence' | 'audit', name: string, value: unknown): Promise<FileSnapshot> {
-    if (!['approvals', 'checks', 'evidence', 'audit'].includes(area)) throw new ContractError('record.area', 'unsupported runtime record area');
+  async recordRuntime(area: 'approvals' | 'checks' | 'evidence' | 'audit' | 'backups' | 'recovery', name: string, value: unknown): Promise<FileSnapshot> {
+    if (!['approvals', 'checks', 'evidence', 'audit', 'backups', 'recovery'].includes(area)) throw new ContractError('record.area', 'unsupported runtime record area');
     if (!/^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*$/u.test(name)) throw new ContractError('record.name', 'invalid immutable record name');
     await this.writeRoot();
     const content = JSON.stringify(value);
@@ -488,7 +581,22 @@ export class LocalWorkspace {
     return this.commitPlan(value, approval);
   }
 
+  /** Trusted lifecycle composition only; caller holds the source ledger's exclusive lifecycle lease. */
+  async commitRuntimeSelection(plan: FilePlan, approval: ApprovalReference, lease: RuntimeLifecycleLease, recoveryId?: string): Promise<{ transactionId: string; state: 'committed' }> {
+    requireRuntimeLifecycleLease(lease, plan.workspace);
+    if (this.runtimeSelectionLease !== undefined) {
+      throw new WorkflowError('conflict', 'Only one exact runtime selection can be published under a lifecycle lease.');
+    }
+    const selected = parseRuntimeSelectionPlan(plan);
+    this.runtimeSelectionLease = lease;
+    try { return await this.commitPlan(selected, approval, recoveryId); }
+    finally { this.runtimeSelectionLease = undefined; }
+  }
+
   private async commitPlan(value: FilePlan, approval: ApprovalReference, recoveryId?: string): Promise<{ transactionId: string; state: 'committed' }> {
+    if (value.mutations.some((entry) => entry.effect.path === '.missionspec/runtime-selection.json') && this.runtimeSelectionLease === undefined) {
+      throw new WorkflowError('conflict', 'Runtime selection requires state activate/recover and an exclusive current-ledger lease; generic file recovery cannot activate it.');
+    }
     const plan = parseFilePlan(value);
     await this.writeRoot();
     if (process.platform === 'win32') {
@@ -508,7 +616,10 @@ export class LocalWorkspace {
     let prepared = false;
     let lockIdentity: WindowsFileReference | undefined;
     try {
-      if (process.platform === 'win32' && recoveryId !== undefined) await this.reclaimWindowsTransactionLock(lock, id);
+      if (recoveryId !== undefined) {
+        if (process.platform === 'win32') await this.reclaimWindowsTransactionLock(lock, id);
+        else if (this.runtimeSelectionLease) await this.reclaimSelectionTransactionLock(lock, id);
+      }
       lockIdentity = await this.exclusive(lock, JSON.stringify({ transactionId: id, pid: process.pid }));
       locked = true;
       if (lockIdentity !== undefined) this.windowsLease = {
@@ -519,6 +630,7 @@ export class LocalWorkspace {
         throw new WorkflowError('conflict', 'A pending transaction was observed after acquiring the local writer lock.');
       }
       await this.beforeEffects(plan);
+      if (this.runtimeSelectionLease !== undefined) requireRuntimeLifecycleLease(this.runtimeSelectionLease, plan.workspace);
       if (recoveryId === undefined) {
         await this.exclusive(parseProjectPath(`.missionspec/transactions/${id}.json`), JSON.stringify({ schemaVersion: 1, plan, approval: issued }));
       } else if (process.platform === 'win32') {
@@ -534,6 +646,7 @@ export class LocalWorkspace {
       for (const mutation of plan.mutations) {
         await requireApproval(this.authority, approval, plan.request, this.now());
         await this.compare(plan, true, id);
+        if (this.runtimeSelectionLease !== undefined) requireRuntimeLifecycleLease(this.runtimeSelectionLease, plan.workspace);
         const actual = (await this.read(mutation.effect.path))?.digest ?? 'absent';
         const proposed = mutation.effect.kind === 'file-write' ? mutation.effect.proposed : 'absent';
         if (process.platform === 'win32' && mutation.effect.kind === 'file-write' && 'content' in mutation) {
@@ -568,7 +681,12 @@ export class LocalWorkspace {
           continue;
         }
         if (recoveryId !== undefined && actual === proposed) {
-          if (process.platform === 'win32') await this.syncDirectory(path.join(this.root, mutation.effect.path));
+          if (mutation.effect.kind === 'file-write' && 'content' in mutation) {
+            const mode = (await lstat(await this.target(mutation.effect.path))).mode & 0o777;
+            const file = await this.verifiedPosixFile(mutation.effect.path, mutation.content, mode);
+            try { await this.syncDirectory(file.filename); await this.unchangedPosixFile(file); }
+            finally { await file.handle.close(); }
+          } else await this.syncDirectory(path.join(this.root, mutation.effect.path));
           continue;
         }
         if (actual !== mutation.effect.expected) throw new WorkflowError('stale-revision', 'An output changed before its write.');
@@ -584,16 +702,29 @@ export class LocalWorkspace {
         }
         else if ('content' in mutation) {
           const stage = parseProjectPath(`${mutation.effect.path}.msn-${id}`);
-          await this.exclusive(stage, mutation.content, existing === null ? 0o600 : existing.mode & 0o777);
+          const mode = existing === null ? 0o600 : existing.mode & 0o777;
+          let retained = false;
+          if (recoveryId !== undefined) {
+            try { await lstat(await this.target(stage)); retained = true; }
+            catch (error) { if (!missing(error)) throw error; }
+          }
+          if (!retained) await this.exclusive(stage, mutation.content, mode);
+          const file = await this.verifiedPosixFile(stage, mutation.content, mode);
           try {
             if (((await this.read(mutation.effect.path))?.digest ?? 'absent') !== mutation.effect.expected) {
               throw new WorkflowError('stale-revision', 'An output changed before replacement.');
             }
-            if (mutation.effect.expected === 'absent') await link(await this.target(stage), target);
-            else await rename(await this.target(stage), target);
-          } finally {
-            try { await unlink(path.join(this.root, stage)); } catch (error) { if (!missing(error)) throw error; }
-          }
+            await this.target(stage);
+            await this.unchangedPosixFile(file);
+            if (mutation.effect.expected === 'absent') {
+              await link(file.filename, target);
+              const linked = await lstat(file.filename, { bigint: true });
+              if (linked.dev !== file.identity.dev || linked.ino !== file.identity.ino) {
+                throw new WorkflowError('effect-outcome-unknown', 'Publication stage was replaced; no replacement entry was removed.');
+              }
+              await unlink(file.filename);
+            } else await rename(file.filename, target);
+          } finally { await file.handle.close(); }
         }
         await this.syncDirectory(target);
       }
@@ -638,6 +769,7 @@ export class LocalWorkspace {
     if (owner.transactionId !== id || typeof owner.pid !== 'number' || !Number.isSafeInteger(owner.pid)) {
       throw new WorkflowError('conflict', 'Only this transaction can reclaim its own demonstrably dead writer lock.');
     }
+
     try {
       const reference = inspectWindowsPrivateFile(this.windowsScope(false), filename);
       if (reference.digest !== original.digest) throw new Error('Writer lock changed');
@@ -645,6 +777,28 @@ export class LocalWorkspace {
     } catch {
       throw new WorkflowError('conflict', 'The recorded writer may still exist; its lock is preserved.');
     }
+  }
+
+  private async reclaimSelectionTransactionLock(lock: ProjectPath, id: string): Promise<void> {
+    const filename = await this.target(lock);
+    const original = await this.read(lock);
+    if (original === null) return;
+    const before = await lstat(filename, { bigint: true });
+    const owner = record(JSON.parse(original.content) as unknown, 'transaction.lock', ['transactionId', 'pid']);
+    if (owner.transactionId !== id || typeof owner.pid !== 'number' || !Number.isSafeInteger(owner.pid) || owner.pid <= 0) {
+      throw new WorkflowError('conflict', 'Only this selection transaction can recover its own dead writer lock.');
+    }
+    let dead = false;
+    try { process.kill(owner.pid, 0); }
+    catch (error) { dead = typeof error === 'object' && error !== null && Reflect.get(error, 'code') === 'ESRCH'; }
+    if (!dead) throw new WorkflowError('conflict', 'Selection writer may still exist; its lock is preserved.');
+    const after = await lstat(filename, { bigint: true });
+    if (before.dev !== after.dev || before.ino !== after.ino || before.ctimeNs !== after.ctimeNs ||
+        before.mtimeNs !== after.mtimeNs || (await this.read(lock))?.digest !== original.digest) {
+      throw new WorkflowError('stale-revision', 'Selection writer lock changed; no unrelated lock was removed.');
+    }
+    await unlink(filename);
+    await this.syncDirectory(filename);
   }
 
   async recoveryPlan(id: string): Promise<FilePlan> {

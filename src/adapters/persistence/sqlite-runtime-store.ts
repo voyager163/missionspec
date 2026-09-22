@@ -1,4 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
+import { lstatSync, statfsSync } from 'node:fs';
 import type { AttemptRecord, RunSnapshot } from '../../engines/execution/contracts.js';
 import type { AcceptanceRecord, EvidenceReference } from '../../engines/verification/contracts.js';
 import { parseId, type EvidenceId, type RunId } from '../../kernel/identifiers.js';
@@ -20,16 +21,60 @@ import {
 } from './filesystem.js';
 import { parseAcceptance, parseAttempt, parseEnvelope, parseEvidence, parseRun, type RunEnvelope } from './parsers.js';
 import { makePruneInventory, parsePruneCompletion, parsePrunePrepared } from './pruning.js';
+import { resolveRuntimeState, type RuntimeStateSelection } from './selection.js';
+import { readPrivateStateFile, syncStateDirectory, writePrivateStateFile } from './lifecycle-files.js';
+import path from 'node:path';
+import { withRuntimeLifecycleLease, type RuntimeLifecycleLease } from './lifecycle-lease.js';
 
 export type { RuntimeStoreOptions } from './filesystem.js';
 
 export interface SqliteRuntimeStore extends RuntimeStorePort {
   readonly evidencePruning: EvidencePruningStorePort;
+  inspectState(): Promise<Outcome<RuntimeStateInspection>>;
+  snapshot(): Promise<Outcome<RuntimeSnapshot>>;
+  withLifecycleLease<T>(expected: ContentDigest, operation: (snapshot: RuntimeSnapshot, lease: RuntimeLifecycleLease) => Promise<T>): Promise<Outcome<T>>;
   close(): Outcome<null>;
+}
+
+export interface RuntimeStateInspection {
+  readonly schemaVersion: 3;
+  readonly workspace: WorkspaceBinding;
+  readonly access: 'read-only' | 'read-write';
+  readonly recordedQuiescence: 'confirmed' | 'unconfirmed';
+  readonly records: {
+    readonly runs: number;
+    readonly revisions: number;
+    readonly attempts: number;
+    readonly evidence: number;
+    readonly acceptances: number;
+    readonly pendingPrunes: number;
+    readonly completedPrunes: number;
+  };
+  readonly capacity: {
+    readonly databaseBytes: string;
+    readonly allocatedPageBytes: string;
+    readonly reusablePageBytes: string;
+    readonly filesystemAvailableBytes: string;
+    readonly reservation: 'none';
+  };
 }
 
 const APPLICATION_ID = 0x4d534e31;
 const SCHEMA_VERSION = 3;
+export const MAX_RUNTIME_SNAPSHOT_BYTES = 4_000_000;
+export interface RuntimeSnapshot {
+  readonly formatVersion: 1;
+  readonly schemaVersion: 3;
+  readonly workspace: WorkspaceBinding;
+  readonly rows: Readonly<Record<string, readonly (readonly (string | null)[])[]>>;
+  readonly digest: ContentDigest;
+}
+export interface RuntimeSnapshotInspection {
+  readonly snapshot: RuntimeSnapshot;
+  readonly quiescent: boolean;
+  readonly pendingPrunes: boolean;
+  readonly evidence: readonly EvidenceReference[];
+}
 const tables = {
   store_metadata: `CREATE TABLE store_metadata (
     id TEXT PRIMARY KEY CHECK (id = 'workspace'),
@@ -84,6 +129,136 @@ const tables = {
     payload TEXT NOT NULL
   ) STRICT, WITHOUT ROWID`,
 };
+const columns: Readonly<Record<keyof typeof tables, readonly string[]>> = {
+  store_metadata: ['id', 'digest', 'payload'],
+  runs: ['id', 'revision', 'payload'],
+  run_history: ['run_id', 'revision', 'payload'],
+  attempts: ['id', 'run_id', 'work_order_id', 'digest', 'payload'],
+  evidence: ['id', 'run_id', 'attempt_id', 'digest', 'payload'],
+  acceptances: ['approval_id', 'run_id', 'run_revision', 'digest', 'payload'],
+  evidence_prune_prepared: ['id', 'digest', 'payload'],
+  evidence_prune_items: ['evidence_id', 'prune_id'],
+  evidence_prune_completed: ['prune_id', 'digest', 'payload'],
+};
+
+function snapshotOf(db: DatabaseSync, workspace: WorkspaceBinding): RuntimeSnapshot {
+  const rows: Record<string, (string | null)[][]> = {};
+  for (const [table, names] of Object.entries(columns)) {
+    rows[table] = db.prepare(`SELECT ${names.join(',')} FROM ${table} ORDER BY ${names.join(',')}`).all()
+      .map((row) => names.map((name) => {
+        const value = row[name];
+        if (typeof value !== 'string' && value !== null) throw new StoreFailure('corrupt', 'Snapshot row has a nontext value.');
+        return value;
+      }));
+  }
+  const body: Omit<RuntimeSnapshot, 'digest'> = { formatVersion: 1, schemaVersion: SCHEMA_VERSION, workspace, rows };
+  const payload = JSON.stringify(body);
+  if (Buffer.byteLength(payload) > MAX_RUNTIME_SNAPSHOT_BYTES) throw new StoreFailure('capacity', 'Snapshot exceeds the bounded 4 MB logical format.');
+  return { ...body, digest: digestContent(payload) };
+}
+
+function parseSnapshot(input: unknown, workspace: WorkspaceBinding): RuntimeSnapshot {
+  const raw = record(input, 'runtimeSnapshot', ['formatVersion', 'schemaVersion', 'workspace', 'rows', 'digest']);
+  if (raw.formatVersion !== 1 || raw.schemaVersion !== SCHEMA_VERSION) throw new StoreFailure('incompatible', 'Unsupported logical snapshot version; no inferred migration is permitted.');
+  requireWorkspace(parseWorkspaceBinding(raw.workspace), workspace);
+  const source = record(raw.rows, 'runtimeSnapshot.rows', Object.keys(columns));
+  const rows: Record<string, readonly (readonly (string | null)[])[]> = {};
+  for (const [table, names] of Object.entries(columns)) {
+    rows[table] = array(source[table], `runtimeSnapshot.${table}`, (value) => {
+      const row = array(value, 'snapshot.row', (cell) => cell === null ? null : text(cell, 'snapshot.cell', MAX_RUNTIME_SNAPSHOT_BYTES));
+      if (row.length !== names.length) throw new StoreFailure('corrupt', 'Snapshot row width differs from its fixed schema.');
+      return row;
+    });
+  }
+  const snapshot: RuntimeSnapshot = { formatVersion: 1, schemaVersion: SCHEMA_VERSION, workspace, rows, digest: parseDigest(raw.digest) };
+  const payload = JSON.stringify({ formatVersion: snapshot.formatVersion, schemaVersion: snapshot.schemaVersion, workspace, rows });
+  if (Buffer.byteLength(payload) > MAX_RUNTIME_SNAPSHOT_BYTES) throw new StoreFailure('capacity', 'Snapshot exceeds the bounded 4 MB logical format.');
+  if (digestContent(payload) !== snapshot.digest) throw new StoreFailure('corrupt', 'Snapshot digest does not match its exact canonical contents.');
+  return snapshot;
+}
+
+function createSchema(db: DatabaseSync): void {
+  for (const sql of Object.values(tables)) db.exec(sql);
+  db.exec(`PRAGMA application_id = ${APPLICATION_ID}`);
+  db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+}
+
+function insertSnapshot(db: DatabaseSync, snapshot: RuntimeSnapshot): void {
+  for (const [table, names] of Object.entries(columns)) {
+    const insert = db.prepare(`INSERT INTO ${table} (${names.join(',')}) VALUES (${names.map(() => '?').join(',')})`);
+    for (const row of snapshot.rows[table]!) insert.run(...row);
+  }
+}
+
+/** Validates in memory: no untrusted SQL, paths, extensions, or filesystem writes. */
+export async function validateRuntimeSnapshot(input: unknown, expected: WorkspaceBinding): Promise<Outcome<RuntimeSnapshotInspection>> {
+  let db: DatabaseSync | undefined;
+  try {
+    const workspace = parseWorkspaceBinding(expected);
+    const snapshot = parseSnapshot(input, workspace);
+    const sqlite = await import('node:sqlite');
+    db = new sqlite.DatabaseSync(':memory:', { enableForeignKeyConstraints: true, allowExtension: false });
+    db.exec('PRAGMA trusted_schema = OFF; PRAGMA temp_store = MEMORY');
+    createSchema(db);
+    insertSnapshot(db, snapshot);
+    // The in-memory database uses MEMORY journaling; validation never mutates a disk database.
+    const state = loadState(db, workspace, true);
+    if (snapshotOf(db, workspace).digest !== snapshot.digest) throw new StoreFailure('corrupt', 'Snapshot row order is not canonical.');
+    return { status: 'ok', value: {
+      snapshot, quiescent: workspaceQuiescent(state), pendingPrunes: pendingPrunes(state),
+      evidence: [...state.evidence.keys()].sort().map((id) => effectiveEvidence(state, parseId('evidence', id))!),
+    } };
+  } catch (error) { return failure(error); }
+  finally { db?.close(); }
+}
+
+/** Internal staging boundary: creates a closed replica, never a live parallel store. */
+export async function materializeRuntimeSnapshot(options: RuntimeStoreOptions, input: unknown): Promise<Outcome<null>> {
+  let db: DatabaseSync | undefined;
+  try {
+    const parsed = parseOptions(options);
+    if (parsed.mode !== 'create') throw new StoreFailure('conflict', 'Snapshot staging is exclusively create-only.');
+    const inspection = await validateRuntimeSnapshot(input, parsed.expectedWorkspace);
+    if (inspection.status !== 'ok') return inspection;
+    const files = prepareFiles(parsed);
+    writePrivateStateFile(path.dirname(path.dirname(parsed.directory)),
+      path.join(parsed.directory, 'workspace-root.json'), JSON.stringify({ schemaVersion: 1, workspaceRoot: parsed.workspaceRoot }));
+    const sqlite = await import('node:sqlite');
+    db = new sqlite.DatabaseSync(files.filename, { enableForeignKeyConstraints: true, allowExtension: false });
+    db.exec('PRAGMA trusted_schema = OFF; PRAGMA temp_store = MEMORY; PRAGMA synchronous = FULL; BEGIN IMMEDIATE');
+    createSchema(db);
+    insertSnapshot(db, inspection.value.snapshot);
+    loadState(db, parsed.expectedWorkspace);
+    db.exec('COMMIT');
+    db.close();
+    db = undefined;
+    syncStateDirectory(parsed.directory);
+    return { status: 'ok', value: null };
+  } catch (error) { return failure(error); }
+  finally { db?.close(); }
+}
+
+export async function inspectRuntimeReplica(options: RuntimeStoreOptions): Promise<Outcome<RuntimeSnapshot>> {
+  let db: DatabaseSync | undefined;
+  try {
+    const parsed = parseOptions({ ...options, mode: 'read-only' });
+    const origin = record(JSON.parse(readPrivateStateFile(path.join(parsed.directory, 'workspace-root.json'), 16_384)) as unknown,
+      'runtimeOrigin', ['schemaVersion', 'workspaceRoot']);
+    if (origin.schemaVersion !== 1 || origin.workspaceRoot !== parsed.workspaceRoot) {
+      throw new StoreFailure('workspace-mismatch', 'Replica origin differs from its reviewed workspace.');
+    }
+    const files = prepareFiles(parsed);
+    const sqlite = await import('node:sqlite');
+    db = new sqlite.DatabaseSync(files.filename, { readOnly: true, enableForeignKeyConstraints: true, allowExtension: false });
+    db.exec('PRAGMA trusted_schema = OFF; PRAGMA temp_store = MEMORY; PRAGMA query_only = ON; BEGIN');
+    loadState(db, parsed.expectedWorkspace);
+    const result = snapshotOf(db, parsed.expectedWorkspace);
+    db.exec('COMMIT');
+    checkFiles(files);
+    return { status: 'ok', value: result };
+  } catch (error) { return failure(error); }
+  finally { db?.close(); }
+}
 
 interface Stored<T> {
   readonly value: T;
@@ -138,13 +313,13 @@ function requireWorkspace(actual: WorkspaceBinding, expected: WorkspaceBinding):
   }
 }
 
-function checkSchema(db: DatabaseSync): void {
+function checkSchema(db: DatabaseSync, memory = false): void {
   const version = db.prepare('PRAGMA user_version').get();
   const application = db.prepare('PRAGMA application_id').get();
   if (version?.user_version !== SCHEMA_VERSION || application?.application_id !== APPLICATION_ID) {
     throw new StoreFailure('incompatible', 'Runtime store application/schema version is unsupported; no migration was attempted.');
   }
-  if (db.prepare('PRAGMA journal_mode').get()?.journal_mode !== 'delete') {
+  if (db.prepare('PRAGMA journal_mode').get()?.journal_mode !== (memory ? 'memory' : 'delete')) {
     throw new StoreFailure('incompatible', 'Runtime store requires DELETE journaling; no journal downgrade was attempted.');
   }
   const schema = db.prepare('SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY name').all();
@@ -163,8 +338,8 @@ function checkSchema(db: DatabaseSync): void {
   intact(db.prepare('PRAGMA foreign_key_check').all().length === 0, 'Runtime store contains orphaned foreign keys.');
 }
 
-function loadState(db: DatabaseSync, expectedWorkspace: WorkspaceBinding): StoreState {
-  checkSchema(db);
+function loadState(db: DatabaseSync, expectedWorkspace: WorkspaceBinding, memory = false): StoreState {
+  checkSchema(db, memory);
   try {
     const metadata = db.prepare('SELECT id, digest, payload FROM store_metadata').all();
     const row = metadata[0];
@@ -456,6 +631,7 @@ class Store implements SqliteRuntimeStore {
   #closed = false;
   #unusable = false;
   #uncertainCommit = false;
+  #leased = false;
   readonly #db: DatabaseSync;
   readonly #files: StoreFiles;
   readonly #readOnly: boolean;
@@ -467,6 +643,7 @@ class Store implements SqliteRuntimeStore {
     files: StoreFiles,
     readOnly: boolean,
     workspace: WorkspaceBinding,
+    private readonly selection: RuntimeStateSelection,
   ) {
     this.#db = db;
     this.#files = files;
@@ -491,21 +668,27 @@ class Store implements SqliteRuntimeStore {
 
   #transaction<T>(write: boolean, operation: (state: StoreState) => T): Outcome<T> {
     let committing = false;
+    let started = false;
     try {
       if (this.#closed) throw new StoreFailure('closed', 'Runtime store is closed.');
+      if (this.#leased) throw new StoreFailure('busy', 'Runtime store has an exclusive lifecycle lease.');
       if (this.#unusable || (write && this.#uncertainCommit)) {
         throw new StoreFailure('unknown', 'Runtime store requires explicit reopen and reconciliation before further writes.');
       }
       if (write && this.#readOnly) throw new StoreFailure('read-only', 'Runtime store was explicitly opened read-only.');
       checkFiles(this.#files);
+      this.#checkSelection();
       this.#db.exec(write ? 'BEGIN IMMEDIATE' : 'BEGIN');
+      started = true;
+      this.#checkSelection();
       const state = loadState(this.#db, this.#workspace);
       const result = operation(state);
+      this.#checkSelection();
       committing = true;
       this.#db.exec('COMMIT');
       return { status: 'ok', value: result };
     } catch (error) {
-      if (!this.#closed && this.#db.isTransaction) {
+      if (started && !this.#closed && this.#db.isTransaction) {
         try {
           this.#db.exec('ROLLBACK');
           committing = false;
@@ -514,6 +697,7 @@ class Store implements SqliteRuntimeStore {
           this.close();
           return failure(new StoreFailure('unknown', 'Runtime transaction rollback could not be confirmed; reopen and reconcile.'));
         }
+
       }
       if (committing && write) {
         this.#uncertainCommit = true;
@@ -525,6 +709,87 @@ class Store implements SqliteRuntimeStore {
 
   async listRuns(): ReturnType<RuntimeStorePort['listRuns']> {
     return this.#transaction(false, (state) => [...state.runs.values()].map((entry) => entry.value.snapshot));
+  }
+
+  #checkSelection(): void {
+    const current = resolveRuntimeState(this.selection.workspaceRoot, this.#workspace);
+    if (current.directory !== this.#files.directory || current.revision !== this.selection.revision) {
+      throw new StoreFailure('stale-revision', 'Runtime selection changed; this handle is fenced. Resolve and reopen the selected store.');
+    }
+  }
+
+  async snapshot(): Promise<Outcome<RuntimeSnapshot>> {
+    return this.#transaction(false, () => snapshotOf(this.#db, this.#workspace));
+  }
+
+  async withLifecycleLease<T>(expected: ContentDigest, operation: (snapshot: RuntimeSnapshot, lease: RuntimeLifecycleLease) => Promise<T>): Promise<Outcome<T>> {
+    let acquired = false;
+    try {
+      parseDigest(expected);
+      if (this.#closed || this.#readOnly || this.#leased || this.#unusable || this.#uncertainCommit) {
+        throw new StoreFailure('unavailable', 'Lifecycle activation requires an available writable store.');
+      }
+      checkFiles(this.#files);
+      this.#checkSelection();
+      this.#db.exec('BEGIN IMMEDIATE');
+      acquired = true;
+      this.#leased = true;
+      this.#checkSelection();
+      const state = loadState(this.#db, this.#workspace);
+      if (!workspaceQuiescent(state) || pendingPrunes(state)) throw new StoreFailure('conflict', 'Active, unreconciled runs or pending pruning block state lifecycle effects.');
+      const snapshot = snapshotOf(this.#db, this.#workspace);
+      if (snapshot.digest !== expected) throw new StoreFailure('stale-revision', 'Runtime facts changed since lifecycle review.');
+      const result = await withRuntimeLifecycleLease(this.#workspace, snapshot.digest, (lease) => operation(snapshot, lease));
+      this.#db.exec('ROLLBACK');
+      return { status: 'ok', value: result };
+    } catch (error) {
+      if (acquired && !this.#closed && this.#db.isTransaction) {
+        try { this.#db.exec('ROLLBACK'); }
+        catch { this.#unusable = true; return failure(new StoreFailure('unknown', 'Lifecycle lease release requires reconciliation.')); }
+      }
+      if (error instanceof Error && error.name === 'WorkflowError') throw error;
+      return failure(error);
+    } finally { if (acquired) this.#leased = false; }
+  }
+
+  async inspectState(): Promise<Outcome<RuntimeStateInspection>> {
+    return this.#transaction(false, (state) => {
+      const pageSize = this.#db.prepare('PRAGMA page_size').get()?.page_size;
+      const pageCount = this.#db.prepare('PRAGMA page_count').get()?.page_count;
+      const freePages = this.#db.prepare('PRAGMA freelist_count').get()?.freelist_count;
+      const count = (value: unknown): bigint => {
+        if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+          throw new StoreFailure('corrupt', 'Runtime store page accounting is invalid.');
+        }
+        return BigInt(value);
+      };
+      const size = count(pageSize);
+      const pages = count(pageCount);
+      const free = count(freePages);
+      intact(size > 0n && free <= pages, 'Runtime store page accounting is inconsistent.');
+      const filesystem = statfsSync(this.#files.directory, { bigint: true });
+      const file = lstatSync(this.#files.filename, { bigint: true });
+      intact(filesystem.bsize > 0n && filesystem.bavail >= 0n, 'Filesystem capacity observation is invalid.');
+      checkFiles(this.#files);
+      return {
+        schemaVersion: SCHEMA_VERSION,
+        workspace: this.#workspace,
+        access: this.#readOnly ? 'read-only' : 'read-write',
+        recordedQuiescence: workspaceQuiescent(state) ? 'confirmed' : 'unconfirmed',
+        records: {
+          runs: state.runs.size, revisions: state.history.length, attempts: state.attempts.size,
+          evidence: state.evidence.size, acceptances: state.acceptances.size,
+          pendingPrunes: state.prunePrepared.size - state.pruneCompleted.size,
+          completedPrunes: state.pruneCompleted.size,
+        },
+        capacity: {
+          databaseBytes: file.size.toString(), allocatedPageBytes: (pages * size).toString(),
+          reusablePageBytes: (free * size).toString(),
+          filesystemAvailableBytes: (filesystem.bavail * filesystem.bsize).toString(),
+          reservation: 'none',
+        },
+      };
+    });
   }
 
   async readRun(runId: RunId): ReturnType<RuntimeStorePort['readRun']> {
@@ -753,6 +1018,7 @@ class Store implements SqliteRuntimeStore {
   }
 
   close(): Outcome<null> {
+    if (this.#leased) return failure(new StoreFailure('busy', 'An active lifecycle lease must finish before closing.'));
     if (this.#closed) return { status: 'ok', value: null };
     try {
       this.#db.close();
@@ -771,6 +1037,18 @@ export async function openRuntimeStore(options: RuntimeStoreOptions): Promise<Ou
   try {
     requireSupportedPlatform();
     const parsed = parseOptions(options);
+    try {
+      const origin = record(JSON.parse(readPrivateStateFile(path.join(parsed.directory, 'workspace-root.json'), 16_384)) as unknown,
+        'runtimeOrigin', ['schemaVersion', 'workspaceRoot']);
+      if (origin.schemaVersion !== 1 || origin.workspaceRoot !== parsed.workspaceRoot) {
+        throw new StoreFailure('workspace-mismatch', 'Staged/external stores must be opened through their bound workspace selection.');
+      }
+    } catch (error) {
+      if (typeof error !== 'object' || error === null || Reflect.get(error, 'code') !== 'ENOENT') throw error;
+    }
+    const selection = resolveRuntimeState(parsed.workspaceRoot, parsed.expectedWorkspace);
+    if (selection.directory !== parsed.directory) throw new StoreFailure('stale-revision', 'Open the explicitly selected runtime directory; no parallel store is permitted.');
+    if (parsed.mode === 'create' && selection.revision !== 'absent') throw new StoreFailure('conflict', 'An explicitly selected store can never be recreated or reset; inspect recovery instead.');
     const [major, minor] = process.versions.node.split('.').map(Number);
     if (major !== 24 || minor === undefined || minor < 21) {
       throw new StoreFailure('unavailable', 'The SQLite adapter requires qualified Node 24.21 or later in the Node 24 line.');
@@ -788,6 +1066,7 @@ export async function openRuntimeStore(options: RuntimeStoreOptions): Promise<Ou
       timeout: parsed.busyTimeoutMs,
     });
     db.exec('PRAGMA trusted_schema = OFF');
+    db.exec('PRAGMA temp_store = MEMORY');
     if (parsed.mode === 'read-only') db.exec('PRAGMA query_only = ON');
     else db.exec('PRAGMA synchronous = FULL');
     if (parsed.mode === 'create') {
@@ -815,7 +1094,7 @@ export async function openRuntimeStore(options: RuntimeStoreOptions): Promise<Ou
         throw error;
       }
     }
-    const store = new Store(db, files, parsed.mode === 'read-only', parsed.expectedWorkspace);
+    const store = new Store(db, files, parsed.mode === 'read-only', parsed.expectedWorkspace, selection);
     const inspection = await store.readRun(parseId('run', 'RUN-storage-inspection'));
     if (inspection.status !== 'ok') {
       store.close();

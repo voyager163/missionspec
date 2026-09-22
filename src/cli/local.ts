@@ -2,8 +2,7 @@ import { LocalWorkflow } from '../application/local-workflow.js';
 import { WorkflowError } from '../application/errors.js';
 import { parseId, parseProjectPath } from '../kernel/identifiers.js';
 import { oneOf } from '../kernel/validation.js';
-import path from 'node:path';
-import { openRuntimeStore } from '../adapters/persistence/index.js';
+import { openWorkspaceRuntimeStore, runtimeStateExists } from '../adapters/persistence/index.js';
 import { renderArtifactTemplate, type MarkdownSource } from '../engines/specification/contracts.js';
 import { runMutation } from './mutations.js';
 import { assessClarifications } from '../engines/discovery/contracts.js';
@@ -151,13 +150,13 @@ async function runLocalPreview(positionals: readonly string[], values: LocalCliO
   if (command === 'archive' && values.outcome !== 'accepted') {
     preview();
     const outcome = oneOf(values.outcome, ['rejected', 'cancelled', 'incomplete'], 'outcome');
-    if (!(await workflow.files.list(parseProjectPath('.missionspec/state'))).includes(parseProjectPath('.missionspec/state/ledger.sqlite'))) {
+    if (!await runtimeStateExists(workflow.files.root, await workflow.files.identity())) {
       return workflow.previewArchive(slug, outcome);
     }
   }
   const workspace = await workflow.files.identity();
   if (workspace === null) throw new WorkflowError('not-found', 'No explicit workspace identity exists.');
-  const store = await openRuntimeStore({ directory: path.join(process.cwd(), '.missionspec/state'), mode: 'read-only', expectedWorkspace: workspace });
+  const store = await openWorkspaceRuntimeStore({ workspaceRoot: workflow.files.root, mode: 'read-only', expectedWorkspace: workspace });
   if (store.status !== 'ok') throw new WorkflowError('evidence-unavailable', 'An existing readable runtime ledger is required for this review.');
   try {
     workflow = await LocalWorkflow.open(process.cwd(), { store: store.value });

@@ -9,6 +9,7 @@ import { requireWindowsPrivateState, validateWindowsStatePath, windowsPrivateEnt
 
 export interface RuntimeStoreOptions {
   readonly directory: string;
+  readonly workspaceRoot?: string;
   readonly expectedWorkspace: WorkspaceBinding;
   readonly mode: 'create' | 'read-only' | 'read-write';
   readonly busyTimeoutMs?: number;
@@ -23,7 +24,7 @@ export interface StoreFiles {
 }
 
 export function parseOptions(value: unknown): Required<RuntimeStoreOptions> {
-  const input = record(value, 'runtimeStore', ['directory', 'expectedWorkspace', 'mode', 'busyTimeoutMs']);
+  const input = record(value, 'runtimeStore', ['directory', 'workspaceRoot', 'expectedWorkspace', 'mode', 'busyTimeoutMs']);
   const directory = text(input.directory, 'runtimeStore.directory', 4096);
   if (!path.isAbsolute(directory) || directory === path.parse(directory).root ||
       path.normalize(directory) !== directory || directory.includes('\0') || (process.platform !== 'win32' && directory.includes('\\')) ||
@@ -34,8 +35,17 @@ export function parseOptions(value: unknown): Required<RuntimeStoreOptions> {
   if (path.basename(directory) !== 'state' || path.basename(path.dirname(directory)) !== '.missionspec') {
     throw new StoreFailure('incompatible', 'Only .missionspec/state/ledger.sqlite is supported; prototype paths are not migrated.');
   }
+  const workspaceRoot = input.workspaceRoot === undefined ? path.dirname(path.dirname(directory))
+    : text(input.workspaceRoot, 'runtimeStore.workspaceRoot', 4096);
+  if (!path.isAbsolute(workspaceRoot) || path.normalize(workspaceRoot) !== workspaceRoot ||
+      workspaceRoot === path.parse(workspaceRoot).root || workspaceRoot.includes('\0') ||
+      (process.platform !== 'win32' && workspaceRoot.includes('\\'))) {
+    throw new ContractError('runtimeStore.workspaceRoot', 'expected a normalized absolute workspace directory');
+  }
+  if (process.platform === 'win32') validateWindowsStatePath(workspaceRoot);
   return {
     directory,
+    workspaceRoot,
     expectedWorkspace: parseWorkspaceBinding(input.expectedWorkspace),
     mode: oneOf(input.mode, ['create', 'read-only', 'read-write'], 'runtimeStore.mode'),
     busyTimeoutMs: input.busyTimeoutMs === undefined ? 100
@@ -81,6 +91,17 @@ function checkPrivate(stat: Stats, directory: boolean, writable: boolean): void 
       stat.uid !== process.getuid?.() || (stat.mode & 0o077) !== 0 ||
       (stat.mode & required) !== required || (!directory && stat.nlink !== 1)) {
     throw new StoreFailure('unavailable', 'Runtime store requires an owner-only directory and single-link owner-only regular file.');
+  }
+
+}
+
+export function checkPrivatePath(filename: string, directory: boolean, writable = false): void {
+  requireSupportedPlatform();
+  if (process.platform === 'win32') {
+    windowsPrivateEntries([{ path: filename, directory, writable }]);
+  } else {
+    checkAncestors(path.dirname(filename));
+    checkPrivate(lstatSync(filename), directory, writable);
   }
 }
 

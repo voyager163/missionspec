@@ -136,6 +136,62 @@ test('explicit creation is exclusive, private, and exposes only storage operatio
   ok(store.close());
 });
 
+test('state inspection reports exact database accounting without writes or a capacity reservation', async (t) => {
+  const { root, directory, filename } = fixture(t);
+  const { store } = await seeded(t, directory);
+  ok(store.close());
+  const readOnly = await opened(t, directory, 'read-only');
+  const before = inventory(root);
+  const report = ok(await readOnly.inspectState());
+  assert.equal(report.schemaVersion, 3);
+  assert.deepEqual(report.workspace, workspace);
+  assert.equal(report.access, 'read-only');
+  assert.equal(report.recordedQuiescence, 'confirmed');
+  assert.deepEqual(report.records, {
+    runs: 1, revisions: 1, attempts: 1, evidence: 1, acceptances: 0,
+    pendingPrunes: 0, completedPrunes: 0,
+  });
+  assert.equal(report.capacity.databaseBytes, lstatSync(filename, { bigint: true }).size.toString());
+  assert.equal(report.capacity.allocatedPageBytes, report.capacity.databaseBytes);
+  assert(BigInt(report.capacity.reusablePageBytes) <= BigInt(report.capacity.databaseBytes));
+  assert.match(report.capacity.filesystemAvailableBytes, /^(0|[1-9]\d*)$/u);
+  assert.equal(report.capacity.reservation, 'none');
+  assert.deepEqual(inventory(root), before);
+  ok(readOnly.close());
+  rejected(await readOnly.inspectState(), 'closed');
+});
+
+test('actual SQLite page exhaustion rolls back without deleting history or claiming capacity', async (t) => {
+  const { directory } = fixture(t);
+  const { store, initial, revision } = await seeded(t, directory);
+  const execute = DatabaseSync.prototype.exec;
+  let constrained = false;
+  DatabaseSync.prototype.exec = function (sql) {
+    if (!constrained && sql === 'BEGIN IMMEDIATE') {
+      const pages = this.prepare('PRAGMA page_count').get().page_count;
+      execute.call(this, `PRAGMA max_page_count = ${pages}`);
+      constrained = true;
+    }
+    return execute.call(this, sql);
+  };
+  let result;
+  try {
+    result = await store.commitRun({
+      expectedRevision: revision,
+      snapshot: { ...initial, pendingTasks: Array.from({ length: 1000 }, (_, index) => `TSK-capacity-${index}`) },
+      attempts: [], evidence: [],
+    });
+  } finally {
+    DatabaseSync.prototype.exec = execute;
+  }
+  assert.equal(constrained, true);
+  rejected(result, 'capacity', 'limit-reached');
+  const after = ok(await store.readRun(initial.id));
+  assert.equal(after.revision, revision);
+  assert.deepEqual(after.snapshot, initial);
+  assert.deepEqual(ok(await store.readRunEvidence(initial.id)), ['EVD-first']);
+});
+
 test('workspace binding is mandatory and malformed identities never create a ledger', async (t) => {
   const { root, directory } = fixture(t);
   const before = inventory(root);

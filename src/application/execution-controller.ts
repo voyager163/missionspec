@@ -102,7 +102,7 @@ export class ExecutionController {
     const dispatches = work.effects.filter((effect) => effect.kind === 'host-dispatch');
     if (dispatches.length !== 1 || dispatches[0]!.host !== work.host || dispatches[0]!.taskIds.length !== 1 ||
         dispatches[0]!.taskIds[0] !== work.task.id || work.effects.some((effect) =>
-          effect.kind === 'context-consume' ||
+          effect.kind === 'context-consume' || effect.kind === 'runtime-state' ||
           ((effect.kind === 'file-write' || effect.kind === 'file-remove') &&
             (effect.purpose !== 'source' || !work.task.writeScope.includes(effect.path))) ||
           (effect.kind === 'check-execute' && !work.task.checks.includes(effect.checkId)))) {

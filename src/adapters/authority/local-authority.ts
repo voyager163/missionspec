@@ -130,8 +130,7 @@ class PersistentAuthority implements LocalConfirmationAuthority {
   }
 
   private async exchange(review: LocalConfirmationReview): Promise<LocalConfirmationDecision> {
-    if (this.transport === undefined || !['darwin', 'linux', 'win32'].includes(process.platform) ||
-        (process.platform === 'win32' && this.transport.channel === 'terminal-confirmation')) return 'unavailable';
+    if (this.transport === undefined || !['darwin', 'linux', 'win32'].includes(process.platform)) return 'unavailable';
     const abort = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let accepted = false;

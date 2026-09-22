@@ -23,6 +23,11 @@ export type RequestedEffect =
   | { readonly kind: 'check-execute'; readonly checkId: CheckId; readonly definition: ContentDigest }
   | { readonly kind: 'host-dispatch'; readonly host: NativeHost; readonly taskIds: readonly TaskId[] }
   | {
+    readonly kind: 'runtime-state';
+    readonly action: 'backup' | 'stage' | 'restore' | 'select';
+    readonly subject: ContentDigest;
+  }
+  | {
     readonly kind: 'context-consume';
     readonly providerId: StableId<'provider'>;
     readonly paths: readonly ProjectPath[];
@@ -32,9 +37,16 @@ export type RequestedEffect =
 export function parseRequestedEffect(value: unknown): RequestedEffect {
   const tag = record(value, 'effect', [
     'kind', 'purpose', 'path', 'expected', 'proposed', 'checkId', 'definition',
-    'host', 'taskIds', 'providerId', 'paths', 'allowRemoteProcessing',
+    'host', 'taskIds', 'providerId', 'paths', 'allowRemoteProcessing', 'action', 'subject',
   ]);
   switch (tag.kind) {
+    case 'runtime-state': {
+      const input = record(value, 'effect', ['kind', 'action', 'subject']);
+      return Object.freeze({
+        kind: 'runtime-state', action: oneOf(input.action, ['backup', 'stage', 'restore', 'select'], 'effect.action'),
+        subject: parseDigest(input.subject),
+      });
+    }
     case 'file-write': {
       const input = record(value, 'effect', ['kind', 'purpose', 'path', 'expected', 'proposed']);
       return Object.freeze({
@@ -91,6 +103,7 @@ export function parseEffectScope(value: unknown): readonly RequestedEffect[] {
       case 'file-remove': return `file:${effect.path}`;
       case 'check-execute': return `check:${effect.checkId}`;
       case 'host-dispatch': return `host:${effect.host}`;
+      case 'runtime-state': return `runtime:${effect.action}`;
       case 'context-consume': return `context:${effect.providerId}`;
     }
   }), 'effects');

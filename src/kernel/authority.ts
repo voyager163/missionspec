@@ -97,6 +97,10 @@ export function parseApprovalRequest(value: unknown): ApprovalRequest {
     throw new ContractError('approvalRequest.binding', 'review bindings cannot grant native execution or artifact editing');
   }
   const effects = parseEffectScope(input.effects);
+  if (effects.some((effect) => effect.kind === 'runtime-state') &&
+      (operation !== 'onboard' || purpose !== 'integration' || binding.kind !== 'project')) {
+    throw new ContractError('approvalRequest.effects', 'runtime lifecycle effects require separate project integration authority, never execution authority');
+  }
   const expected = binding.kind === 'change' ? binding.revisions.effects : binding.effects;
   if (expected !== digestEffectScope(effects)) {
     throw new ContractError('approvalRequest.binding', 'effect revision does not match the requested scope');

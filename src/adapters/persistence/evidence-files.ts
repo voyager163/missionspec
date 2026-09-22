@@ -44,7 +44,7 @@ function sameIdentity(left: BigIntStats, right: BigIntStats): boolean {
   return left.dev === right.dev && left.ino === right.ino;
 }
 
-async function scope(files: LocalWorkspace, expected: WorkspaceBinding): Promise<string> {
+async function scope(files: LocalWorkspace, expected: WorkspaceBinding, area: 'evidence' | 'lifecycle' = 'evidence'): Promise<string> {
   requireSupportedPlatform();
   const observed = await observeWorkspaceRoot(files.root);
   const identity = await files.identity();
@@ -55,7 +55,7 @@ async function scope(files: LocalWorkspace, expected: WorkspaceBinding): Promise
     throw new WorkflowError('scope-exceeded', 'Evidence pruning must bind the independently observed, private current workspace root.');
   }
   privateEntry(lstatSync(path.join(files.root, '.missionspec'), { bigint: true }), true);
-  const directory = path.join(files.root, '.missionspec', 'evidence');
+  const directory = area === 'evidence' ? path.join(files.root, '.missionspec', 'evidence') : path.join(files.root, '.missionspec');
   privateEntry(lstatSync(directory, { bigint: true }), true);
   if (process.platform === 'win32') {
     windowsPrivateEntries([
@@ -78,7 +78,7 @@ function syncDirectory(directory: string): void {
   try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
 }
 
-function reclaimDeadPruneLock(filename: string, id: ContentDigest): void {
+function reclaimDeadPruneLock(filename: string, id: ContentDigest, kind: 'evidence-prune' | 'state-lifecycle'): void {
   const descriptor = openSync(filename, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stat = fstatSync(descriptor, { bigint: true });
@@ -89,7 +89,7 @@ function reclaimDeadPruneLock(filename: string, id: ContentDigest): void {
       throw new WorkflowError('conflict', 'Writer lock changed while being observed.');
     }
     const owner = record(JSON.parse(bytes.toString('utf8')) as unknown, 'prune.lock', ['schemaVersion', 'kind', 'id', 'pid', 'nonce']);
-    if (owner.schemaVersion !== 1 || owner.kind !== 'evidence-prune' || parseDigest(owner.id) !== id) {
+    if (owner.schemaVersion !== 1 || owner.kind !== kind || parseDigest(owner.id) !== id) {
       throw new WorkflowError('conflict', 'Only the exact reviewed prune job can recover its own abandoned writer lock.');
     }
     text(owner.nonce, 'prune.lock.nonce', 80);
@@ -112,16 +112,29 @@ function reclaimDeadPruneLock(filename: string, id: ContentDigest): void {
 export async function withEvidencePruneLock<T>(
   files: LocalWorkspace, workspace: WorkspaceBinding, id: ContentDigest, operation: () => Promise<T>,
 ): Promise<T> {
+  return withPrivateStateLock(files, workspace, id, 'evidence-prune', operation);
+}
+
+export async function withStateLifecycleLock<T>(
+  files: LocalWorkspace, workspace: WorkspaceBinding, id: ContentDigest, operation: () => Promise<T>,
+): Promise<T> {
+  return withPrivateStateLock(files, workspace, id, 'state-lifecycle', operation);
+}
+
+async function withPrivateStateLock<T>(
+  files: LocalWorkspace, workspace: WorkspaceBinding, id: ContentDigest,
+  kind: 'evidence-prune' | 'state-lifecycle', operation: () => Promise<T>,
+): Promise<T> {
   parseDigest(id);
-  await scope(files, workspace);
+  await scope(files, workspace, kind === 'evidence-prune' ? 'evidence' : 'lifecycle');
   const filename = path.join(files.root, '.missionspec', 'transaction.lock');
-  const lockContent = JSON.stringify({ schemaVersion: 1, kind: 'evidence-prune', id, pid: process.pid, nonce: randomUUID() });
+  const lockContent = JSON.stringify({ schemaVersion: 1, kind, id, pid: process.pid, nonce: randomUUID() });
   if (process.platform === 'win32') {
     let old: string | undefined;
     try { old = readFileSync(filename, 'utf8'); } catch (error) { if (!missing(error)) throw error; }
     if (old !== undefined) {
       const owner = record(JSON.parse(old) as unknown, 'prune.lock', ['schemaVersion', 'kind', 'id', 'pid', 'nonce']);
-      if (owner.schemaVersion !== 1 || owner.kind !== 'evidence-prune' || parseDigest(owner.id) !== id) {
+      if (owner.schemaVersion !== 1 || owner.kind !== kind || parseDigest(owner.id) !== id) {
         throw new WorkflowError('conflict', 'Only this prune can reclaim its own dead writer lock.');
       }
       text(owner.nonce, 'prune.lock.nonce', 80);
@@ -147,7 +160,7 @@ export async function withEvidencePruneLock<T>(
   const flags = constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW;
   try { descriptor = openSync(filename, flags, 0o600); } catch (error) {
     if (typeof error !== 'object' || error === null || Reflect.get(error, 'code') !== 'EEXIST') throw error;
-    reclaimDeadPruneLock(filename, id);
+    reclaimDeadPruneLock(filename, id, kind);
     descriptor = openSync(filename, flags, 0o600);
   }
   let identity: BigIntStats;

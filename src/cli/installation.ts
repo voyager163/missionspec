@@ -1,10 +1,9 @@
-import path from 'node:path';
 import { LocalWorkflow } from '../application/local-workflow.js';
 import { SkillInstallation } from '../application/installation.js';
 import { TerminalAuthority } from '../adapters/authority/terminal.js';
-import { openRuntimeStore, type SqliteRuntimeStore } from '../adapters/persistence/index.js';
+import { openWorkspaceRuntimeStore, runtimeStateExists, type SqliteRuntimeStore } from '../adapters/persistence/index.js';
 import { loadPackagedSkillCatalog } from '../adapters/packaged-assets/skills.js';
-import { NATIVE_HOSTS, parseProjectPath } from '../kernel/identifiers.js';
+import { NATIVE_HOSTS } from '../kernel/identifiers.js';
 import { requireApproval } from '../application/authority.js';
 import { parseApprovalReference } from '../kernel/authority.js';
 import { WorkflowError } from '../application/errors.js';
@@ -25,8 +24,8 @@ export async function runSkillInstallation(action: string, values: {
   let store: SqliteRuntimeStore | undefined;
   try {
     const workspace = await workflow.files.identity();
-    if (workspace !== null && (await workflow.files.list(parseProjectPath('.missionspec/state'))).includes(parseProjectPath('.missionspec/state/ledger.sqlite'))) {
-      const result = await openRuntimeStore({ directory: path.join(workflow.files.root, '.missionspec/state'),
+    if (workspace !== null && await runtimeStateExists(workflow.files.root, workspace)) {
+      const result = await openWorkspaceRuntimeStore({ workspaceRoot: workflow.files.root,
         mode: values.preview || action === 'inspect' ? 'read-only' : 'read-write', expectedWorkspace: workspace });
       if (result.status !== 'ok') throw new WorkflowError('persistence-failed', 'Cannot establish runtime quiescence for skill installation.');
       store = result.value;

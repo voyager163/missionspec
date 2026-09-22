@@ -60,6 +60,14 @@ selected current directory; a change selector is its flat slug, not a guessed ID
 | `evidence pending`, `evidence status <sha256-id>`, `evidence recover <sha256-id> [--preview]` | Inspect or explicitly recover a prepared prune without replaying completed deletion |
 | `telemetry status\|on\|off\|preview` | Inspect/change the dedicated local preference or preview an illustrative aggregate; never activate a production endpoint |
 | `logs prune [--preview\|--approval <APR-id>]` | Review and truncate only the dedicated diagnostic log; never delete evidence or ledger history |
+| `state status [--json]` | Inspect an existing ledger, record counts and point-in-time capacity without initialization, writes or telemetry |
+| `state backup\|stage\|restore` | Review bounded logical/raw-evidence backup and non-destructive recovery; never roll back authority or current ledger facts |
+| `state select\|activate\|recover` | Prepare a private replica, separately activate the central ledger selection, or recover its journal under a current-ledger lease |
+| `state migrate` | Inspect the explicit version policy or review conversion of a backup into a nonactive native recovery replica |
+
+See [runtime state lifecycle](runtime-state-lifecycle.md) for exact command syntax,
+external selection semantics, retained evidence, migration limits and
+missing/corrupt-current-state reconciliation.
 
 Existing `capabilities`, `skills list`, `skills render`, `validate` and `--version`
 remain supported. Native execution CLI entrypoints explicitly report

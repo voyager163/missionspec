@@ -14,6 +14,9 @@ import { array, integer, record, text, unique } from '../../kernel/validation.js
 import type { LocalAuthorityPort, RuntimeStorePort } from '../../ports/contracts.js';
 import type { RunSnapshot } from '../../engines/execution/contracts.js';
 import type { EvidenceReference } from '../../engines/verification/contracts.js';
+import { runtimeStateExists } from '../persistence/index.js';
+import { executeWindowsCheck } from '../platform/windows-execution.js';
+import { validateWindowsStatePath, windowsPrivateEntries } from '../platform/windows-private-state.js';
 
 export interface LocalCheckInput {
   readonly checkId: string;
@@ -53,7 +56,7 @@ export class LocalChecks {
   }
 
   async previewRegistration(slug: string, value: LocalCheckInput) {
-    if (!['darwin', 'linux'].includes(process.platform)) throw new WorkflowError('check-unqualified', 'This local process adapter requires POSIX permissions and process groups.');
+    if (!['darwin', 'linux', 'win32'].includes(process.platform)) throw new WorkflowError('check-unqualified', 'This local process adapter requires POSIX process groups or the Windows owned-job supervisor.');
     const input = record(value, 'localCheck', ['checkId', 'program', 'argv', 'cwd', 'controlFiles', 'timeoutMs', 'guarantees']);
     if (input.guarantees !== 'trusted-local-process') throw new WorkflowError('check-unqualified', 'Filesystem/network confinement and hard process-tree cancellation are not supported by this adapter.');
     const change = await this.workflow.loadChange(slug);
@@ -63,6 +66,12 @@ export class LocalChecks {
     const program = text(input.program, 'program');
     const cwd = input.cwd === '.' ? '.' : parseProjectPath(input.cwd);
     if (await realpath(path.join(this.workflow.files.root, cwd)) !== path.join(this.workflow.files.root, cwd)) throw new WorkflowError('scope-exceeded', 'Check working directory must not traverse symlinks.');
+    if (process.platform === 'win32') {
+      validateWindowsStatePath(program);
+      if (!program.toLowerCase().endsWith('.exe')) throw new WorkflowError('check-unqualified', 'Windows registration selects a real .exe, never an implicit command shell or script association.');
+      windowsPrivateEntries([{ path: this.workflow.files.root, directory: true, writable: true },
+        ...(cwd === '.' ? [] : [{ path: path.join(this.workflow.files.root, cwd), directory: true, writable: true }])]);
+    }
     const controlFiles = unique(array(input.controlFiles, 'controlFiles', parseProjectPath), 'controlFiles');
     const controls = await Promise.all(controlFiles.map(async (file) => {
       const observed = await this.workflow.files.read(file);
@@ -76,7 +85,9 @@ export class LocalChecks {
       cwd, controls, sourceScope: change.metadata.sourcePaths,
       timeoutMs: integer(input.timeoutMs, 'timeoutMs', 1, 300_000),
       guarantees: 'trusted-local-process' as const,
-      limitations: 'No filesystem/network confinement. Timeout kills the POSIX process group best-effort; escaped descendants cannot be proven stopped. Trust the program and its selected control files; a timeout is outcome-unknown, never passing evidence.',
+      limitations: process.platform === 'win32'
+        ? 'No filesystem/network confinement. Only ordinary CreateProcess descendants belong to the owned job; service/WMI/brokered work is outside it. Job membership is atomic before resume and no breakaway is granted. Timeout or supervisor failure is outcome-unknown, never passing evidence. Trust the program and selected control files.'
+        : 'No filesystem/network confinement. Timeout kills the POSIX process group best-effort; escaped descendants cannot be proven stopped. Trust the program and its selected control files; a timeout is outcome-unknown, never passing evidence.',
     };
     const digest = digestContent(JSON.stringify(registration));
     const request = parseApprovalRequest({
@@ -119,7 +130,7 @@ export class LocalChecks {
     unique(registrations.map((entry) => entry.registration.checkId), 'checks');
     const effects = registrations.map(({ registration }) => ({ kind: 'check-execute' as const, checkId: registration.checkId, definition: registration.definition }));
     const change = await this.workflow.loadChange(slug, effects);
-    if (this.store === undefined && (await this.workflow.files.list(parseProjectPath('.missionspec/state'))).includes(parseProjectPath('.missionspec/state/ledger.sqlite'))) {
+    if (this.store === undefined && await runtimeStateExists(this.workflow.files.root, await this.workflow.files.identity())) {
       throw new WorkflowError('persistence-failed', 'The existing ledger must be composed for verification.');
     }
     const previous = this.store === undefined ? { status: 'ok' as const, value: null } : await this.store.readRun(runId);
@@ -191,7 +202,8 @@ export class LocalChecks {
     });
   }
 
-  private async execute(r: { program: string; argv: readonly string[]; cwd: string; timeoutMs: number; workspace: WorkspaceBinding }) {
+  private async execute(r: { program: string; programDigest: string; argv: readonly string[]; cwd: string; timeoutMs: number; workspace: WorkspaceBinding }) {
+    if (process.platform === 'win32') return executeWindowsCheck({ ...r, cwd: path.join(this.workflow.files.root, r.cwd) });
     return new Promise<{ exitCode: number | null; signal: string | null; interrupted: boolean; stdout: string; stderr: string }>((resolve, reject) => {
       const child = spawn(r.program, [...r.argv], {
         cwd: path.join(this.workflow.files.root, r.cwd), shell: false, detached: true,

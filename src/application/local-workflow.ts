@@ -18,6 +18,7 @@ import type { WorkOrder } from '../engines/execution/contracts.js';
 import { requireApproval, unavailableAuthority } from './authority.js';
 import { WorkflowError } from './errors.js';
 import { LocalConvergence } from './convergence.js';
+import { runtimeStateExists } from '../adapters/persistence/index.js';
 
 const configPath = parseProjectPath('missionspec/config.yaml');
 const identityPath = parseProjectPath('.missionspec/workspace.json');
@@ -70,7 +71,7 @@ export class LocalWorkflow {
 
   private async assertNoActiveRuns(): Promise<void> {
     if (this.store === undefined) {
-      if ((await this.files.list(parseProjectPath('.missionspec/state'))).includes(parseProjectPath('.missionspec/state/ledger.sqlite'))) {
+      if (await runtimeStateExists(this.files.root, await this.files.identity())) {
         throw new WorkflowError('capability-unavailable', 'Compose the existing runtime store so local mutations can establish execution quiescence.');
       }
       return;

@@ -285,6 +285,42 @@ and any hosted execution require their own explicit authority. The planned
 present the project as release-ready while native/platform/cloud qualification remains incomplete,
 or turn planned hosts and skills into advertised working features.
 
+### npm release preparation
+
+The selected distribution is `@msn-control/missionspec` on the public npm
+registry. Keep the development manifest private until a release is explicitly
+approved. Selecting the npm channel or approving an Azure deployment is not
+permission to publish a package or merge a pull request.
+
+Before requesting final publication approval:
+
+1. Verify the local publishing identity with
+   `npm whoami --registry=https://registry.npmjs.org`. An `ENEEDAUTH` result
+   requires the maintainer to authenticate locally; never request a token,
+   password, recovery code or one-time password in an issue or chat.
+2. Verify that identity's organization and exact package permissions. Scope
+   ownership stated in a plan is not a successful authentication/access check.
+   An unauthenticated package lookup returning `E404` does not establish scope
+   ownership, name availability or the absence of a private package.
+3. Select an unused release version after an authenticated registry read.
+   Identify the exact candidate commit, supported host/platform combinations and
+   remaining limitations. Preserve the distinction between rendered skills,
+   real host behavior and native autonomous execution.
+4. Build and inspect the actual packed archive, including executable/export
+   paths, resource loading, dependency closure, notices and absence of private
+   state. Bind the archive digest and applicable qualification evidence to the
+   release candidate; a dry-run package listing alone is not an installation
+   or provenance demonstration.
+5. Obtain final approval for the named version and artifact before changing
+   release metadata or publishing. Use scoped publishing credentials or a
+   separately configured trusted publisher; do not introduce a long-lived npm
+   token into source, logs or workflow definitions.
+
+Registry authentication and membership output are operator information. Do not
+commit them or substitute a different account when the selected identity lacks
+access. No release-preparation command should silently publish, tag or announce
+a release.
+
 Before closing a setup milestone, distinguish:
 
 - **Local evidence:** reviewed files and recorded build, test, static import,

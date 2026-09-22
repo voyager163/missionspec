@@ -1,4 +1,3 @@
-import path from 'node:path';
 import { AdoptionService } from '../application/import.js';
 import { ContextService } from '../application/context.js';
 import { LocalConvergence } from '../application/convergence.js';
@@ -8,7 +7,7 @@ import { LocalWorkflow } from '../application/local-workflow.js';
 import { WorkflowError } from '../application/errors.js';
 import { requireApproval } from '../application/authority.js';
 import { TerminalAuthority } from '../adapters/authority/terminal.js';
-import { openRuntimeStore, type SqliteRuntimeStore } from '../adapters/persistence/index.js';
+import { openWorkspaceRuntimeStore, runtimeStateExists, type SqliteRuntimeStore } from '../adapters/persistence/index.js';
 import { parseApprovalReference, type ApprovalRequest } from '../kernel/authority.js';
 import { parseId, parseProjectPath } from '../kernel/identifiers.js';
 import { parseDigest } from '../kernel/revisions.js';
@@ -62,9 +61,9 @@ export async function runReviewCommand(args: readonly string[], options: LocalCl
     }
     const identity = await workflow.files.identity();
     if (identity !== null &&
-        (await workflow.files.list(parseProjectPath('.missionspec/state'))).includes(parseProjectPath('.missionspec/state/ledger.sqlite'))) {
-      const opened = await openRuntimeStore({
-        directory: path.join(workflow.files.root, '.missionspec/state'), expectedWorkspace: identity,
+        await runtimeStateExists(workflow.files.root, identity)) {
+      const opened = await openWorkspaceRuntimeStore({
+        workspaceRoot: workflow.files.root, expectedWorkspace: identity,
         mode: readonly || options.preview ? 'read-only' : 'read-write',
       });
       if (opened.status !== 'ok') throw new WorkflowError('persistence-failed', 'The existing runtime ledger is unavailable; it will not be recreated.');

@@ -66,6 +66,13 @@ the former `.missionspec-runtime` directory beside `.missionspec`, and
 incompatible. There is no silent path fallback, schema migration, reset, or
 parallel creation beside these prototype artifacts.
 
+The [state lifecycle application](runtime-state-lifecycle.md) adds reviewed
+logical backup/recovery, explicit versioned format conversion and private
+external selection. `openWorkspaceRuntimeStore({ workspaceRoot,
+expectedWorkspace, mode })` resolves that selection centrally. Direct opens also
+honor it; external replicas require their original `workspaceRoot`. None of
+these operations makes an unsupported prototype a supported upgrade source.
+
 Use `read-write` to open an existing store, or `read-only` for status. Neither
 creates a missing file or directory. The returned object exposes no database
 handle or authority methods. All values are validated again at the runtime
@@ -82,14 +89,35 @@ The factory accepts the Node 24 line starting at 24.21; qualification is not a
 claim that every future patch or filesystem behaves identically.
 Windows has a narrowly scoped SID/ACL-validated local-NTFS storage candidate;
 see [Windows state and its independent qualification command](windows-state.md).
-It does not enable source writes, directory-durable runtime records, authority,
-or pruning. The existing mocked-platform subprocess test is still not a Windows
-platform-readiness claim. Other non-POSIX models fail explicitly.
+The recorded Windows qualification includes private storage, held-handle source
+and runtime-record effects, callback-backed receipts, recovery and pruning.
+It does not qualify console authority or native execution. A mocked-platform
+subprocess test is not a Windows platform-readiness claim. Other non-POSIX models
+fail explicitly.
 Network filesystems and Docker Desktop
 host bind mounts are not qualified: a bind-mount probe exposed remapped ownership
 and asynchronous active-WAL shared-memory timestamps. The native Linux-volume
 run passed the actual ownership-change rejection and read-only assertions.
 Composition must select a qualified local filesystem.
+
+## Capacity inspection
+
+`missionspec state status --json` opens an existing ledger read-only and reports
+its schema/workspace binding, record counts, recorded run quiescence and storage
+accounting. Missing identity or storage is an explicit error, not initialization.
+The library equivalent is `SqliteRuntimeStore.inspectState()`.
+
+Database size, allocated pages, reusable pages and filesystem-available bytes
+are exact integer strings, avoiding JSON number precision loss. The filesystem
+observation is point-in-time and explicitly reserves **no** capacity; other
+writers and quotas can affect a later allocation. Recorded run quiescence is
+not independent proof that an external host or descendant process has stopped.
+Inspection does not prune, migrate, collect telemetry or write a marker.
+
+SQLite `SQLITE_FULL`, filesystem `ENOSPC` and quota `EDQUOT` failures report
+`limit-reached` with a capacity reason. A confirmed rollback preserves existing
+history; an uncertain commit/rollback retains the existing reconciliation
+requirement. Capacity failures never trigger automatic evidence deletion.
 
 ## Transactions, identities, and digests
 
@@ -122,8 +150,8 @@ Composition must select a qualified local filesystem.
   qualification references and admission timestamps, bound to the same workspace,
   change and run. A new admission must first persist running/unconfirmed state.
   The writer transaction rejects admission while another workspace run is active
-  or unreconciled. Existing schema-2 rows without admissions remain readable;
-  no migration or inferred historical authority is performed.
+  or unreconciled. Current schema-3 records without optional admissions remain
+  readable; no inferred historical authority is performed.
 - New evidence binds to the committed run revisions and, when supplied, an
   attempt in that run. A returned attempt's `sourceAfter` must equal the evidence
   source. Evidence without an attempt must match its binding's source. Evidence

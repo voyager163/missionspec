@@ -4,7 +4,7 @@ import { ContractError } from '../../kernel/validation.js';
 export class StoreFailure extends Error {
   constructor(
     readonly kind: 'missing' | 'busy' | 'corrupt' | 'incompatible' | 'unavailable' | 'read-only'
-      | 'closed' | 'conflict' | 'stale-revision' | 'workspace-mismatch' | 'unknown' | 'io',
+      | 'closed' | 'conflict' | 'stale-revision' | 'workspace-mismatch' | 'capacity' | 'unknown' | 'io',
     message: string,
   ) {
     super(message);
@@ -24,6 +24,9 @@ export function failure<T>(error: unknown): Outcome<T> {
     const sqliteCode: unknown = Reflect.get(error, 'errcode');
     const primary = typeof sqliteCode === 'number' ? sqliteCode & 255 : null;
     if (primary === 5 || primary === 6) issue = new StoreFailure('busy', 'Runtime store is busy; retry is bounded.');
+    else if (primary === 13 || code === 'ENOSPC' || code === 'EDQUOT') {
+      issue = new StoreFailure('capacity', 'Runtime storage capacity or quota is exhausted; no automatic pruning is performed.');
+    }
     else if (primary === 11 || primary === 26) issue = new StoreFailure('corrupt', 'Runtime store is corrupt or not SQLite.');
     else if (primary === 3 || primary === 8 || primary === 14 || primary === 23) {
       issue = new StoreFailure('unavailable', 'SQLite could not obtain the requested local file access.');
@@ -44,7 +47,8 @@ export function failure<T>(error: unknown): Outcome<T> {
   const codes: Record<Exclude<StoreFailure['kind'], 'unknown'>, ErrorCode> = {
     missing: 'not-found', busy: 'conflict', corrupt: 'persistence-failed', incompatible: 'unsupported-version',
     unavailable: 'capability-unavailable', 'read-only': 'capability-unavailable', closed: 'capability-unavailable',
-    conflict: 'conflict', 'stale-revision': 'stale-revision', 'workspace-mismatch': 'scope-exceeded', io: 'persistence-failed',
+    conflict: 'conflict', 'stale-revision': 'stale-revision', 'workspace-mismatch': 'scope-exceeded',
+    capacity: 'limit-reached', io: 'persistence-failed',
   };
   return {
     status: issue.kind === 'corrupt' || issue.kind === 'io' ? 'failed' : 'blocked',
