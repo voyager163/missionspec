@@ -63,4 +63,9 @@ test('Breakaway fixture proves the same command works normally before asserting 
   const observed = source.indexOf('$native::IsProcessInJob($control');
   const breakaway = source.indexOf('0x01000000');
   assert.ok(ordinary >= 0 && observed > ordinary && breakaway > observed);
+  assert.equal(source.match(/\[IntPtr\]::Zero, \$WorkingDirectory, \$startup, \$info/g)?.length, 2);
+  assert.doesNotMatch(source, /\[IntPtr\]::Zero, \$null, \$startup, \$info/u);
+  assert.match(source, /if \(\$nativeStatus -ne 5\)/u);
+  const native = readFileSync(new URL('../assets/platform/windows-execution-native.ps1', import.meta.url), 'utf8');
+  assert.match(native, /\$attribute\.GetField\('SetLastError'\)/u);
 });

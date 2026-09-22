@@ -175,15 +175,16 @@ test('Windows owned job does not grant CREATE_BREAKAWAY_FROM_JOB', windows, asyn
   // as its real ordinary descendant, which must inherit the same job.
   const result = await executeWindowsCheck({ ...f.input, argv: ['-e', `
     const result = require('node:child_process').spawnSync(process.argv[1],
-      ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', process.argv[2], '-Program', process.argv[3]],
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', process.argv[2],
+        '-Program', process.argv[3], '-WorkingDirectory', process.cwd()],
       { encoding: 'utf8', shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
     process.stdout.write(result.stdout ?? '');
     process.stderr.write(result.stderr ?? '');
     if (result.error || result.signal || result.status !== 0) throw new Error('breakaway-probe-failed');
   `, '--', windowsPowerShell, path.resolve('tests/fixtures/windows-breakaway.ps1'), f.input.program] });
-  const failure = result.stdout.match(/^WINDOWS_BREAKAWAY_FAILURE:\{"phase":"(bootstrap|control-create|breakaway-create)","line":([0-9]{1,4})\}$/u);
+  const failure = result.stdout.match(/^WINDOWS_BREAKAWAY_FAILURE:\{"phase":"(bootstrap|control-create|breakaway-create)","line":([0-9]{1,4}),"nativeStatus":(-?[0-9]{1,10})\}$/u);
   assert.equal(result.exitCode, 0, failure
-    ? `breakaway phase=${failure[1]}; line=${failure[2]}`
+    ? `breakaway phase=${failure[1]}; line=${failure[2]}; nativeStatus=${failure[3]}`
     : `breakaway helper failed; stderrPresent=${result.stderr.length !== 0}`);
   assert.equal(result.interrupted, false);
   assert.equal(result.stdout, 'breakaway-denied');

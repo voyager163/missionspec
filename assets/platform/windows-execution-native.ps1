@@ -19,8 +19,8 @@ function Add-Native($name, $dll, $result, [Type[]]$parameters) {
   $attribute = [Runtime.InteropServices.DllImportAttribute]
   $method.SetCustomAttribute([Reflection.Emit.CustomAttributeBuilder]::new(
     $attribute.GetConstructor([Type[]]@([string])), [object[]]@($dll),
-    [Reflection.FieldInfo[]]@($attribute.GetField('CharSet'), $attribute.GetField('ExactSpelling')),
-    [object[]]@([Runtime.InteropServices.CharSet]::Unicode, $true)))
+    [Reflection.FieldInfo[]]@($attribute.GetField('CharSet'), $attribute.GetField('ExactSpelling'), $attribute.GetField('SetLastError')),
+    [object[]]@([Runtime.InteropServices.CharSet]::Unicode, $true, $true)))
 }
 Add-Native 'CloseHandle' 'kernel32.dll' ([bool]) @([IntPtr])
 Add-Native 'GetStdHandle' 'kernel32.dll' ([IntPtr]) @([int])
