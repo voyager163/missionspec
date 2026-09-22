@@ -8,11 +8,15 @@ const systemPowerShell = `${systemRoot}\\System32\\WindowsPowerShell\\v1.0\\powe
 const helper = fileURLToPath(new URL('../../../assets/platform/windows-private-state.ps1', import.meta.url));
 const accessPolicy = fileURLToPath(new URL('../../../assets/platform/windows-access-policy.ps1', import.meta.url));
 const fileOperations = fileURLToPath(new URL('../../../assets/platform/windows-file-operations.ps1', import.meta.url));
+const privateStateRequirement = 'Windows private state requires a canonical current-user-owned local NTFS path and restrictive inheritable SID ACLs';
+const privateStateDiagnostics = new WeakMap<WindowsPrivateStateError, string>();
 
 export class WindowsPrivateStateError extends Error {
   readonly code = 'EPERM';
-  constructor(reason = 'unavailable') {
-    super(`Windows private state requires a canonical current-user-owned local NTFS path and restrictive inheritable SID ACLs (${reason}).`);
+  constructor(reason: unknown = 'unavailable') {
+    const diagnostic = windowsFailureDiagnostic(typeof reason === 'string' ? { reason } : reason);
+    super(`${privateStateRequirement} (${diagnostic}).`);
+    privateStateDiagnostics.set(this, diagnostic);
   }
 }
 
@@ -42,6 +46,7 @@ export function windowsFailureDiagnostic(output: unknown): string {
   const allowedReason = [
     ...diagnosticPhases, 'system-executable', 'open', 'identity', 'type', 'links', 'alias', 'acl', 'owner',
     'unsupported-ace', 'public-access', 'user-access', 'inheritance', 'close', 'descriptor', 'create',
+    'helper-resource', 'path-length', 'path-format', 'unavailable',
   ];
   const reason: unknown = Reflect.get(output, 'reason');
   if (typeof reason !== 'string' || !allowedReason.includes(reason)) return 'unavailable';
@@ -59,6 +64,11 @@ export function windowsFailureDiagnostic(output: unknown): string {
   if (typeof nativeStatus === 'number' && Number.isInteger(nativeStatus) &&
       nativeStatus >= -2147483648 && nativeStatus <= 2147483647) parts.push(`nativeStatus=${nativeStatus}`);
   return parts.join('; ');
+}
+
+/** Preserve only the constructor's sanitized diagnostic, never a mutable Error.message. */
+export function windowsPrivateStateDiagnostic(error: WindowsPrivateStateError): string {
+  return privateStateDiagnostics.get(error) ?? 'unavailable';
 }
 
 export function requireWindowsPrivateState(): void {
@@ -96,11 +106,12 @@ function validateSystemPowerShell(): void {
 }
 
 export function validateWindowsStatePath(value: string): void {
-  if (typeof value !== 'string' || value.length > 240 || !/^[A-Z]:\\/u.test(value) ||
+  if (typeof value === 'string' && value.length > 240) throw new WindowsPrivateStateError('path-length');
+  if (typeof value !== 'string' || !/^[A-Z]:\\/u.test(value) ||
       path.win32.normalize(value) !== value || value.endsWith('\\') ||
       value.slice(3).split('\\').some((part) => part.length === 0 || /[\u0000-\u001f\u007f<>:"/|?*]/u.test(part) ||
         /[. ]$/u.test(part) || /^(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\.|$)/iu.test(part))) {
-    throw new WindowsPrivateStateError();
+    throw new WindowsPrivateStateError('path-format');
   }
 }
 
@@ -358,7 +369,7 @@ function invokeWindowsHelper(input: object): unknown {
   {
     try {
       const output: unknown = JSON.parse(last);
-      throw new WindowsPrivateStateError(windowsFailureDiagnostic(output));
+      throw new WindowsPrivateStateError(output);
     } catch (error) { if (error instanceof WindowsPrivateStateError) throw error; }
     throw new WindowsPrivateStateError();
   }

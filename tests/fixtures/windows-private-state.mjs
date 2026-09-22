@@ -4,8 +4,9 @@ import { spawnSync } from 'node:child_process';
 import { lstatSync, rmdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import {
-  validateWindowsStatePath, windowsPrivateEntries, WindowsPrivateStateError,
+  validateWindowsStatePath, windowsPrivateEntries, windowsPrivateStateDiagnostic, WindowsPrivateStateError,
 } from '../../dist/adapters/platform/windows-private-state.js';
+import { parseProjectPath } from '../../dist/kernel/identifiers.js';
 
 export const windows = { skip: process.platform !== 'win32', timeout: 240_000 };
 export const privateEntry = (target, directory = false, create = false) =>
@@ -51,7 +52,14 @@ export function removeFixtureRoot(root, identity, emptyOnly = false) {
   else rmSync(root, { recursive: true });
 }
 
-export function createPrivateFixtureRoot() {
+export function checkPrivateFixturePathBudget(root, reservedRelativePaths) {
+  validateWindowsStatePath(root);
+  for (const relative of reservedRelativePaths) {
+    validateWindowsStatePath(path.win32.join(root, parseProjectPath(relative)));
+  }
+}
+
+export function createPrivateFixtureRoot(reservedRelativePaths = []) {
   knownUserFolders ??= powershell(String.raw`
 $ErrorActionPreference = 'Stop'
 [Console]::Out.Write((@{
@@ -68,6 +76,12 @@ $ErrorActionPreference = 'Stop'
   const failures = [];
   for (const [kind, candidate] of [['local-app-data', localAppData], ['profile', profile]]) {
     const root = path.join(candidate, `.windows-state-${randomUUID()}`);
+    try { checkPrivateFixturePathBudget(root, reservedRelativePaths); }
+    catch (error) {
+      if (!(error instanceof WindowsPrivateStateError) || windowsPrivateStateDiagnostic(error) !== 'path-length') throw error;
+      failures.push(`${kind}: reserved publication paths exceed the qualified path-length bound; no creation attempted`);
+      continue;
+    }
     let before;
     try { before = fixtureEntry(root); } catch (error) {
       failures.push(`${kind}: no creation attempted because the exclusive path could not be inspected: ${safeFixtureFailure(error)}`);

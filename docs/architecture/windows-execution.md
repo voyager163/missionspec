@@ -116,7 +116,17 @@ node --test --test-concurrency=1 tests/windows-checks-integration.test.mjs
 ```
 
 The original test-only ConPTY driver types real console input; synthetic input
-is never called human attestation. The process cases launch real programs and
+is never called human attestation. It clears its own redirected standard-handle
+table only during child creation, restores it in `finally`, and requires child
+stdout/stderr to arrive through ConPTY, not the driver's protocol pipe. A
+read-only child probe reports actual console handle types/modes. Driver and
+child failures use distinct fixed frames with bounded static/numeric diagnostics;
+unexpected output or a helper failure cannot substitute for a successful result.
+The breakaway probe runs the fixed machine-trusted PowerShell host as an ordinary
+descendant of the held canonical Node check, not as a claimed single-link
+registered OS image. The same command must first succeed without the breakaway
+flag before refusal with the flag counts as evidence.
+The process cases launch real programs and
 ordinary descendants, test output/timeout cancellation, parent death,
 breakaway refusal and held-path replacement. The integration case uses the real
 workflow, persistent callback authority, SQLite reopen and raw evidence,
@@ -130,4 +140,5 @@ Windows skips do **not** qualify these native capabilities.
 - [Process attributes, job list and explicit inherited handles](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute)
 - [CreateProcessW application, command line and environment contracts](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw)
 - [Console handle validation](https://learn.microsoft.com/en-us/windows/console/getconsolemode)
+- [Standard-handle inheritance and console startup](https://learn.microsoft.com/en-us/windows/console/getstdhandle)
 - [Creating a pseudoconsole session](https://learn.microsoft.com/en-us/windows/console/creating-a-pseudoconsole-session)

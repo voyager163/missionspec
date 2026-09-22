@@ -1,9 +1,13 @@
 $phase = 'bootstrap'
+$protocolOutput = $null
+$transcript = $null
 try {
   . ($PSScriptRoot + '\..\..\assets\platform\windows-execution-native.ps1')
+  $protocolOutput = [Console]::Out
   $nativeType = $assembly.DefineDynamicModule('ConPty').DefineType('ConPtyNative', 'Public, Sealed, Abstract')
   Add-Native 'CreatePseudoConsole' 'kernel32.dll' ([int]) @([uint32], [IntPtr], [IntPtr], [uint32], [IntPtr].MakeByRefType())
   Add-Native 'ClosePseudoConsole' 'kernel32.dll' ([void]) @([IntPtr])
+  Add-Native 'SetStdHandle' 'kernel32.dll' ([bool]) @([int], [IntPtr])
   $conpty = $nativeType.CreateType()
   function Close-ConPtyAsync([IntPtr]$handle) {
     $closerType = $assembly.GetDynamicModule('ConPty').DefineType('ConPtyCloser', 'Public, Sealed, Abstract')
@@ -61,8 +65,24 @@ try {
     $command = @((Quoted-Argument ([string]$request.program)))
     foreach ($argument in $request.argv) { $command += Quoted-Argument ([string]$argument) }
     $phase = 'create'
-    if (!$native::CreateProcessW([string]$request.program, [Text.StringBuilder]::new(($command -join ' ')),
-        [IntPtr]::Zero, [IntPtr]::Zero, $false, 0x80000, [IntPtr]::Zero, [string]$request.cwd, $startup, $info)) { throw 'create' }
+    $standardIds = @(-10, -11, -12)
+    $standardHandles = @($native::GetStdHandle(-10), $native::GetStdHandle(-11), $native::GetStdHandle(-12))
+    try {
+      # A console child otherwise inherits the driver's redirected standard table
+      # even though its console association is ConPTY. Let that console supply all
+      # three handles; never replace the production helper's inherited handles.
+      foreach ($id in $standardIds) {
+        if (!$conpty::SetStdHandle($id, [IntPtr]::Zero)) { throw 'stdio-clear' }
+      }
+      if (!$native::CreateProcessW([string]$request.program, [Text.StringBuilder]::new(($command -join ' ')),
+          [IntPtr]::Zero, [IntPtr]::Zero, $false, 0x80000, [IntPtr]::Zero, [string]$request.cwd, $startup, $info)) { throw 'create' }
+    } finally {
+      $restored = $true
+      for ($index = 0; $index -lt 3; $index++) {
+        if (!$conpty::SetStdHandle($standardIds[$index], $standardHandles[$index])) { $restored = $false }
+      }
+      if (!$restored) { throw 'stdio-restore' }
+    }
     $process = Own ([Runtime.InteropServices.Marshal]::ReadIntPtr($info, 0))
     [void](Own ([Runtime.InteropServices.Marshal]::ReadIntPtr($info, 8)))
     Close-Owned $inputRead
@@ -156,7 +176,6 @@ try {
     if (!$native::GetExitCodeProcess($process, [ref]$exitCode)) { throw 'exit' }
     $result = @{ ok=$true; code=$exitCode; challenges=$answered.Count; parentKilled=$parentKilled
       jobEmpty=$jobEmpty; output=[Text.Encoding]::UTF8.GetString($transcript.ToArray()) }
-    $transcript.Dispose()
     $phase = 'close'
   } finally {
     if ($attributes -ne [IntPtr]::Zero) { $native::DeleteProcThreadAttributeList($attributes) }
@@ -168,8 +187,17 @@ try {
     if ($null -ne $reader) { $reader.Dispose() }
     Release-Native
   }
-  [Console]::Out.Write(($result | Microsoft.PowerShell.Utility\ConvertTo-Json -Compress))
+  $protocolOutput.WriteLine(('MISSIONSPEC_CONPTY_DRIVER:' + ($result | Microsoft.PowerShell.Utility\ConvertTo-Json -Compress)))
 } catch {
-  [Console]::Out.Write(('{"ok":false,"phase":"' + $phase + '","line":' + [int]$_.InvocationInfo.ScriptLineNumber + '}'))
+  $reason = [string]$_.Exception.Message
+  if ($reason -notin @('bootstrap','pipes','console','job','attributes','create','stdio-clear','stdio-restore',
+      'timeout','output-bound','response','parent-kill','late-confirmation-still-active','input-write',
+      'accounting','console-helper-outlived-parent','early-eof','console-close-incomplete','exit','close')) { $reason = 'native-call' }
+  $diagnostic = @{ok=$false;phase=$phase;reason=$reason;line=[int]$_.InvocationInfo.ScriptLineNumber;
+    output=$(if ($null -eq $transcript) { '' } else { [Text.Encoding]::UTF8.GetString($transcript.ToArray()) })}
+  $writer = if ($null -eq $protocolOutput) { [Console]::Out } else { $protocolOutput }
+  $writer.WriteLine(('MISSIONSPEC_CONPTY_DRIVER:' + ($diagnostic | Microsoft.PowerShell.Utility\ConvertTo-Json -Compress)))
   exit 1
+} finally {
+  if ($null -ne $transcript) { $transcript.Dispose() }
 }

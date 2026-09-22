@@ -14,6 +14,7 @@ import { digestEffectScope } from '../dist/kernel/effects.js';
 import { digestContent } from '../dist/kernel/revisions.js';
 import { planRuntimeMigration } from '../dist/application/runtime-migrations.js';
 import { inspectRuntimeReplica } from '../dist/adapters/persistence/sqlite-runtime-store.js';
+import { WindowsPrivateStateError, windowsFailureDiagnostic } from '../dist/adapters/platform/windows-private-state.js';
 
 const ok = (result) => { assert.equal(result.status, 'ok', JSON.stringify(result)); return result.value; };
 const posix = { skip: process.platform === 'win32' };
@@ -332,6 +333,24 @@ test('exclusive lifecycle lease prevents writers and cannot be accidentally roll
     assert.ok(write.error.fields.includes('busy'));
     return null;
   }));
+  assert.equal(ok(await f.store.snapshot()).digest, snapshot.digest);
+});
+
+test('lifecycle lease preserves a sanitized native failure and releases its unchanged source state', posix, async (t) => {
+  const f = await fixture(t);
+  const snapshot = ok(await f.store.snapshot());
+  const details = {
+    reason: 'effect-open', phase: 'file-operation', nativeStatus: 32,
+    message: 'PRIVATE path SID ACL',
+  };
+  const diagnostic = windowsFailureDiagnostic(details);
+  const result = await f.store.withLifecycleLease(snapshot.digest, async () => {
+    throw new WindowsPrivateStateError(details);
+  });
+  assert.equal(result.status, 'blocked');
+  assert.equal(result.error.code, 'capability-unavailable');
+  assert.equal(result.error.message, `Windows private runtime storage is unavailable (${diagnostic}).`);
+  assert.equal(JSON.stringify(result).includes('PRIVATE'), false);
   assert.equal(ok(await f.store.snapshot()).digest, snapshot.digest);
 });
 

@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import {
-  copyFileSync, existsSync, readFileSync, realpathSync, renameSync, writeFileSync,
+  copyFileSync, existsSync, lstatSync, readFileSync, realpathSync, renameSync, writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
@@ -168,9 +168,23 @@ test('Windows executable preimage and held executable/cwd reject concurrent repl
 
 test('Windows owned job does not grant CREATE_BREAKAWAY_FROM_JOB', windows, async (t) => {
   const f = fixture(t);
-  const result = await executeWindowsCheck({ ...f.input, program: windowsPowerShell, programDigest: digest(windowsPowerShell),
-    argv: ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', path.resolve('tests/fixtures/windows-breakaway.ps1'), '-Program', f.input.program] });
-  assert.equal(result.exitCode, 0, result.stdout + result.stderr);
+  windowsExecutionAsset('windows-check-process.ps1');
+  t.diagnostic(`Fixed OS host: canonicalSpelling=${realpathSync.native(windowsPowerShell) === windowsPowerShell}; links=${lstatSync(windowsPowerShell).nlink}`);
+  // Fixed machine-host validation does not prove an ordinary, single-link image.
+  // Keep the held canonical Node image as the check and launch the fixed probe
+  // as its real ordinary descendant, which must inherit the same job.
+  const result = await executeWindowsCheck({ ...f.input, argv: ['-e', `
+    const result = require('node:child_process').spawnSync(process.argv[1],
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', process.argv[2], '-Program', process.argv[3]],
+      { encoding: 'utf8', shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
+    process.stdout.write(result.stdout ?? '');
+    process.stderr.write(result.stderr ?? '');
+    if (result.error || result.signal || result.status !== 0) throw new Error('breakaway-probe-failed');
+  `, '--', windowsPowerShell, path.resolve('tests/fixtures/windows-breakaway.ps1'), f.input.program] });
+  const failure = result.stdout.match(/^WINDOWS_BREAKAWAY_FAILURE:\{"phase":"(bootstrap|control-create|breakaway-create)","line":([0-9]{1,4})\}$/u);
+  assert.equal(result.exitCode, 0, failure
+    ? `breakaway phase=${failure[1]}; line=${failure[2]}`
+    : `breakaway helper failed; stderrPresent=${result.stderr.length !== 0}`);
   assert.equal(result.interrupted, false);
   assert.equal(result.stdout, 'breakaway-denied');
   assert.equal(result.quiescence, 'confirmed');

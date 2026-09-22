@@ -1,5 +1,6 @@
 import type { ErrorCode, Outcome } from '../../kernel/outcomes.js';
 import { ContractError } from '../../kernel/validation.js';
+import { WindowsPrivateStateError, windowsPrivateStateDiagnostic } from '../platform/windows-private-state.js';
 
 export class StoreFailure extends Error {
   constructor(
@@ -19,6 +20,9 @@ export function failure<T>(error: unknown): Outcome<T> {
     } };
   }
   let issue = error instanceof StoreFailure ? error : undefined;
+  if (error instanceof WindowsPrivateStateError) {
+    issue = new StoreFailure('unavailable', `Windows private runtime storage is unavailable (${windowsPrivateStateDiagnostic(error)}).`);
+  }
   if (issue === undefined && typeof error === 'object' && error !== null) {
     const code: unknown = Reflect.get(error, 'code');
     const sqliteCode: unknown = Reflect.get(error, 'errcode');

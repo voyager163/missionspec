@@ -120,6 +120,12 @@ Directories must be normalized absolute paths ending in `.missionspec/state`,
 with a pre-existing private `.missionspec` parent. The existing POSIX or qualified
 Windows SID/DACL/local-NTFS checks apply, including ancestor, symlink, reparse,
 hard-link, sidecar and identity checks. There is no UNC/network or alias fallback.
+On Windows, the 240-character qualified path bound also includes the publication
+stage and retained `.before` preimage, not just the final filename. A path-length
+preflight failure is distinct from an injected quota failure during publication.
+Runtime-store errors retain only the allowlisted Windows reason/phase, exception
+category, bounded helper line and native status; arbitrary OS messages, paths,
+SIDs and ACLs remain excluded.
 These controls are not protection against an adversarial machine owner or
 same-user process rewriting all private state.
 

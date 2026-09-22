@@ -4,6 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { windowsPowerShell, windowsExecutionAsset } from '../dist/adapters/platform/windows-execution.js';
 import { createPrivateFixtureRoot, removeFixtureRoot } from './fixtures/windows-private-state.mjs';
+import { conptyDiagnostic, parseConptyChild, parseConptyDriver } from './fixtures/windows-conpty-protocol.mjs';
 
 const windows = { skip: process.platform !== 'win32', timeout: 720_000 };
 function driver(root, scenario, responses = []) {
@@ -14,26 +15,30 @@ function driver(root, scenario, responses = []) {
       cwd: root, responses, timeoutMs: 240_000 }),
     encoding: 'utf8', shell: false, windowsHide: true, timeout: 260_000, maxBuffer: 12_000_000,
   });
-  assert.equal(result.status, 0, result.stdout || result.stderr || result.error?.message);
-  const response = JSON.parse(result.stdout);
-  assert.equal(response.ok, true, result.stdout);
-  const output = response.output.replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu, '').replace(/\r/g, '');
+  const response = parseConptyDriver(result);
+  const { output } = response;
   if (scenario === 'parent-death') {
-    assert.equal(response.code, 123, response.output);
+    assert.equal(response.code, 123, conptyDiagnostic(response));
     assert.equal(response.parentKilled, true);
     assert.equal(response.jobEmpty, true, 'The helper must exit before ConPTY/job cleanup, not because cleanup killed it');
     assert.doesNotMatch(output, /WINDOWS_CONSOLE_RESULT/u);
     return { ...response, output };
   }
-  assert.equal(response.code, 0, response.output);
-  const line = output.split('\n').find((entry) => entry.startsWith('WINDOWS_CONSOLE_RESULT:'));
-  assert.ok(line, output);
-  return { ...response, output, value: JSON.parse(line.slice('WINDOWS_CONSOLE_RESULT:'.length)) };
+  return { ...response, value: parseConptyChild(response) };
+}
+
+function stdioProbe(root) {
+  const probe = driver(root, 'stdio-probe');
+  assert.equal(probe.challenges, 0);
+  assert.equal(probe.value.state, 'stdio-probe');
+  assert.match(probe.output, /CONPTY_STDOUT/u);
+  assert.match(probe.output, /CONPTY_STDERR/u);
 }
 
 test('Windows ConPTY exact challenge, replay, JSON refusal and redirected OS handles', windows, (t) => {
   const f = createPrivateFixtureRoot();
   t.after(() => removeFixtureRoot(f.root, f.identity));
+  stdioProbe(f.root);
   const accepted = driver(f.root, 'component', ['accept']);
   assert.equal(accepted.challenges, 1);
   assert.equal(accepted.value.decision, 'accept');
@@ -56,6 +61,7 @@ test('Windows ConPTY exact challenge, replay, JSON refusal and redirected OS han
 test('Windows ConPTY deadlines and AbortSignal cannot issue late confirmation', windows, (t) => {
   const f = createPrivateFixtureRoot();
   t.after(() => removeFixtureRoot(f.root, f.identity));
+  stdioProbe(f.root);
   const expired = driver(f.root, 'expired');
   assert.equal(expired.challenges, 0);
   assert.equal(expired.value.decision, 'cancel');
@@ -72,6 +78,8 @@ test('Windows ConPTY deadlines and AbortSignal cannot issue late confirmation', 
 test('Windows ConPTY real terminal receipts bind setup display, reopen and reviewed revocation', windows, (t) => {
   const f = createPrivateFixtureRoot();
   t.after(() => removeFixtureRoot(f.root, f.identity));
+  stdioProbe(f.root);
+  assert.equal(driver(f.root, 'component', ['decline']).value.decision, 'decline');
   const declined = driver(f.root, 'authority-decline', ['decline']);
   assert.equal(declined.challenges, 1);
   assert.deepEqual(declined.value, { state: 'declined', unchanged: true });
