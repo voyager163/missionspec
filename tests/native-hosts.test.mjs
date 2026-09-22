@@ -33,7 +33,7 @@ const request = (host, overrides = {}) => ({
 });
 
 // Original synthetic local process. This is not native-host or live-model qualification.
-async function fixture(t, host, behavior = 'success', version = NATIVE_PROPOSAL_PINS[host].cli) {
+async function fixture(t, host, behavior = 'success', version = NATIVE_PROPOSAL_PINS[host].cli, versionOutput) {
   const root = path.join(process.cwd(), `.native-host-test-${randomUUID()}`);
   const workingDirectory = path.join(root, 'work');
   const homeDirectory = path.join(root, 'home');
@@ -43,7 +43,7 @@ async function fixture(t, host, behavior = 'success', version = NATIVE_PROPOSAL_
   const executable = path.join(root, 'native-fixture.mjs');
   const transcript = path.join(root, 'transcript.jsonl');
   const model = host === 'codex' ? behavior === 'alternate-model' ? 'gpt-5.5' : 'gpt-5.4' : 'test-model-not-real';
-  const versionText = host === 'copilot' ? `GitHub Copilot CLI ${version}\n` : host === 'codex' ? `codex-cli ${version}\n` : `${version} (Claude Code)\n`;
+  const versionText = versionOutput ?? (host === 'copilot' ? `GitHub Copilot CLI ${version}\n` : host === 'codex' ? `codex-cli ${version}\n` : `${version} (Claude Code)\n`);
   await writeFile(executable, `#!${process.execPath}
 import { appendFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
@@ -385,6 +385,26 @@ test('connected Copilot protocol/version drift and Codex executable drift cannot
   const drift = await fixture(t, 'codex', 'success', '0.155.2');
   assert.equal((await new CodexProposalHost(drift.setup).propose(request('codex'))).error.code, 'unsupported-version');
   await assert.rejects(() => readFile(drift.transcript), { code:'ENOENT' });
+});
+
+test('Copilot accepts the observed version banner without accepting drift, altered hints or extra stdout', async (t) => {
+  const banner = "GitHub Copilot CLI 1.0.85.\nRun 'copilot update' to check for updates.\n";
+  for (const [output, accepted] of [
+    [banner, true], [banner.replaceAll('\n', '\r\n'), true],
+    [`unexpected\n${banner}`, false], [`${banner}unexpected\n`, false],
+    [banner.replace('check for updates', 'do something else'), false],
+    [banner.replace('1.0.85', '1.0.86'), false],
+    [`${banner}${banner}`, false], ['GitHub Copilot CLI 1.0.85.\n', false],
+  ]) {
+    const f = await fixture(t, 'copilot', 'success', '1.0.85', output);
+    const sdk = copilotSdk(f);
+    const outcome = await new CopilotProposalHost(f.setup, sdk).propose(request('copilot'));
+    if (accepted) assert.equal(outcome.status, 'ok', JSON.stringify(outcome));
+    else {
+      assert.equal(outcome.error.code, 'unsupported-version');
+      assert.equal(sdk.calls.clients.length, 0);
+    }
+  }
 });
 
 test('malformed, extra-field, out-of-scope, duplicate and wrong-preimage proposals never become effects', async (t) => {

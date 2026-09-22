@@ -65,7 +65,10 @@ export async function inspectCliVersion(
         codex: /^codex-cli ([0-9]+\.[0-9]+\.[0-9]+)(?:\r?\n)?$/u,
         claude: /^([0-9]+\.[0-9]+\.[0-9]+) \(Claude Code\)(?:\r?\n)?$/u,
       };
-      const version = expressions[host].exec(output)?.[1];
+      const installedCopilotBanner = host === 'copilot'
+        ? /^GitHub Copilot CLI ([0-9]+\.[0-9]+\.[0-9]+)\.\r?\nRun 'copilot update' to check for updates\.(?:\r?\n)?$/u.exec(output)
+        : null;
+      const version = (expressions[host].exec(output) ?? installedCopilotBanner)?.[1];
       if (code !== 0 || version === undefined) {
         finish(new NativeBridgeError('unsupported-version', 'Unrecognized native version output; no inference or fallback is permitted.'));
       } else finish(null, version);

@@ -6,6 +6,209 @@ native interfaces. These adapters implement `RestrictedProposalHostPort`, **not*
 qualification, approval, passing-check, acceptance, or cancellation evidence.
 No native SDK or executable is bundled or downloaded by these adapters.
 
+The first-release Claude route is **SDK-free native skills/CLI/MCP**. Its optional
+SDK-managed proposal bridge is deferred, not a prerequisite for that route.
+Subscription-native skill qualification is also distinct from the restricted
+proposal bridges described below; an API-key-only bridge must not be repurposed
+by silently substituting credentials, models or permissions.
+
+### Subscription-native metadata preflight on 2026-09-22
+
+Follow-up checks permitted first-party authentication, quota and model-metadata
+network reads, without inference or session allocation. Child environments
+excluded inherited GitHub-token and provider/API-key overrides; parent/global
+authentication and configuration were not changed. Credential-bearing
+`account.getCurrentAuth` / `account.getAllUsers` Copilot responses were
+deliberately not requested. No Claude SDK was installed or used.
+
+**Current scope (2026-09-22T07:55Z):** the user explicitly deferred both Claude
+and Codex live pilots. Claude login, context, billing and model probes and
+follow-up fact requests are stopped. Existing SDK-free Claude skills/CLI/MCP
+work remains implemented but not live-qualified. Any further bounded native
+preflight is Copilot-only; no new conversation or model call is authorized.
+All pilot admissions remain zero.
+
+| Installed host | Actual non-generating evidence | Remaining admission prerequisite |
+| --- | --- | --- |
+| Copilot `1.0.85` | At `2026-09-22T07:47:05Z`, pinned stdio metadata matches the previously confirmed stored personal account, stable across the read. Included allowance is `80.1%`, with recorded overage `0`; both exhausted-quota flags remain `true`. `user.settings.get` still reports null effective/registered model defaults and `isDefault: true`. | Verify the applicable personal billing budget's enforced stop policy and resolve the exact existing default. Quota overage eligibility is **not** effective budget policy; its `true` value does not disprove the operator's settings change. Catalog order does not resolve a default. |
+| Codex `0.155.1` | Earlier subscription metadata reported configured/default `gpt-6-astra`. No Codex command or fresh account read was performed after restart. | **Explicitly deferred by the user.** No account confirmation, read or pilot admission is requested for this phase. |
+| Claude Code `2.1.267` | The completed `2026-09-22T07:46:44Z` check reported `loggedIn: false`, `authMethod: none`, `apiProvider: firstParty`, with no permission/network diagnostic, while the user's terminal reported `loggedIn: true`. This historical context mismatch remains unresolved. | **Explicitly deferred by the user.** No further login, context, billing or model probes, fact requests or conversation allocation. Preserve prior evidence and user-confirmed billing protection without claiming live qualification. |
+
+Copilot remains **blocked before central pilot admission**; Claude and Codex
+are deferred. No model calls or conversation sessions were started. Earlier
+network-denied diagnostics alone were not treated as account or billing evidence. Codex initialization initially
+could not create runtime state under a blanket native-home write denial;
+allowing runtime state while protecting its auth/config files enabled the
+successful metadata reads. That failure was not evidence of missing login.
+The installed Copilot `--version` command prints a period after the version and
+a fixed update hint on stdout. Version inspection now recognizes that exact
+two-line banner as well as the prior single-line form. Extra output, altered
+hints and version drift remain rejected; this parsing compatibility is not
+model or billing qualification.
+
+Copilot quota reads before and after restart, after the operator reported
+disabling paid overages, remained bound to the same stored account and still
+returned a true overage-eligibility flag. That field cannot verify or refute an
+independent enforced zero-dollar budget. Protection remains **unverified**
+because the applicable budget/stop policy has not been observed, not because
+the user must have failed to disable paid usage. `inspectCopilotSubscription`
+makes quota observation repeatable using only status, authentication, quota,
+model-list and
+[user-model settings metadata][copilot-settings-metadata] reads. It retains
+only the model setting, preserves null defaults, records observation time,
+checks a previously confirmed login digest when supplied, and rechecks identity
+after the reads. Missing or malformed quota flags never become `false`.
+User-settings metadata excludes session and managed overrides; the helper does
+not allocate a session to discover a model or treat available models as an
+implicit default. Entitlement amounts retain the server's field names/units,
+not an inferred dollar or token budget. The helper exposes
+`billingPolicyScope: quota-entitlement-only` and
+`noAdditionalChargeProtection: unverified`, and always retains the separate
+billing-review and central-admission gates. It no longer derives a misleading
+`paidOveragesDisabled` attestation from either value of the quota flag.
+
+GitHub's [budget concepts][copilot-budget-concepts] and
+[personal-account budget instructions][copilot-budget-stop] describe an
+independent **Stop usage when budget limit is reached** control. Required
+evidence is the current applicable personal Copilot metered AI-credit or
+bundled AI-credit budget, zero additional-usage allowance, and enforced stop
+usage—not merely an alert, a license-only budget, or an unrelated organization
+budget. The reviewed [budget REST API][copilot-budget-api] exposes organization
+budgets; its user-scoped organization budgets are not personal-account budgets.
+No documented personal-budget read endpoint was established. No guessed
+endpoint, organization-budget read or billing mutation was attempted.
+
+The installed non-generating `copilot help config` / `help billing` and the
+[CLI command reference][copilot-cli-commands] provide interactive `/model` and
+`/config model` views, but no sessionless effective-model resolver was
+established. Null metadata therefore remains null. The parent can request the
+exact current model shown in an **already-open** instance of the same authorized
+Copilot CLI, without changing it or opening another session. Session/managed
+overrides still need review before that observation can establish a new
+session's default. Neither a documented generic default, the first catalog model
+nor an Auto routing preference establishes this
+account's actual selected model. Session credit limits are post-response soft
+caps, not billing protection.
+
+The operator subsequently confirmed that paid Claude extra usage, usage-credit
+purchases and automatic credit reload are off or unavailable. This is recorded
+as **user-confirmed billing protection**, not a fabricated server attestation.
+It does not make the still-unobserved Claude login, subscription or default
+model verified. Claude and Codex live qualification are explicitly deferred for
+this pilot; improving metadata must not admit either host.
+
+The post-restart Claude check used `/opt/homebrew/bin/claude`, resolving to the
+installed `2.1.267` executable, with uid/effective uid `501`, matching `HOME` and
+OS home, and the standard `.claude` config root. No `CLAUDE_CONFIG_DIR`,
+`XDG_CONFIG_HOME`, model selector, alternate-provider, bare/safe-mode or SSH
+selector was present. Only inherited `GH_TOKEN` was present among the checked
+credential/provider overrides and was removed from the child environment;
+parent configuration was untouched. The check had **no filesystem denial or
+network sandbox**; its result is not attributed to a sandbox restriction.
+It did not read credential files, keychain password items or raw debug logs.
+The proposed terminal binary-path comparison was not performed and is no longer
+requested following the explicit Claude deferral.
+
+### Prepared metadata launcher and confinement evidence
+
+`tests/helpers/native-metadata-preflight.mjs` is an operator/test qualification
+harness, not a pilot or inference launcher. It exposes only pinned Copilot
+sessionless metadata methods and Claude `--version` / `auth status --json`.
+There is no prompt, conversation creation, login mutation or Codex launch
+route. Each child has a 30-second deadline and a combined 2 MB stdout/stderr
+budget; callers may only tighten these. Unknown callbacks, malformed framing,
+oversized output and deadlines block without an automatic fallback. Native
+credentials stay inside the installed CLI, and inherited provider/API-key
+overrides are excluded from the child environment.
+
+The prepared macOS profile permits data reads from the synthetic workspace,
+installed/runtime system locations and explicit native settings paths. Writes
+are limited to synthetic work/log directories and `/dev/null`. The root
+directory itself is readable for dyld bootstrap, **not recursively**. Actual
+synthetic probes established allowed workspace reads/writes, denied outside
+reads/writes, denied symlink escapes, and unchanged outside sentinels. A
+separate offline variant denied a live loopback connection after an unrestricted
+positive control succeeded.
+
+This is bounded filesystem evidence, **not complete native-host confinement**:
+online metadata reads permit networking without endpoint-level enforcement;
+system/runtime reads, filesystem metadata and OS brokers are not a hostile-code
+or IPC isolation guarantee. No model execution, tool/MCP effect scope, Windows
+or Linux confinement, descendant quiescence or billing fence is qualified.
+The corresponding test is explicitly macOS-only.
+
+Actual Claude status reads completed under the prepared profile but remained
+signed out. Actual Copilot startup exited with `EPERM` before `connect` replied.
+That is a **confined-launch compatibility blocker**, not proof of missing
+Copilot authentication. The separately and explicitly invoked
+`readNormalMetadata` baseline completed using the confirmed account and still
+reported quota overage eligibility, not effective billing-budget policy.
+The baseline is only native-home write
+protection, not a substitute for the source-read profile. The stricter profile
+was not widened to make Copilot pass. Neither route can admit a pilot, and
+local timeout/process termination never establishes remote quiescence.
+
+```sh
+npm run build
+node --test tests/native-metadata-confinement.test.mjs
+```
+
+The original `inspectCodexSubscription` helper in
+`src/adapters/hosts/codex-subscription-preflight.ts` operates on an already
+initialized, bounded transport. Its only requests are `account/read` with
+`refreshToken: false`, paginated `model/list`, and `account/rateLimits/read`
+with reserve fallback and separate reset-credit detail lookup disabled.
+It rechecks account identity, bounds pages/buckets, strips identity strings and
+unrelated metadata, preserves unknown quota/credit states, and always reports
+that spending protection and central admission remain outstanding. It never
+logs in, consumes a reset credit, creates a thread, submits a turn, or grants
+`CodingHostPort` qualification. A missing `ordinaryUsageAllowed` is **unknown**,
+not permission inferred from usage percentages.
+Trusted composition can supply the previously confirmed account digest to
+avoid redundant confirmation. A different identity is rejected; an unavailable
+identity is reported as unavailable rather than falsely labeled an account
+conflict. Confirmation does not waive billing or central-admission gates, and
+Codex quota must be read again before any admitted prompt instead of reusing an
+older near-exhaustion snapshot.
+The pinned [account handlers][codex-account-metadata] establish these
+non-generating read semantics and validate the account binding of
+`ordinaryUsageAllowed`. Copilot's [quota RPC][copilot-quota-metadata] supplies
+explicit quota/overage eligibility flags, not the independently enforced
+personal-account budget or stop-usage policy.
+
+This accepts `gpt-6-astra` as **subscription-native metadata**, not as a new
+member of the API-key no-tools allowlist. The pinned model descriptor selects
+code mode, multi-agent V2, asynchronous user questions and clock tools. Native
+skills/CLI/MCP need their own synthetic-workspace/tool/approval review; disabled
+feature flags from the proposal bridge cannot establish their isolation.
+Actual skill discovery, MCP interaction, effects and cancellation still require
+separately admitted execution evidence.
+
+Before a bounded pilot, trusted composition must supply the actual isolated
+synthetic project, verify the default-model/account snapshot, obtain an explicit
+per-session admission, restrict the native tool/MCP scope, and record model,
+usage, timing and file-preimage observations. No inference launcher or
+automatic pilot is wired by the metadata helper. The initial envelope remains
+at most three single-prompt sessions per host, serial across hosts, with no new
+work after fifteen minutes per host and no automatic expansion. Local timeout
+or process exit is not remote quiescence or a spending fence.
+This envelope does not override the subsequent Claude and Codex deferrals or
+authorize any Copilot conversation allocation during metadata preflight.
+
+Minimal operator prerequisites are documented by the vendors: Copilot
+[additional-usage budgets][copilot-individual-billing] and the native `/model`
+or `/config model` view (inspect without submitting a prompt);
+Codex [Settings > Usage / Usage & Billing][codex-credits] for credit balance and
+automatic reload (not requested while deferred); and Claude's
+[personal subscription login][claude-auth] with
+[Settings > Usage, usage credits disabled][claude-credits]. The operator has
+already confirmed the latter Claude login and billing settings. These are
+preserved reference facts, not requests for further Claude checks while deferred. Claude's
+documentation states that disabling usage credits leaves only included usage.
+Copilot's installed `help limits` explicitly describes `--max-ai-credits` as a
+post-response soft cap; Claude's `--max-budget-usd` describes API spending.
+Neither is substituted for the account-level subscription-only prerequisite.
+
 ### Installed-tool observations on 2026-09-21
 
 The local macOS installation reports Copilot CLI `1.0.85`, Codex `0.155.1`,
@@ -328,6 +531,17 @@ thread/turn protocol][codex], and [Claude Agent SDK reference][claude].
 [copilot]: https://github.com/github/copilot-sdk/tree/e60d9037353249ef16b349eb4012e8c1d113fda5/nodejs
 [codex]: https://github.com/openai/codex/tree/be2951ea34f0d295ed0becf97079f92fa5f6950e/codex-rs/app-server-protocol
 [claude]: https://code.claude.com/docs/en/agent-sdk/typescript
+[copilot-individual-billing]: https://docs.github.com/en/copilot/concepts/billing-and-usage/individuals/billing
+[codex-credits]: https://help.openai.com/en/articles/12642688-using-credits-for-flexible-usage-in-chatgpt-freegopluspro-sora
+[claude-auth]: https://code.claude.com/docs/en/authentication
+[claude-credits]: https://support.claude.com/en/articles/12429409-manage-usage-credits-for-paid-claude-plans
+[codex-account-metadata]: https://github.com/openai/codex/blob/be2951ea34f0d295ed0becf97079f92fa5f6950e/codex-rs/app-server/src/request_processors/account_processor.rs#L1106-L1230
+[copilot-quota-metadata]: https://github.com/github/copilot-sdk/blob/e60d9037353249ef16b349eb4012e8c1d113fda5/nodejs/src/generated/rpc.ts#L4975-L5047
+[copilot-settings-metadata]: https://github.com/github/copilot-sdk/blob/e60d9037353249ef16b349eb4012e8c1d113fda5/nodejs/src/generated/rpc.ts#L23844-L23872
+[copilot-budget-concepts]: https://docs.github.com/en/billing/concepts/budgets-and-alerts
+[copilot-budget-stop]: https://docs.github.com/en/billing/how-tos/set-up-budgets#managing-budgets-for-your-personal-account
+[copilot-budget-api]: https://docs.github.com/en/rest/billing/budgets
+[copilot-cli-commands]: https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference
 
 Codex profile source evidence at the reviewed revision:
 
