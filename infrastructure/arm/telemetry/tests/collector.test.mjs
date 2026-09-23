@@ -11,7 +11,7 @@ import { verifyWhatIf, assertBudget, permitFirstPush, verifyResource, executionI
 import { manifestJson, configJson } from './receiver-oci.fixture.mjs';
 import { CollectorController, az, transport, validateReadOnly, verifyScannerAdoption, verifyOrigin, verifyProjectBudgetReceipt,
   checkReadOnly, load, saveImmutable, MAX_PRIVATE_ARTIFACT_BYTES, DIAGNOSTIC_API, privateDirectory, sourceDigest,
-  publishedSourceDigest, collectReconciliation, reviewedReconciliationReceipts, verifyFreshReconciliation, readPrivacy, readAssignmentRoleDefinitions } from '../controller.mjs';
+  publishedSourceDigest, collectReconciliation, reviewedReconciliationReceipts, verifyFreshReconciliation, readPrivacy, readAssignmentRoleDefinitions, whatIfRequestContext } from '../controller.mjs';
 
 const c = { version: 2, subscriptionId: '00000000-0000-4000-8000-000000000001',
   tenantId: '00000000-0000-4000-8000-000000000002', operatorPrincipalId: '00000000-0000-4000-8000-000000000003',
@@ -232,20 +232,27 @@ test('read-only validate and full what-if use the actual execution name for ever
       assert.equal(args[0], 'deployment');
       assert.equal(args[1], p.scope === ids(config).sub ? 'sub' : 'group');
       assert.equal(args[args.indexOf('--name') + 1], p.deploymentId.split('/').at(-1));
-      if (args[2] === 'validate') return { properties: { provisioningState: 'Succeeded' } };
-      assert.equal(args[2], 'what-if');
-      assert.equal(args[args.indexOf('--result-format') + 1], 'FullResourcePayloads');
-      return { status: 'Succeeded', changes: p.resources.map(v => phaseName === 'project-budget'
+      assert.equal(args[2], 'validate'); return { properties: { provisioningState: 'Succeeded' } };
+    };
+    const request = async operation => {
+      operation.beforeDispatch();
+      assert.equal(operation.action, 'start');
+      assert(operation.timeoutMs <= 15000);
+      const context = whatIfRequestContext(config, p);
+      assert.equal(JSON.parse(context.body).properties.whatIfSettings.resultFormat, 'FullResourcePayloads');
+      return { version: 1, contextSha256: context.contextSha256, statusCode: 200, headers: {}, bodyParseError: false,
+        step: 'what-if.start', verifiedRegion: config.location,
+        responseFile: 'whatif-response-0000.json', body: { status: 'Succeeded', properties: { changes: p.resources.map(v => phaseName === 'project-budget'
         ? { resourceId: v.id, changeType: 'Modify', before: f.project, after: v.expected }
         : phaseName === 'synthetic-admission' ? { resourceId: v.id, changeType: 'Modify', before: receipts['disabled-app'].resources[v.id], after: { ...structuredClone(v.expected), id: v.id } }
-        : { resourceId: v.id, changeType: p.allowedModify[v.id] ? 'NoChange' : 'Create' }) };
+        : { resourceId: v.id, changeType: p.allowedModify[v.id] ? 'NoChange' : 'Create' }) } } };
     };
-    const result = await validateReadOnly(config, p, receipts, directory, invoke);
+    const result = await validateReadOnly(config, p, receipts, directory, invoke, undefined, { request });
     assert.equal(result.templateValidationOnly, true);
-    assert.equal(calls.length, 2);
+    assert.equal(calls.length, 1);
     const malformed = { ...p, deploymentId: p.deploymentId + '-unexpected' };
     await assert.rejects(validateReadOnly(config, malformed, receipts, directory, invoke), /DEPLOYMENT_NAME_INVALID/);
-    assert.equal(calls.length, 2);
+    assert.equal(calls.length, 1);
   }
 });
 test('data and privilege phases require real prior generated-ID and access readbacks', () => {
@@ -1126,15 +1133,26 @@ test('published source lookup uses immutable commit blobs and never evaluates hi
   const run = async (command, args) => {
     assert.equal(command, 'git'); commands.push(args);
     if (args[0] === 'merge-base') { assert.deepEqual(args, ['merge-base', '--is-ancestor', commit, 'HEAD']); return { stdout: Buffer.alloc(0) }; }
+    if (args[0] === 'ls-tree') {
+      assert.deepEqual(args, ['ls-tree', '--name-only', commit, '--', 'infrastructure/arm/telemetry/arm-whatif.py']);
+      return { stdout: Buffer.alloc(0) };
+    }
     assert.deepEqual(args.slice(0, 2), ['--no-pager', 'show']);
     assert(args[2].startsWith(commit + ':'));
     const path = args[2].slice(41); assert(Object.hasOwn(files, path));
     return { stdout: Buffer.from(files[path]) };
   };
   assert.equal(await publishedSourceDigest(commit, run), expected.digest('hex'));
-  assert.equal(commands.length, 6);
+  assert.equal(commands.length, 7);
   for (const ref of ['HEAD', '--all', 'a'.repeat(39), 'g'.repeat(40)]) await assert.rejects(publishedSourceDigest(ref, run), /PUBLISHED_ORIGIN_INVALID/);
-  assert.equal(commands.length, 6);
+  assert.equal(commands.length, 7);
+  const bridgePath = 'infrastructure/arm/telemetry/arm-whatif.py';
+  files[bridgePath] = 'bounded historical bridge';
+  const withBridge = createHash('sha256');
+  for (const [path, body] of Object.entries(sourceFiles)) withBridge.update(path.split('/').at(-1)).update(body);
+  withBridge.update('arm-whatif.py').update(files[bridgePath]).update(json(contract));
+  assert.equal(await publishedSourceDigest(commit, async (command, args) =>
+    args[0] === 'ls-tree' ? { stdout: Buffer.from(bridgePath + '\n') } : run(command, args)), withBridge.digest('hex'));
   await assert.rejects(publishedSourceDigest(commit, async () => { throw new Error('private git failure'); }), { message: 'PUBLISHED_ORIGIN_UNAVAILABLE' });
 });
 test('reconciliation and fresh qualification read only the exact deployed resources and supported privacy routes', async t => {
@@ -1207,7 +1225,15 @@ test('reconciliation and fresh qualification read only the exact deployed resour
     responses.set(`${rr.sub}/providers/Microsoft.Authorization/denyAssignments`, { value: [] });
     responses.set(`${rr.sub}/providers/Microsoft.App/locations/${a.config.location}/usages`, { value: [] });
     const proof = await checkReadOnly(a.config, assignmentPhase, a.origin, receipts, directory,
-      { ...evidence, reconciliation: current }, invoke, f.lookup);
+      { ...evidence, reconciliation: current }, invoke, f.lookup, undefined, {
+        request: async operation => {
+          operation.beforeDispatch();
+          return { version: 1, contextSha256: whatIfRequestContext(a.config, assignmentPhase).contextSha256,
+            step: 'what-if.start', verifiedRegion: a.config.location,
+            statusCode: 200, headers: {}, bodyParseError: false, responseFile: 'whatif-response-0000.json',
+            body: { status: 'Succeeded', properties: { changes: assignmentPhase.resources.map(v => ({ resourceId: v.id, changeType: 'Create' })) } } };
+        },
+      });
     const saved = await load(directory, 'assignments-role-definitions.json');
     assert.equal(proof.roleDefinitionsSha256, digest(json(saved.roles)));
     assert.equal(proof.foundationBaselineSha256, a.origin.policyBaselineSha256);

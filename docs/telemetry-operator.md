@@ -50,6 +50,70 @@ then runs nonmutating ARM validate/what-if. An optional `validate-preview`
 performs only template/what-if validation and writes `qualified=false`; it cannot
 waive a failed foundation/account/cost gate.
 
+### Bounded asynchronous ARM what-if
+
+The failed historical window is preserved: it sent two initial health GETs and
+no event POST, query or toggle PUT. Both preflights stopped when the old
+15-second subprocess limit killed the **entire** blocking CLI what-if poller.
+That is not an authorization/absence result or evidence of a deployment.
+Its approvals and run journal must not be reset or reused.
+
+What-if now uses the documented
+[2025-04-01 deployment what-if protocol](https://learn.microsoft.com/rest/api/resources/deployments/what-if?view=rest-resources-2025-04-01):
+one nonmutating POST for the exact generated deployment/template, followed by
+GETs of the returned operation handle. Results remain `FullResourcePayloads`
+and undergo the same closed resource/delta policy. Inline templates are static;
+external template links and ARM expression strings (including list-key/SAS
+functions) are rejected. Deployment PUT is not available in this adapter.
+
+The request helper uses the **existing Azure CLI's own Python environment**
+and subscription/tenant-selected user credential through Azure Core's
+authenticated pipeline. No exposed-token command, new identity SDK, default-
+credential fallback, registry/storage secret or global account/config change
+is introduced. The qualified local layout is Homebrew Azure CLI 2.90.0 with
+Azure Core 1.39.0 and requests 2.33.0; other runtimes fail pending qualification.
+Redirects, automatic request/auth-challenge retries and insecure TLS are disabled.
+Body/results go through private bounded files, never stdout or debug logs.
+`arm-whatif.py` is included in the canonical source hash. Historical commits
+without that file retain their original three-file hash; Git blob existence is
+checked, not inferred or rewritten.
+
+Azure's actual Location is an opaque, subscription-scoped
+`/operationresults/<opaque-id>` URI with `api-version,t,c,s,h` context fields.
+These sensitive server-issued fields are kept private, never decoded as a
+region or substituted with caller values. The only accepted alternatives are
+the explicitly scoped region-bearing Microsoft.Resources result paths.
+All handles require HTTPS `management.azure.com`, the exact subscription/API,
+no URL userinfo/port/fragment/encoding ambiguity, a closed query shape and the
+same immutable handle returned by the one start. The Python helper independently
+binds every poll to the saved authenticated start response and request fingerprint.
+Foreign, changed, missing or malformed handles are not followed.
+
+Resource-group what-if rejects a request `location`, even though the shared
+schema lists it: the helper first GETs that exact group's real location and
+requires Australia East. Subscription-scope starts bind the supported
+`location: australiaeast` field. The operation ticket is not a storage SAS or
+an authentication fallback; the normal ARM bearer context remains mandatory.
+The adapter does not claim to infer Azure's internal routing region from
+opaque ticket bytes.
+
+Each request/process is bounded by **15 seconds and the remaining shared
+deadline**; the complete phase check remains at most **120 seconds**. No
+polling stage restarts the budget. Integer Retry-After is respected; a delay
+that cannot fit stops the check rather than polling early or extending time.
+At most 40 start/poll requests are permitted, with no second start after
+uncertainty. Failed/cancelled/unknown states, redirects, malformed JSON,
+unreviewed async headers and incomplete/paginated results all fail closed.
+Cancellation is checked again immediately before dispatch.
+
+Private traces retain only bounded step labels, elapsed/configured time,
+process timeout/killed/signal/code and sanitized ARM code/status. The opaque
+handle is represented in traces by a hash; full service replies remain separate
+private artifacts. Process-budget exhaustion is distinguished from HTTP errors,
+and the window journal retains these typed details without raw args, URLs,
+tokens, stderr or template contents. Receiver 1,000 ms HTTP, 120-second rollout,
+600-second objective, recovery reserve and approval limits are unchanged.
+
 Version 2 configuration is closed and binds the unchanged original origin,
 the immutable scanner-adoption delta and the actual pre-update foundation
 budget snapshots by SHA-256. Its closed budget object permits only USD,

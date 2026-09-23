@@ -3,8 +3,8 @@ import { promisify } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
 import https from 'node:https';
 import { constants } from 'node:fs';
-import { readFile, open, mkdir, rename, rm } from 'node:fs/promises';
-import { basename, dirname, resolve, isAbsolute } from 'node:path';
+import { readFile, open, mkdir, rename, rm, realpath } from 'node:fs/promises';
+import { basename, dirname, resolve, isAbsolute, delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual, types } from 'node:util';
 import { PHASES, buildPhase, deploymentName, validateConfig, ids, digest, json, fail, sameId, storageContract, firstReleaseCost, assertOwned, RECEIVER_COMMAND,
@@ -19,6 +19,9 @@ const execute = promisify(execFile), here = dirname(fileURLToPath(import.meta.ur
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 export const MAX_PRIVATE_ARTIFACT_BYTES = 64 * 1024 * 1024;
 export const DIAGNOSTIC_API = '2021-05-01-preview';
+export const WHAT_IF_API = '2025-04-01';
+export const WHAT_IF_MAX_POLLS = 40;
+const invokeDeadlines = new WeakMap();
 function privateOwner() {
   if (!['darwin', 'linux'].includes(process.platform) || typeof process.getuid !== 'function' ||
       typeof process.geteuid !== 'function' || !constants.O_NOFOLLOW || !constants.O_DIRECTORY || !constants.O_NONBLOCK) fail('PRIVATE_POSIX_IO_REQUIRED');
@@ -98,7 +101,7 @@ export async function load(directory, name, optional = false) {
   }
 }
 export async function sourceDigest() {
-  const names = ['definition.mjs', 'policy.mjs', 'controller.mjs'];
+  const names = ['definition.mjs', 'policy.mjs', 'controller.mjs', 'arm-whatif.py'];
   const hash = createHash('sha256');
   for (const name of names) hash.update(name).update(await readFile(resolve(here, name)));
   const contract = await storageContract(); hash.update(json(contract));
@@ -159,6 +162,7 @@ function cliError(error) {
   } catch { return { code: 'Unclassified', status: null }; }
 }
 export async function az(args, timeout = 60000, run = execute) {
+  const started = performance.now();
   try {
     const { stdout } = await run('az', args, { timeout, maxBuffer: 64 * 1024 * 1024,
       env: { ...process.env, AZURE_CORE_COLLECT_TELEMETRY: 'false', AZURE_EXTENSION_USE_DYNAMIC_INSTALL: 'no' } });
@@ -175,7 +179,215 @@ export async function az(args, timeout = 60000, run = execute) {
     const assignment = /^https:\/\/management\.azure\.com\/subscriptions\/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\/resourceGroups\/[a-z0-9-]+\/providers\/(?:Microsoft\.ContainerRegistry\/registries\/[a-z0-9]+|Microsoft\.Insights\/dataCollectionRules\/[a-z0-9-]+|Microsoft\.OperationalInsights\/workspaces\/[a-z0-9-]+)\/providers\/Microsoft\.Authorization\/roleAssignments\/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\?api-version=2022-04-01$/iu.exec(args[args.indexOf('--url') + 1] ?? '');
     if (args[0] === 'rest' && args[args.indexOf('--method') + 1] === 'GET' && status === 404 && code === 'RoleAssignmentNotFound' &&
         assignment && sameId(assignment[1], args[args.indexOf('--subscription') + 1])) return null;
-    const safe = new Error('ARM_OPERATION_FAILED'); safe.armCode = code; safe.httpStatus = status; throw safe;
+    const safe = new Error('ARM_OPERATION_FAILED'); safe.armCode = code; safe.httpStatus = status;
+    safe.diagnostics = processFailureMetadata(error, timeout, performance.now() - started, azureStep(args), status, code);
+    throw safe;
+  }
+}
+function azureStep(args) {
+  if (args[0] === 'deployment' && ['group', 'sub'].includes(args[1]) && ['validate', 'what-if'].includes(args[2])) return `deployment.${args[1]}.${args[2]}`;
+  if (args[0] === 'rest' && ['GET', 'POST', 'PUT'].includes(args[args.indexOf('--method') + 1])) return `arm.${args[args.indexOf('--method') + 1].toLowerCase()}`;
+  return 'azure-cli';
+}
+export function processFailureMetadata(error, timeoutMs, elapsedMs, step, httpStatus = null, armCode = null) {
+  const killed = error?.killed === true;
+  return { step, kind: killed && elapsedMs >= timeoutMs ? 'process-timeout' : httpStatus !== null ? 'http-error' : 'process-or-response-error',
+    configuredTimeoutMs: timeoutMs, elapsedMs, killed, timeoutObserved: killed && elapsedMs >= timeoutMs,
+    processCode: Number.isInteger(error?.code) ? error.code : typeof error?.code === 'string' && /^[A-Z_]+$/u.test(error.code) ? error.code : null,
+    signal: ['SIGTERM', 'SIGKILL', 'SIGINT'].includes(error?.signal) ? error.signal : null, httpStatus, armCode };
+}
+export function safeOperationFailure(error) {
+  const d = error?.diagnostics;
+  return { code: typeof error?.message === 'string' && /^[A-Z_]+$/u.test(error.message) ? error.message : 'OPERATION_FAILED',
+    armCode: typeof error?.armCode === 'string' && /^[A-Za-z][A-Za-z0-9]{0,127}$/u.test(error.armCode) ? error.armCode : null,
+    httpStatus: Number.isInteger(error?.httpStatus) && error.httpStatus >= 100 && error.httpStatus <= 599 ? error.httpStatus : null,
+    bridgeCode: typeof error?.bridgeCode === 'string' && /^[A-Z_]+$/u.test(error.bridgeCode) ? error.bridgeCode : null,
+    diagnostics: d ? {
+      step: typeof d.step === 'string' && /^(?:what-if\.(?:start|poll|region)|deployment\.(?:group|sub)\.(?:validate|what-if)|arm\.(?:get|post|put)|azure-cli)$/u.test(d.step) ? d.step : 'unclassified',
+      kind: ['process-timeout', 'http-error', 'process-or-response-error'].includes(d.kind) ? d.kind : 'unclassified',
+      configuredTimeoutMs: Number.isFinite(d.configuredTimeoutMs) ? d.configuredTimeoutMs : null,
+      elapsedMs: Number.isFinite(d.elapsedMs) ? d.elapsedMs : null, killed: d.killed === true, timeoutObserved: d.timeoutObserved === true,
+      processCode: Number.isInteger(d.processCode) ? d.processCode : typeof d.processCode === 'string' && /^[A-Z_]+$/u.test(d.processCode) ? d.processCode : null,
+      signal: ['SIGTERM', 'SIGKILL', 'SIGINT'].includes(d.signal) ? d.signal : null,
+    } : null };
+}
+export function whatIfOperationUrl(c, value, pinned) {
+  if (typeof value !== 'string' || value.length > 8192 || /[%\\#\r\n]/u.test(value)) fail('WHAT_IF_LOCATION_INVALID');
+  const text = value.startsWith('/subscriptions/') ? 'https://management.azure.com' + value : value;
+  if (!text.startsWith('https://management.azure.com/')) fail('WHAT_IF_LOCATION_INVALID');
+  let url;
+  try { url = new URL(text); } catch { fail('WHAT_IF_LOCATION_INVALID'); }
+  if (url.protocol !== 'https:' || url.host !== 'management.azure.com' || url.username || url.password || url.hash ||
+      url.pathname.includes('//') || value.includes('/../') || value.includes('/./')) fail('WHAT_IF_LOCATION_INVALID');
+  const entries = [...url.searchParams], query = Object.fromEntries(entries);
+  if (entries.length !== Object.keys(query).length || query['api-version'] !== WHAT_IF_API) fail('WHAT_IF_OPERATION_API_INVALID');
+  const prefix = `/subscriptions/${c.subscriptionId}`;
+  const opaque = new RegExp(`^${prefix}/operationresults/[A-Za-z0-9_-]{16,1024}$`, 'iu').test(url.pathname);
+  if (opaque) {
+    if (!isDeepStrictEqual(Object.keys(query).sort(), ['api-version', 'c', 'h', 's', 't']) ||
+        !/^\d{10,20}$/u.test(query.t) || !/^[A-Za-z0-9_-]{1,4096}$/u.test(query.c) ||
+        !/^[A-Za-z0-9_-]{1,1024}$/u.test(query.s) || !/^[A-Za-z0-9_-]{43}$/u.test(query.h)) fail('WHAT_IF_OPERATION_CONTEXT_INVALID');
+  } else {
+    const region = c.location;
+    const paths = [`${prefix}/locations/${region}/operationresults/`,
+      `${prefix}/providers/Microsoft.Resources/locations/${region}/operationResults/`,
+      `${prefix}/providers/Microsoft.Resources/locations/${region}/whatIfOperationResults/`];
+    if (entries.length !== 1 || !paths.some(path => url.pathname.toLowerCase().startsWith(path.toLowerCase()) &&
+        /^[A-Za-z0-9-]{16,128}$/u.test(url.pathname.slice(path.length)))) fail('WHAT_IF_OPERATION_PATH_INVALID');
+  }
+  if (pinned !== undefined && text !== pinned) fail('WHAT_IF_OPERATION_HANDLE_CHANGED');
+  return text;
+}
+async function azureCliPython() {
+  for (const entry of (process.env.PATH ?? '').split(delimiter).filter(isAbsolute)) {
+    let launcher;
+    try { launcher = await realpath(resolve(entry, 'az')); } catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+    const handle = await open(launcher, constants.O_RDONLY | constants.O_NOFOLLOW);
+    let text;
+    try {
+      const info = await handle.stat();
+      if (!info.isFile() || (info.mode & 0o022) || info.size > 8192 || ![0, Number(privateOwner())].includes(info.uid)) fail('TRUSTED_AZURE_CLI_REQUIRED');
+      text = await handle.readFile('utf8');
+    } finally { await handle.close(); }
+    const match = /^#!\/usr\/bin\/env bash\nAZ_INSTALLER=HOMEBREW (\/[A-Za-z0-9_./@-]+\/python) -Im azure\.cli "\$@"\n?$/u.exec(text);
+    if (!match) fail('AZURE_CLI_RUNTIME_QUALIFICATION_REQUIRED');
+    await realpath(match[1]);
+    return match[1]; // Keep the CLI virtual environment, rather than executing its resolved base interpreter.
+  }
+  fail('AZURE_CLI_RUNTIME_UNAVAILABLE');
+}
+export function whatIfRequestContext(c, phase) {
+  const r = ids(c), scope = ['project-budget', 'upload-role'].includes(phase.phase) ? 'subscription' : 'group';
+  if (phase.scope !== (scope === 'subscription' ? r.sub : r.group) ||
+      phase.deploymentId !== `${phase.scope}/providers/Microsoft.Resources/deployments/${deploymentName(c, phase.phase)}`) fail('FIXED_WHAT_IF_PHASE_REQUIRED');
+  const inspect = value => {
+    if (typeof value === 'string' && /^\s*\[/u.test(value)) fail('STATIC_WHAT_IF_TEMPLATE_REQUIRED');
+    if (Array.isArray(value)) value.forEach(inspect);
+    else if (value && typeof value === 'object') {
+      if (Object.hasOwn(value, 'templateLink') || Object.hasOwn(value, 'parametersLink')) fail('INLINE_WHAT_IF_REQUIRED');
+      Object.values(value).forEach(inspect);
+    }
+  };
+  inspect(phase.template);
+  const body = JSON.stringify({ ...(scope === 'subscription' ? { location: c.location } : {}), properties: {
+    mode: 'Incremental', parameters: {}, template: phase.template, whatIfSettings: { resultFormat: 'FullResourcePayloads' } } });
+  const fields = { subscriptionId: c.subscriptionId, tenantId: c.tenantId, location: c.location,
+    namePrefix: c.namePrefix, runId: c.runId, phase: phase.phase, scope, phaseSha256: digest(json(phase)), bodySha256: digest(body) };
+  return { ...fields, contextSha256: digest(Object.values(fields).join('\n')), body };
+}
+export async function authenticatedWhatIfRequest(context, directory, operation, run = execute, locate = azureCliPython) {
+  const { action, pollUrl, initialResponseFile, timeoutMs, deadlineMs, beforeDispatch } = operation;
+  if (!['start', 'poll'].includes(action) || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 15000 ||
+      !Number.isSafeInteger(deadlineMs) || typeof beforeDispatch !== 'function' || types.isAsyncFunction(beforeDispatch)) fail('BOUNDED_WHAT_IF_REQUEST_REQUIRED');
+  if (action === 'poll') whatIfOperationUrl({ subscriptionId: context.subscriptionId, location: context.location }, pollUrl);
+  else if (pollUrl !== null || initialResponseFile !== null) fail('WHAT_IF_START_HANDLE_FORBIDDEN');
+  const id = randomUUID(), requestFile = `whatif-request-${id}.json`, responseFile = `whatif-response-${id}.json`;
+  const { body, ...fields } = context;
+  await saveImmutable(directory, requestFile, { version: 1, ...fields, action, body: action === 'start' ? body : null,
+    pollUrl, initialResponseFile, timeoutMs, deadlineMs });
+  const started = performance.now();
+  try {
+    const python = await locate();
+    if (beforeDispatch() !== undefined) fail('WHAT_IF_DISPATCH_GUARD_INVALID');
+    const remaining = Math.min(timeoutMs - (performance.now() - started), deadlineMs - Date.now());
+    if (remaining <= 0) fail('WHAT_IF_REQUEST_DEADLINE');
+    const env = { ...process.env, AZURE_CORE_COLLECT_TELEMETRY: 'false', AZURE_EXTENSION_USE_DYNAMIC_INSTALL: 'no', PYTHONDONTWRITEBYTECODE: '1' };
+    for (const key of ['AZURE_CLI_DISABLE_CONNECTION_VERIFICATION', 'PYTHONHTTPSVERIFY', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE', 'SSL_CERT_FILE', 'SSL_CERT_DIR',
+      'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy']) delete env[key];
+    const result = await run(python, ['-I', '-B', resolve(here, 'arm-whatif.py'), resolve(directory, requestFile), resolve(directory, responseFile)],
+      { cwd: resolve(here, '../../..'), env, timeout: Math.max(1, Math.floor(remaining)), maxBuffer: 8192 });
+    if (result.stdout.trim() !== 'PRIVATE_WHATIF_RESPONSE_SAVED') fail('WHAT_IF_BRIDGE_OUTPUT_INVALID');
+    return { ...await load(directory, responseFile), responseFile };
+  } catch (error) {
+    if (['WHAT_IF_CANCELLED', 'WHAT_IF_DEADLINE_EXCEEDED', 'WHAT_IF_REQUEST_DEADLINE'].includes(error.message)) throw error;
+    const safe = new Error('WHAT_IF_REQUEST_FAILED');
+    safe.diagnostics = processFailureMetadata(error, timeoutMs, performance.now() - started, `what-if.${action}`);
+    if (typeof error.stderr === 'string' && /^[A-Z_]+\n?$/u.test(error.stderr)) safe.bridgeCode = error.stderr.trim();
+    throw safe;
+  }
+}
+export async function asyncWhatIf(c, phase, directory, options = {}) {
+  const now = options.now ?? Date.now, sleep = options.sleep ?? pause, cancelled = options.cancelled ?? (() => false);
+  const deadline = options.deadline ?? now() + 120000, context = whatIfRequestContext(c, phase);
+  const request = options.request ?? (operation => authenticatedWhatIfRequest(context, directory, operation));
+  const trace = { version: 1, phaseSha256: digest(json(phase)), contextSha256: context.contextSha256,
+    region: c.location, regionBinding: 'Verified resource-group location or exact subscription-start location; opaque ARM handles are not decoded as regions.',
+    startedAt: new Date(now()).toISOString(), deadlineAt: new Date(deadline).toISOString(), calls: [], startPosts: 0 };
+  const record = options.record ?? (value => save(directory, `${phase.phase}-async-what-if-trace.json`, value));
+  const guard = () => {
+    if (cancelled()) fail('WHAT_IF_CANCELLED');
+    if (!Number.isSafeInteger(deadline) || now() >= deadline) fail('WHAT_IF_DEADLINE_EXCEEDED');
+  };
+  let action = 'start', location, rawLocation, initialResponseFile, retryMs = 0;
+  try {
+    for (let poll = 0; poll < WHAT_IF_MAX_POLLS; poll++) {
+      guard();
+      if (retryMs) {
+        if (retryMs >= deadline - now()) fail('WHAT_IF_RETRY_AFTER_EXCEEDS_DEADLINE');
+        await sleep(retryMs); guard();
+      }
+      const call = { step: `what-if.${action}`, startedAt: new Date(now()).toISOString(), timeoutMs: Math.min(15000, deadline - now()) };
+      trace.calls.push(call); await record(trace); guard();
+      const timeoutMs = Math.min(call.timeoutMs, deadline - now());
+      if (action === 'start') trace.startPosts++;
+      const requestStarted = now();
+      const response = await request({ action, pollUrl: action === 'start' ? null : rawLocation,
+        initialResponseFile: initialResponseFile ?? null, timeoutMs, deadlineMs: deadline, beforeDispatch: guard });
+      call.elapsedMs = now() - requestStarted;
+      guard();
+      call.completedAt = new Date(now()).toISOString(); call.statusCode = response?.statusCode;
+      closed(response, ['version', 'statusCode', 'headers', 'body', 'bodyParseError', 'contextSha256', 'responseFile', 'step', 'verifiedRegion']);
+      if (response.version !== 1 || response.contextSha256 !== context.contextSha256 || !Number.isInteger(response.statusCode) ||
+          response.statusCode < 100 || response.statusCode > 599 || typeof response.bodyParseError !== 'boolean' ||
+          !/^whatif-response-[0-9a-f-]+\.json$/u.test(response.responseFile ?? '') ||
+          !response.headers || typeof response.headers !== 'object' || Array.isArray(response.headers) ||
+          !['what-if.region', 'what-if.start', 'what-if.poll'].includes(response.step) ||
+          Object.keys(response.headers).some(k => !['location', 'retry-after', 'azure-asyncoperation'].includes(k))) fail('WHAT_IF_RESPONSE_INVALID');
+      call.responseStep = response.step;
+      if (response.statusCode >= 300 && response.statusCode < 400) fail('WHAT_IF_REDIRECT_FORBIDDEN');
+      if (![200, 202].includes(response.statusCode)) {
+        const error = new Error('WHAT_IF_HTTP_FAILED'); error.httpStatus = response.statusCode;
+        const code = response.body?.error?.code;
+        error.armCode = typeof code === 'string' && /^[A-Za-z][A-Za-z0-9]{0,127}$/u.test(code) ? code : 'Unclassified';
+        throw error;
+      }
+      if (response.step !== `what-if.${action}` || response.verifiedRegion !== c.location) fail('WHAT_IF_REGION_OR_STEP_MISMATCH');
+      if (response.bodyParseError) fail('WHAT_IF_NON_JSON_RESPONSE');
+      if (Object.hasOwn(response.headers, 'azure-asyncoperation')) fail('WHAT_IF_UNREVIEWED_ASYNC_HEADER');
+      if (action === 'start' && response.statusCode === 202) {
+        rawLocation = response.headers.location;
+        location = whatIfOperationUrl(c, rawLocation);
+        if (!/^whatif-response-[0-9a-f-]+\.json$/u.test(response.responseFile)) fail('WHAT_IF_START_RECEIPT_REQUIRED');
+        initialResponseFile = response.responseFile;
+        trace.operationHandleSha256 = digest(location);
+      } else if (response.headers.location !== undefined) whatIfOperationUrl(c, response.headers.location, location);
+      const status = response.body?.status;
+      if (['Failed', 'Canceled', 'Cancelled'].includes(status) || response.body?.error) {
+        const error = new Error('WHAT_IF_OPERATION_FAILED'); error.httpStatus = response.statusCode;
+        const code = response.body?.error?.code;
+        error.armCode = typeof code === 'string' && /^[A-Za-z][A-Za-z0-9]{0,127}$/u.test(code) ? code : 'Unclassified';
+        throw error;
+      }
+      if (response.statusCode === 200 && status === 'Succeeded') {
+        if (!response.body.properties || !Array.isArray(response.body.properties.changes) ||
+            response.body.properties.nextLink || response.body.nextLink) fail('WHAT_IF_RESULT_INCOMPLETE');
+        await record({ ...trace, outcome: 'succeeded', completedAt: new Date(now()).toISOString() }); guard();
+        return { raw: response.body, result: { status, changes: response.body.properties.changes } };
+      }
+      if (response.statusCode === 200 && !['Accepted', 'Running', 'InProgress'].includes(status)) fail('WHAT_IF_UNKNOWN_OPERATION_STATUS');
+      if (response.statusCode === 202 && status !== undefined && !['Accepted', 'Running', 'InProgress'].includes(status)) fail('WHAT_IF_UNKNOWN_OPERATION_STATUS');
+      if (!location || !initialResponseFile) fail('WHAT_IF_OPERATION_HANDLE_REQUIRED');
+      const retry = response.headers['retry-after'];
+      if (retry !== undefined && (typeof retry !== 'string' || !/^\d{1,6}$/u.test(retry))) fail('WHAT_IF_RETRY_AFTER_INVALID');
+      retryMs = retry === undefined ? 1000 : Math.max(1000, Number(retry) * 1000);
+      action = 'poll';
+    }
+    fail('WHAT_IF_POLL_LIMIT_EXCEEDED');
+  } catch (error) {
+    trace.outcome = 'failed'; trace.failureCode = /^[A-Z_]+$/u.test(error.message) ? error.message : 'WHAT_IF_FAILED';
+    trace.failure = { step: trace.calls.at(-1)?.step ?? 'what-if.start', ...safeOperationFailure(error) };
+    await record(trace);
+    throw error;
   }
 }
 export function transport(c, phase, directory, invoke = az) {
@@ -286,6 +498,12 @@ export async function publishedSourceDigest(commitSha, run = execute) {
     const file = async path => (await run('git', ['--no-pager', 'show', `${commitSha}:${path}`], options)).stdout;
     const hash = createHash('sha256');
     for (const name of ['definition.mjs', 'policy.mjs', 'controller.mjs']) hash.update(name).update(await file(`infrastructure/arm/telemetry/${name}`));
+    const bridgePath = 'infrastructure/arm/telemetry/arm-whatif.py';
+    const bridge = (await run('git', ['ls-tree', '--name-only', commitSha, '--', bridgePath], options)).stdout.toString().trim();
+    if (bridge) {
+      if (bridge !== bridgePath) fail('PUBLISHED_ORIGIN_INVALID');
+      hash.update('arm-whatif.py').update(await file(bridgePath));
+    }
     const schema = JSON.parse(await file('assets/schemas/telemetry-event.schema.json'));
     const columns = JSON.parse(await file('services/telemetry-ingest/schema/storage-columns.json'));
     hash.update(json({ schema, columns, schemaSha256: digest(json(schema)), columnsSha256: digest(json(columns)) }));
@@ -451,7 +669,10 @@ export function verifyProjectBudgetReceipt(c, receipt, foundation, sourceSha256,
   verifyResource(c, phase, phase.resources[0], receipt.resources[r.projectBudget]);
   if (receipt.sourceSha256 !== sourceSha256 && !isDeepStrictEqual(receipt, reconciled['project-budget'])) fail('RECONCILIATION_REVIEW_REQUIRED');
 }
-export async function validateReadOnly(c, phase, receipts, directory, invoke = az, currentApp) {
+export async function validateReadOnly(c, phase, receipts, directory, invoke = az, currentApp, options = {}) {
+  const maximumDeadline = Date.now() + 120000;
+  const deadline = Math.min(options.deadline ?? invokeDeadlines.get(invoke) ?? maximumDeadline, maximumDeadline);
+  invoke = boundedInvoke(deadline, invoke);
   const r = ids(c), known = Object.values(receipts).flatMap(v => Object.keys(v.resources ?? {}));
   const executionName = deploymentName(c, phase.phase);
   if (phase.deploymentId !== `${phase.scope}/providers/Microsoft.Resources/deployments/${executionName}`) fail('DEPLOYMENT_NAME_INVALID');
@@ -462,14 +683,28 @@ export async function validateReadOnly(c, phase, receipts, directory, invoke = a
   const validation = await invoke(['deployment', level, 'validate', ...args], 180000);
   await save(directory, `${phase.phase}-validation.json`, validation);
   if (validation?.properties?.provisioningState !== 'Succeeded' || validation.error) fail('TEMPLATE_NOT_VALIDATED');
-  const whatif = await invoke(['deployment', level, 'what-if', ...args, '--no-pretty-print', '--result-format', 'FullResourcePayloads'], 180000);
+  const { result: whatif, raw } = await asyncWhatIf(c, phase, directory, { ...options, deadline });
+  await save(directory, `${phase.phase}-what-if-raw.json`, raw);
   await save(directory, `${phase.phase}-what-if.json`, whatif);
+  if (Date.now() >= deadline) fail('WINDOW_READ_DEADLINE');
   const context = TOGGLE_PHASES.includes(phase.phase) ? { config: c, ...resourceContext(c, receipts),
     app: currentApp ?? receipts['disabled-app']?.resources?.[r.app] } : undefined;
-  return { whatIfSha256: verifyWhatIf(phase, whatif, known, context), templateValidationOnly: true };
+  const whatIfSha256 = verifyWhatIf(phase, whatif, known, context);
+  if (Date.now() >= deadline) fail('WINDOW_READ_DEADLINE');
+  return { whatIfSha256, templateValidationOnly: true };
 }
-export async function checkReadOnly(c, phase, origin, receipts, directory, evidenceFiles, invoke = az, lookup = publishedSourceDigest, transition) {
-  const started = Date.now(), arm = transport(c, phase, directory, invoke), r = ids(c);
+export async function checkReadOnly(c, phase, origin, receipts, directory, evidenceFiles, invoke = az, lookup = publishedSourceDigest, transition, options = {}) {
+  const started = Date.now(), deadline = Math.min(options.deadline ?? invokeDeadlines.get(invoke) ?? started + 120000, started + 120000);
+  const bounded = boundedInvoke(deadline, invoke);
+  invoke = async (args, timeout) => {
+    try { return await bounded(args, timeout); }
+    catch (error) {
+      await save(directory, `${phase.phase}-readonly-failure.json`, { recordedAt: new Date().toISOString(), phase: phase.phase,
+        step: azureStep(args), deadlineAt: new Date(deadline).toISOString(), failure: safeOperationFailure(error) });
+      throw error;
+    }
+  };
+  const arm = transport(c, phase, directory, invoke), r = ids(c);
   const foundation = verifyFoundationBudgets(c, evidenceFiles.foundationBudgets);
   if (evidenceFiles.reconciliation?.origins?.records.some(v => v.phase.phase === phase.phase)) fail('COMPLETED_PHASE_REQUIRES_RECONCILIATION');
   const source = await sourceDigest();
@@ -551,10 +786,12 @@ export async function checkReadOnly(c, phase, origin, receipts, directory, evide
     roleDefinitionsSha256 = digest(json(definitions.roles));
     await save(directory, 'assignments-role-definitions.json', { checkedAt: new Date().toISOString(), ...definitions, roleDefinitionsSha256 });
   }
-  const { whatIfSha256 } = await validateReadOnly(c, phase, receipts, directory, invoke, currentApp);
+  const { whatIfSha256 } = await validateReadOnly(c, phase, receipts, directory, invoke, currentApp, { ...options, deadline });
   const cost = firstReleaseCost(1);
+  const verifiedSource = await sourceDigest();
+  if (Date.now() >= deadline) fail('WINDOW_READ_DEADLINE');
   const proof = { startedAt: started, completedAt: Date.now(), qualified: cost.withinEstimate, configSha256: digest(json(c)),
-    phaseSha256: digest(json(phase)), sourceSha256: await sourceDigest(), originSha256: digest(json(origin)),
+    phaseSha256: digest(json(phase)), sourceSha256: verifiedSource, originSha256: digest(json(origin)),
     receiptsSha256: digest(json(receipts)),
     baselineSha256: roleDefinitionsSha256 ? digest(json({ foundationBaselineSha256: baseline, roleDefinitionsSha256 })) : baseline, whatIfSha256,
     ...(roleDefinitionsSha256 ? { foundationBaselineSha256: baseline, roleDefinitionsSha256 } : {}),
@@ -562,6 +799,11 @@ export async function checkReadOnly(c, phase, origin, receipts, directory, evide
       appObservationSha256: digest(json(currentApp)) } : {}),
     cost, computedValuesReviewed: phase.computedReadbacksRequired.length === 0 };
   await save(directory, `${phase.phase}-preflight.json`, proof);
+  if (Date.now() >= deadline) {
+    proof.qualified = false; proof.failureCode = 'WINDOW_READ_DEADLINE';
+    await save(directory, `${phase.phase}-preflight.json`, proof);
+    fail('WINDOW_READ_DEADLINE');
+  }
   if (!cost.withinEstimate) fail('FIRST_RELEASE_COST_EXCEEDS_ESTIMATE');
   return proof;
 }
@@ -871,6 +1113,7 @@ export class SyntheticWindowDriver {
       if (!matched) fail('SYNTHETIC_ROWS_NOT_CONFIRMED');
     } catch (error) {
       failure = /^[A-Z_]+$/u.test(error.message) ? error.message : 'SYNTHETIC_WINDOW_FAILED';
+      run.failureDetails = safeOperationFailure(error);
     } finally {
       run.stage = 'disabling'; run.failureCode = failure;
       try { await persist(); } catch { failure ??= 'WINDOW_JOURNAL_WRITE_FAILED'; }
@@ -886,6 +1129,7 @@ export class SyntheticWindowDriver {
         run.terminalDisabled503Verified = true;
       } catch (error) {
         rollbackFailure = /^[A-Z_]+$/u.test(error.message) ? error.message : 'DISABLE_RECONCILIATION_REQUIRED';
+        run.disableFailureDetails = safeOperationFailure(error);
       }
       deadlines.observe(); await deadlines.pendingIncident;
       if (deadlines.incident) { run.enabledWindowExceeded = true; failure ??= 'ENABLED_WINDOW_EXCEEDED'; }
@@ -1047,6 +1291,7 @@ export class SyntheticToggleController {
     } catch (error) {
       journal.outcome = 'reconciliation-required'; journal.transportDispatchAttempted = dispatched;
       journal.failureCode = /^[A-Z_]+$/u.test(error.message) ? error.message : 'TOGGLE_STOPPED';
+      journal.failureDetails = safeOperationFailure(error);
       journal.deadlines = this.deadlines.snapshot();
       await this.io.saveJournal(name, journal); fail('TOGGLE_STOPPED_RESOURCES_PRESERVED');
     }
@@ -1070,12 +1315,14 @@ export function buildSyntheticWindow(c, phases, receipts, origin, source, whatif
     phases: entries, limits: SYNTHETIC_LIMITS, fixtures: SYNTHETIC_FIXTURES };
 }
 function boundedInvoke(deadline, invoke = az, now = Date.now) {
-  return (args, timeout = 60000) => {
+  const call = (args, timeout = 60000) => {
     if (!Number.isSafeInteger(deadline)) fail('WINDOW_READ_DEADLINE');
     const remaining = deadline - now();
     if (remaining <= 0) fail('WINDOW_READ_DEADLINE');
     return invoke(args, Math.min(timeout, remaining, 15000));
   };
+  invokeDeadlines.set(call, deadline);
+  return call;
 }
 export async function readSyntheticQuery(c, expectedWorkspace, expectedSource, start, end, beforeDispatch, deadline,
   invoke = az, readSource = sourceDigest, now = Date.now, onDispatch = () => {}) {
@@ -1129,7 +1376,8 @@ export function syntheticWindowIO(c, phases, window, approvals, receipts, rawRec
       rawReceipts[name] = value; await save(directory, 'receipts.json', rawReceipts);
     },
     check: (phase, transition, deadline) => checkReadOnly(c, phase, origin, receipts, directory, evidenceFiles,
-      boundedInvoke(deadline, invoke), publishedSourceDigest, transition),
+      boundedInvoke(deadline, invoke), publishedSourceDigest, transition, {
+        deadline, cancelled: phase.phase === 'synthetic-admission' ? cancelled : () => false }),
     observe,
     deployment: (name, deadline) => transport(c, phases[name], directory, boundedInvoke(deadline, invoke))('GET', phases[name].deploymentId, '2022-09-01'),
     arm: (phase, deadline) => transport(c, phase, directory, boundedInvoke(deadline, invoke)),

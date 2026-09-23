@@ -12,6 +12,10 @@ No Azure credentials are needed for these tests. The CLI accepts only fixed
 collector phases; `prepare` makes no cloud calls, and `check`/`validate-preview`
 perform only nonmutating reads and ARM validation/what-if. No checked-in file
 contains deployment authority or account-specific configuration.
+What-if uses a fixed authenticated async start/poll adapter, not a blocking
+CLI long-running poller. Requests remain at most 15 seconds within the same
+120-second phase-check deadline; response handles and full results stay private.
+The qualified local Azure CLI Python bridge is part of the source hash.
 
 The completed budget/core/workspace-access/data/upload-role/assignments/disabled-app
 sequence uses `reconcile disabled-app` for a read-only, unapproved version-3 proposal.
