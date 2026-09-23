@@ -5,12 +5,12 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { chmod, link, mkdir, open, readFile, readdir, rename, rm, symlink, truncate, writeFile } from 'node:fs/promises';
 import { buildPhase, storageContract, ids, json, digest, ownerTags, firstReleaseCost, PHASES, LIMITS, RECEIVER_DIGEST, RECEIVER_COMMAND,
-  BUDGET, budgetProperties, budgetConfiguration, projectBudgetFilter, validateConfig } from '../definition.mjs';
+  BUDGET, budgetProperties, budgetConfiguration, projectBudgetFilter, validateConfig, assignmentRoleTargets } from '../definition.mjs';
 import { verifyWhatIf, assertBudget, permitFirstPush, verifyResource, executionIdentity,
-  verifyExecutionOrigins, verifyReconciliation, verifyDeploymentIdentity } from '../policy.mjs';
+  verifyExecutionOrigins, verifyReconciliation, verifyDeploymentIdentity, roleDefinitionSignature } from '../policy.mjs';
 import { CollectorController, az, transport, validateReadOnly, verifyScannerAdoption, verifyOrigin, verifyProjectBudgetReceipt,
   checkReadOnly, load, saveImmutable, MAX_PRIVATE_ARTIFACT_BYTES, DIAGNOSTIC_API, privateDirectory, sourceDigest,
-  publishedSourceDigest, collectReconciliation, reviewedReconciliationReceipts, verifyFreshReconciliation, readPrivacy } from '../controller.mjs';
+  publishedSourceDigest, collectReconciliation, reviewedReconciliationReceipts, verifyFreshReconciliation, readPrivacy, readAssignmentRoleDefinitions } from '../controller.mjs';
 
 const c = { version: 2, subscriptionId: '00000000-0000-4000-8000-000000000001',
   tenantId: '00000000-0000-4000-8000-000000000002', operatorPrincipalId: '00000000-0000-4000-8000-000000000003',
@@ -408,18 +408,18 @@ function fixtureReconciliation(config = c, baseline = digest('baseline')) {
   const f = fixtureFoundation(config), r = ids(config), source = digest('current policy');
   const records = [], inventory = { value: [] }, base = Date.parse('2026-09-23T00:00:00.000Z');
   const iso = offset => new Date(base + offset).toISOString();
-  for (const [index, name] of ['project-budget', 'core', 'workspace-access', 'data'].entries()) {
-    const oldSource = digest(index < 2 ? `executed source ${name}` : 'executed workspace and data source');
+  for (const [index, name] of ['project-budget', 'core', 'workspace-access', 'data', 'upload-role'].entries()) {
+    const oldSource = digest(index < 2 || index === 4 ? `executed source ${name}` : 'executed workspace and data source');
     const intent = (index * 5 + 1) * 60000, prerequisiteReceipts = {};
     for (const prior of records) {
       const priorName = prior.phase.phase;
-      if (index >= 2 && ['project-budget', 'core'].includes(priorName)) {
+      if (index === 4 || (index >= 2 && ['project-budget', 'core'].includes(priorName))) {
         prerequisiteReceipts[priorName] = { qualificationKind: 'reviewed-read-only-reconciliation', qualified: true, phase: priorName,
           configSha256: digest(json(config)), phaseSha256: digest(json(prior.phase)), sourceSha256: prior.publication.sourceSha256,
           deployment: structuredClone(prior.firstReadback.deployment), resources: structuredClone(prior.firstReadback.resources),
           reconciliation: { proposalSha256: digest('historical proposal'), reviewSha256: digest('historical review'),
             executionOriginSha256: digest(json(prior)), policySourceSha256: oldSource,
-            checkedAt: iso(8 * 60000), reviewedAt: iso(9 * 60000),
+            checkedAt: iso((index === 4 ? 18 : 8) * 60000), reviewedAt: iso((index === 4 ? 19 : 9) * 60000),
             originalJournalOutcome: prior.journal.outcome, originalReceiptQualified: prior.originalReceipt?.qualified === true } };
       } else prerequisiteReceipts[priorName] = structuredClone(prior.originalReceipt);
     }
@@ -445,6 +445,10 @@ function fixtureReconciliation(config = c, baseline = digest('baseline')) {
         v.systemData = { createdAt: iso(intent + 2000 - 8 * 3600000) };
       }
       if (descriptor.type === 'Microsoft.Consumption/budgets') delete v.properties.provisioningState;
+      if (descriptor.type === 'Microsoft.Authorization/roleDefinitions') {
+        delete v.properties.provisioningState;
+        v.properties.createdOn = iso(intent + 2000);
+      }
       if (descriptor.id === r.table) {
         delete v.type;
         v.systemData = { createdAt: iso(intent + 2000) };
@@ -459,7 +463,8 @@ function fixtureReconciliation(config = c, baseline = digest('baseline')) {
         v.properties.destinations.logAnalytics[0].workspaceId = prerequisiteReceipts['workspace-access'].resources[r.workspace].properties.customerId;
       }
       resources[descriptor.id] = v;
-      if (descriptor.type !== 'Microsoft.Consumption/budgets' && descriptor.id !== r.table && !inventory.value.some(v => v.id === descriptor.id)) {
+      if (!['Microsoft.Consumption/budgets', 'Microsoft.Authorization/roleDefinitions'].includes(descriptor.type) &&
+          descriptor.id !== r.table && !inventory.value.some(v => v.id === descriptor.id)) {
         inventory.value.push({ id: descriptor.id, type: descriptor.type, createdTime: iso(intent + 2000) });
       }
     }
@@ -468,7 +473,7 @@ function fixtureReconciliation(config = c, baseline = digest('baseline')) {
     const whatIf = { status: 'Succeeded', changes: phase.resources.map(d => name === 'project-budget'
       ? { resourceId: d.id, changeType: 'Modify', before: f.project, after: d.expected }
       : { resourceId: d.id, changeType: name === 'workspace-access' ? 'NoChange' : 'Create' }) };
-    if (index >= 2) for (const descriptor of records[1].phase.resources) {
+    if (index >= 2 && index !== 4) for (const descriptor of records[1].phase.resources) {
       if (descriptor.type !== 'Microsoft.Consumption/budgets' && !phase.resources.some(v => v.id === descriptor.id)) {
         whatIf.changes.push({ resourceId: descriptor.id, changeType: 'Ignore' });
       }
@@ -495,13 +500,114 @@ function fixtureReconciliation(config = c, baseline = digest('baseline')) {
       resources: structuredClone(record.firstReadback.resources),
       identityPins: Object.fromEntries(record.phase.resources.map(descriptor => [descriptor.id, executionIdentity(record.firstReadback.resources[descriptor.id], descriptor.type)])),
       diagnostics: Object.fromEntries(record.phase.resources.filter(v => [r.workspace, r.environment].includes(v.id)).map(v => [v.id, { value: [] }])),
-      exports: record.phase.phase !== 'project-budget' ? { value: [] } : null }])),
+      exports: ['core', 'workspace-access', 'data'].includes(record.phase.phase) ? { value: [] } : null }])),
     stateBudget: f.state, workspace: structuredClone(records[2].firstReadback.resources[r.workspace]), inventory, managedGroup: null };
   const review = { version: 2, action: 'accept-exact-arm-reconciliation', sourceSha256: source,
     proposalSha256: digest(json(proposal)), reviewedAt: iso(41 * 60000) };
   const lookup = async commit => records.find(v => v.publication.commitSha === commit)?.publication.sourceSha256;
   return { config, foundation: f, origins, proposal, review, source, lookup };
 }
+function fixtureAssignmentRoleReads(config = c) {
+  const f = fixtureReconciliation(config), rr = ids(config), uploadReceipt = f.origins.records[4].originalReceipt;
+  const phase = buildPhase(config, 'assignments', contract, fixtureReceipts(config)), resources = new Map();
+  for (const target of assignmentRoleTargets(config)) {
+    const resource = target.roleType === 'CustomRole' ? structuredClone(uploadReceipt.resources[rr.uploadRole]) : {
+      id: target.roleDefinitionId, name: target.roleDefinitionId.split('/').at(-1), type: 'Microsoft.Authorization/roleDefinitions',
+      properties: { type: 'BuiltInRole', roleName: target.roleName, createdOn: '2015-01-01T00:00:00.000Z',
+        permissions: [{ actions: target.roleName === 'AcrPull' ? ['Microsoft.ContainerRegistry/registries/pull/read'] : ['*/read'],
+          notActions: target.roleName === 'AcrPull' ? [] : ['Microsoft.OperationalInsights/workspaces/sharedKeys/read'], dataActions: [], notDataActions: [] }],
+        assignableScopes: ['/'] },
+    };
+    resources.set(`${target.scope}/providers/Microsoft.Authorization/roleDefinitions/${target.roleDefinitionId.split('/').at(-1)}`, resource);
+  }
+  const read = async (method, id, api) => {
+    assert.equal(method, 'GET'); assert.equal(api, '2022-04-01'); assert(resources.has(id));
+    return structuredClone(resources.get(id));
+  };
+  return { phase, resources, uploadReceipt, read };
+}
+test('assignment role definitions are read at their exact scopes with the mutable custom role last', async () => {
+  const f = fixtureAssignmentRoleReads(), calls = [];
+  const values = await readAssignmentRoleDefinitions(c, f.phase, async (...args) => { calls.push(args); return f.read(...args); }, f.uploadReceipt);
+  assert.deepEqual(values.roles.map(v => v.scope), [r.registry, r.workspace, r.dcr]);
+  assert.deepEqual(values.roles.map(v => v.roleType), ['BuiltInRole', 'BuiltInRole', 'CustomRole']);
+  assert(calls.at(-1)[1].startsWith(r.dcr + '/providers/Microsoft.Authorization/roleDefinitions/'));
+  assert.equal(values.roles[2].permissions[0].dataActions[0], 'Microsoft.Insights/Telemetry/Write');
+  for (const change of [
+    value => { value.id = r.workspace; }, value => { value.name = c.runId; },
+    value => { value.properties.type = 'CustomRole'; }, value => { value.properties.roleName = 'Reader'; },
+    value => { delete value.properties.permissions[0].notDataActions; }, value => { value.properties.createdOn = 'NaN'; },
+    value => { value.properties.assignableScopes = ['']; }, value => { value.properties.assignableScopes = ['/subscriptions/other']; },
+  ]) {
+    const target = assignmentRoleTargets(c)[0], actual = structuredClone(values.readbacks[0].resource);
+    change(actual); assert.throws(() => roleDefinitionSignature(c, target, actual));
+  }
+  for (const change of [
+    value => { value.properties.permissions[0].actions = ['*']; },
+    value => { value.properties.assignableScopes = [r.sub]; },
+    value => { value.properties.createdOn = '2026-09-23T00:22:00.000Z'; },
+  ]) {
+    const current = fixtureAssignmentRoleReads(), id = [...current.resources.keys()].at(-1);
+    change(current.resources.get(id));
+    await assert.rejects(readAssignmentRoleDefinitions(c, current.phase, current.read, current.uploadReceipt));
+  }
+  const badScope = structuredClone(f.phase); badScope.resources[0].expected.scope = r.sub;
+  await assert.rejects(readAssignmentRoleDefinitions(c, badScope, f.read, f.uploadReceipt), /EXACT_ASSIGNMENT_SCOPES_REQUIRED/);
+  await assert.rejects(readAssignmentRoleDefinitions(c, f.phase, f.read, null), /UPLOAD_ROLE_RECEIPT_REQUIRED/);
+});
+test('assignment PUT requires post-body role reads bound to approval and a final synchronous time guard', async t => {
+  for (const scenario of ['success', 'custom-role-drift', 'builtin-drift', 'expired-during-read', 'stale-during-read']) await t.test(scenario, async t => {
+    const directory = await scratch(t), f = executionFixture('assignments'), definitions = fixtureAssignmentRoleReads();
+    const before = await readAssignmentRoleDefinitions(c, f.p, definitions.read, definitions.uploadReceipt);
+    f.proof.foundationBaselineSha256 = digest('foundation policy');
+    f.proof.roleDefinitionsSha256 = digest(json(before.roles));
+    f.proof.baselineSha256 = digest(json({ foundationBaselineSha256: f.proof.foundationBaselineSha256, roleDefinitionsSha256: f.proof.roleDefinitionsSha256 }));
+    f.approval.baselineSha256 = f.proof.baselineSha256;
+    if (scenario === 'expired-during-read') f.approval.expiresAt = new Date(f.io.now() + 60000).toISOString();
+    let writes = 0, prepared = false, roleReads = 0;
+    const arm = transport(c, f.p, directory, async args => {
+      const method = args[args.indexOf('--method') + 1], id = new URL(args[args.indexOf('--url') + 1]).pathname;
+      if (method === 'PUT') {
+        assert.equal(prepared, true); assert.equal(roleReads, 3);
+        assert.equal(f.journal.outcome, 'submission-possible');
+        writes++; return {};
+      }
+      if (definitions.resources.has(id)) {
+        assert.equal(prepared, true); roleReads++;
+        if (roleReads === 3 && scenario === 'expired-during-read') f.advance(60000);
+        if (roleReads === 3 && scenario === 'stale-during-read') f.advance(300001);
+        return structuredClone(definitions.resources.get(id));
+      }
+      if (id === f.p.deploymentId) return writes ? { id, properties: { provisioningState: 'Succeeded' } } : null;
+      const descriptor = f.p.resources.find(v => v.id === id); assert(descriptor);
+      return { id, properties: { ...descriptor.expected.properties, scope: descriptor.expected.scope } };
+    });
+    f.io.assignmentRoleDefinitions = () => readAssignmentRoleDefinitions(c, f.p, arm, definitions.uploadReceipt);
+    f.io.arm = (method, id, api, body, filter, guard, roleGate) => arm(method, id, api, method === 'PUT' ? {
+      toJSON() {
+        prepared = true;
+        if (scenario === 'custom-role-drift') definitions.resources.get([...definitions.resources.keys()].at(-1)).properties.permissions[0].actions.push('*');
+        if (scenario === 'builtin-drift') definitions.resources.get([...definitions.resources.keys()][0]).properties.permissions[0].actions.push('Microsoft.Authorization/roleAssignments/write');
+        return body;
+      },
+    } : body, filter, guard, roleGate);
+    const controller = new CollectorController(c, f.p, f.io);
+    if (scenario === 'success') {
+      await controller.execute(f.approval);
+      assert.equal(writes, 1); assert.equal(f.receipt.qualified, true);
+    } else {
+      await assert.rejects(controller.execute(f.approval), /OWNED_RESOURCES_PRESERVED/);
+      assert.equal(writes, 0); assert.equal(f.receipt, null); assert.equal(f.journal.outcome, 'reconciliation-required');
+      assert.match(f.journal.failureCode, /^(UPLOAD_ROLE_SCOPE_DRIFT|ASSIGNMENT_ROLE_DEFINITION_DRIFT|FRESH_REVIEW_MISMATCH)$/u);
+    }
+    assert.deepEqual(await readdir(directory), []);
+  });
+  const f = executionFixture('assignments');
+  await assert.rejects(new CollectorController(c, f.p, f.io).execute(f.approval), /FRESH_ROLE_REVIEW_MISMATCH/);
+  assert.equal(f.journal, null); assert.equal(f.writes, 0);
+  const directory = await scratch(t), arm = transport(c, f.p, directory, async () => { assert.fail('must not dispatch'); });
+  await assert.rejects(arm('PUT', f.p.deploymentId, '2022-09-01', {}, undefined, () => {}), /ASSIGNMENT_ROLE_READBACK_REQUIRED/);
+});
 test('default-network Consumption readback admits null infrastructure group but rejects other networking or telemetry', () => {
   const f = fixtureReconciliation(), p = f.origins.records[1].phase, descriptor = p.resources.find(v => v.id === r.environment);
   const actual = f.proposal.results.core.resources[r.environment];
@@ -595,6 +701,7 @@ test('shared reconciliation requires exact current review and preserves both exe
   assert.equal(receipts.data.reconciliation.originalReceiptQualified, false);
   assert.equal(receipts.data.reconciliation.originalJournalOutcome, 'reconciliation-required');
   assert.equal(receipts.data.sourceSha256, f.origins.records[3].publication.sourceSha256);
+  assert.equal(receipts['upload-role'].reconciliation.originalReceiptQualified, true);
   verifyProjectBudgetReceipt(c, receipts['project-budget'], f.foundation, f.source, receipts);
   assert.throws(() => verifyProjectBudgetReceipt(c, receipts['project-budget'], f.foundation, f.source), /RECONCILIATION_REVIEW_REQUIRED/);
   const next = buildPhase(c, 'workspace-access', contract, receipts, f.foundation, f);
@@ -626,6 +733,10 @@ test('four-phase origins bind the actual prior receipt maps, their sources, appr
     f => { f.origins.records[3].approval.phaseSha256 = digest('wrong phase'); },
     f => { f.origins.records[3].journal.intentAt = f.origins.records[3].approval.expiresAt; },
     f => { f.origins.records[3].validation.properties.templateHash = 'wrong'; },
+    f => { f.origins.records[4].publication.sourceSha256 = digest('forged executed role source'); },
+    f => { f.origins.records[4].prerequisiteReceipts.data.sourceSha256 = digest('forged data source'); },
+    f => { f.proposal.results['upload-role'].resources[r.uploadRole].properties.permissions[0].actions = ['*']; },
+    f => { f.proposal.results['upload-role'].resources[r.uploadRole].properties.createdOn = '2026-09-23T00:22:00.000Z'; },
     f => { f.origins.records[2].firstReadback.checkedAt = '2099-01-01T00:00:00.000Z'; },
     f => { f.proposal.results.data.resources[r.table].properties.schema.columns[0].name = 'extraEventField'; },
     f => { f.proposal.results.data.resources[r.dcr].properties.immutableId = 'dcr-' + 'b'.repeat(32); },
@@ -804,10 +915,17 @@ test('reconciliation and fresh qualification read only the exact deployed resour
   }
   for (const id of [rr.workspace, rr.environment]) responses.set(id + '/providers/Microsoft.Insights/diagnosticSettings', { value: [] });
   const calls = [];
+  let assignmentPhase;
   const invoke = async args => {
     calls.push(args);
     assert.equal(args[args.indexOf('--subscription') + 1], a.config.subscriptionId);
     if (args[0] === 'account') return { id: a.config.subscriptionId, tenantId: a.config.tenantId, state: 'Enabled', environmentName: 'AzureCloud' };
+    if (args[0] === 'deployment') {
+      assert(assignmentPhase);
+      if (args[2] === 'validate') return { properties: { provisioningState: 'Succeeded' } };
+      assert.equal(args[2], 'what-if');
+      return { status: 'Succeeded', changes: assignmentPhase.resources.map(v => ({ resourceId: v.id, changeType: 'Create' })) };
+    }
     assert.equal(args[0], 'rest'); assert.equal(args[args.indexOf('--method') + 1], 'GET');
     const url = new URL(args[args.indexOf('--url') + 1]); assert(responses.has(url.pathname), url.pathname);
     if (url.pathname.endsWith('/diagnosticSettings')) assert.equal(url.searchParams.get('api-version'), DIAGNOSTIC_API);
@@ -820,9 +938,35 @@ test('reconciliation and fresh qualification read only the exact deployed resour
   assert.equal((await readdir(directory)).length, 0);
   const current = { ...f, proposal };
   await verifyFreshReconciliation(a.config, directory, current, invoke);
+  await t.test('assignment preflight binds freshly read role signatures into the approval baseline', async () => {
+    current.review = { version: 2, action: 'accept-exact-arm-reconciliation', sourceSha256: proposal.sourceSha256,
+      proposalSha256: digest(json(proposal)), reviewedAt: new Date().toISOString() };
+    const receipts = await reviewedReconciliationReceipts(a.config, f.foundation, current, proposal.sourceSha256, f.lookup);
+    assignmentPhase = buildPhase(a.config, 'assignments', contract, receipts, f.foundation, current);
+    for (const descriptor of assignmentPhase.resources) responses.set(descriptor.id, null);
+    const definitions = fixtureAssignmentRoleReads(a.config);
+    for (const [id, value] of definitions.resources) responses.set(id, value);
+    const providerTypes = {
+      'Microsoft.App': ['managedEnvironments', 'containerApps'], 'Microsoft.ContainerRegistry': ['registries'],
+      'Microsoft.ManagedIdentity': [], 'Microsoft.OperationalInsights': ['workspaces'], 'Microsoft.Insights': ['dataCollectionRules'],
+      'Microsoft.Consumption': [], 'Microsoft.Authorization': [],
+    };
+    responses.set(`${rr.sub}/providers`, { value: Object.entries(providerTypes).map(([namespace, types]) =>
+      ({ namespace, registrationState: 'Registered', resourceTypes: types.map(resourceType => ({ resourceType, locations: ['Australia East'] })) })) });
+    responses.set(`${rr.sub}/providers/Microsoft.Authorization/permissions`, { value: [{ actions: ['*'], notActions: [] }] });
+    responses.set(`${rr.sub}/providers/Microsoft.Authorization/denyAssignments`, { value: [] });
+    responses.set(`${rr.sub}/providers/Microsoft.App/locations/${a.config.location}/usages`, { value: [] });
+    const proof = await checkReadOnly(a.config, assignmentPhase, a.origin, receipts, directory,
+      { ...evidence, reconciliation: current }, invoke, f.lookup);
+    const saved = await load(directory, 'assignments-role-definitions.json');
+    assert.equal(proof.roleDefinitionsSha256, digest(json(saved.roles)));
+    assert.equal(proof.foundationBaselineSha256, a.origin.policyBaselineSha256);
+    assert.equal(proof.baselineSha256, digest(json({ foundationBaselineSha256: proof.foundationBaselineSha256, roleDefinitionsSha256: proof.roleDefinitionsSha256 })));
+    assert.notEqual(proof.baselineSha256, a.origin.policyBaselineSha256);
+  });
   responses.get(rr.workspace).properties.customerId = a.config.operatorPrincipalId;
   await assert.rejects(verifyFreshReconciliation(a.config, directory, current, invoke), /RESOURCE_IDENTITY_CHANGED/);
-  assert(calls.every(args => args[0] === 'account' || args[args.indexOf('--method') + 1] === 'GET'));
+  assert(calls.every(args => args[0] === 'account' || args[0] === 'deployment' || args[args.indexOf('--method') + 1] === 'GET'));
   verifyDeploymentIdentity(f.origins.records[1].firstReadback.deployment, proposal.results.core.deployment);
 });
 test('CLI refuses to prepare, preview or execute already-deployed phases before any Azure call', async t => {
@@ -834,11 +978,11 @@ test('CLI refuses to prepare, preview or execute already-deployed phases before 
     'foundation-budgets.json': f.foundation, 'receipts.json': {}, 'execution-origins-v2.json': f.origins })) await saveImmutable(directory, name, value);
   const untrusted = Object.entries(process.env).some(([key, value]) => value && /^(CI$|GITHUB_|ACTIONS_|RUNNER_)/u.test(key));
   for (const operation of ['prepare', 'check', 'validate-preview', 'execute']) {
-    for (const phase of ['core', 'project-budget', 'workspace-access', 'data']) await assert.rejects(
+    for (const phase of ['core', 'project-budget', 'workspace-access', 'data', 'upload-role']) await assert.rejects(
       promisify(execFile)(process.execPath, ['infrastructure/arm/telemetry/controller.mjs', operation, phase, directory]),
       error => error.code === 1 && error.stderr.trim() === (untrusted ? 'UNTRUSTED_RUNNER_FORBIDDEN' : 'COMPLETED_PHASE_REQUIRES_RECONCILIATION'));
   }
-  await assert.rejects(promisify(execFile)(process.execPath, ['infrastructure/arm/telemetry/controller.mjs', 'qualify-reconciliation', 'data', directory]),
+  await assert.rejects(promisify(execFile)(process.execPath, ['infrastructure/arm/telemetry/controller.mjs', 'qualify-reconciliation', 'upload-role', directory]),
     error => error.code === 1 && error.stderr.trim() === (untrusted ? 'UNTRUSTED_RUNNER_FORBIDDEN' : 'RECONCILIATION_REVIEW_REQUIRED'));
   assert.equal(await load(directory, 'reconciliation-receipts.json', true), null);
   assert.equal(await load(directory, 'core-journal.json', true), null);
@@ -873,6 +1017,33 @@ test('transport absence handling does not convert auth/quota/general strings int
   await assert.rejects(arm('PUT', r.workspace, '2023-09-01'), /FIXED_PHASE/);
   await assert.rejects(arm('POST', r.registry + '/listCredentials', '2023-07-01'), /NONMUTATING/);
   await assert.rejects(arm('DELETE', r.group, '2024-03-01'), /FORBIDDEN/);
+});
+test('RoleAssignmentNotFound is absence only for exact GET scoped UUID resources in the selected subscription', async () => {
+  const error = stderr => async () => { throw Object.assign(new Error('private failure'), { stderr }); };
+  const absent = 'ERROR: Not Found({"error":{"code":"RoleAssignmentNotFound","message":"The role assignment was not found."}})';
+  const path = `${r.registry}/providers/Microsoft.Authorization/roleAssignments/${c.runId}`;
+  const args = (url, method = 'GET', subscription = c.subscriptionId) =>
+    ['rest', '--method', method, '--url', url, '--subscription', subscription];
+  for (const scope of [r.registry, r.dcr, r.workspace]) {
+    assert.equal(await az(args(`https://management.azure.com${scope}/providers/Microsoft.Authorization/roleAssignments/${c.runId}?api-version=2022-04-01`), 10, error(absent)), null);
+  }
+  const url = `https://management.azure.com${path}?api-version=2022-04-01`;
+  for (const method of ['PUT', 'POST', 'DELETE']) await assert.rejects(az(args(url, method), 10, error(absent)), /ARM_OPERATION_FAILED/);
+  for (const badUrl of [
+    `https://management.azure.com${r.sub}/providers/Microsoft.Authorization/roleAssignments/${c.runId}?api-version=2022-04-01`,
+    `https://management.azure.com${r.group}/providers/Microsoft.Authorization/roleAssignments/${c.runId}?api-version=2022-04-01`,
+    `https://management.azure.com${r.group}/providers/Microsoft.Storage/storageAccounts/example/providers/Microsoft.Authorization/roleAssignments/${c.runId}?api-version=2022-04-01`,
+    url.replace(c.runId, '-'.repeat(36)), url.replace(c.runId, 'not-a-guid'), url + '&other=value',
+    url.replace('2022-04-01', '2024-08-01'), url.replace('2022-04-01', '2022-04-01-preview'),
+    url.replace('https:', 'http:'), url.replace('/providers/Microsoft.Authorization/roleAssignments/', '/providers/Microsoft.Authorization/roleDefinitions/'),
+  ]) await assert.rejects(az(args(badUrl), 10, error(absent)), /ARM_OPERATION_FAILED/);
+  await assert.rejects(az(args(url, 'GET', c.tenantId), 10, error(absent)), /ARM_OPERATION_FAILED/);
+  await assert.rejects(az(args(url).slice(0, 5), 10, error(absent)), /ARM_OPERATION_FAILED/);
+  for (const text of [
+    'ERROR: Forbidden({"error":{"code":"RoleAssignmentNotFound"}})', 'ERROR: Unauthorized({"error":{"code":"RoleAssignmentNotFound"}})',
+    'ERROR: Too Many Requests({"error":{"code":"RoleAssignmentNotFound"}})', 'ERROR: Not Found({"error":{"code":"AuthorizationFailed"}})',
+    'ERROR: RoleAssignmentNotFound', 'ERROR: {"error":{"code":"RoleAssignmentNotFound"}}',
+  ]) await assert.rejects(az(args(url), 10, error(text)), /ARM_OPERATION_FAILED/);
 });
 test('forbidden ARM operations match complete components in every position without precedence gaps', async () => {
   let calls = 0;

@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
-import { assertOwned, assertBudget, BUDGET, buildPhase, budgetConfiguration, closed, digest, fail, ids, json, LIMITS, PHASES, RECEIVER_COMMAND, requireAccess, sameId, projectBudgetFilter } from './definition.mjs';
+import { assertOwned, assertBudget, BUDGET, buildPhase, budgetConfiguration, closed, digest, fail, ids, json, LIMITS, PHASES, RECEIVER_COMMAND, requireAccess, sameId, projectBudgetFilter, uploadRoleProperties } from './definition.mjs';
 export { assertBudget, notificationKeys } from './definition.mjs';
 
 const REVIEW_HASH_FIELDS = ['configSha256', 'phaseSha256', 'sourceSha256', 'originSha256', 'receiptsSha256', 'baselineSha256', 'whatIfSha256'];
@@ -32,6 +32,9 @@ export function verifyFreshReview(proof, approval, checkStartedAt, now) {
       !Number.isSafeInteger(checkStartedAt) || !Number.isSafeInteger(proof.startedAt) || !Number.isSafeInteger(proof.completedAt) ||
       proof.startedAt < checkStartedAt || proof.completedAt < proof.startedAt || proof.completedAt > now ||
       now - proof.startedAt > 300000) fail('FRESH_REVIEW_MISMATCH');
+  if (approval.action === 'direct-arm-assignments' &&
+      (!/^[0-9a-f]{64}$/u.test(proof.foundationBaselineSha256 ?? '') || !/^[0-9a-f]{64}$/u.test(proof.roleDefinitionsSha256 ?? '') ||
+        proof.baselineSha256 !== digest(json({ foundationBaselineSha256: proof.foundationBaselineSha256, roleDefinitionsSha256: proof.roleDefinitionsSha256 })))) fail('FRESH_ROLE_REVIEW_MISMATCH');
 }
 export function canonicalInstant(value) {
   const time = typeof value === 'string' ? Date.parse(value) : NaN;
@@ -63,9 +66,13 @@ export function executionIdentity(value, expectedType) {
     identity.immutableId = p.immutableId;
     identity.logsIngestion = p.endpoints?.logsIngestion;
     if (!/^dcr-[0-9a-f]{32}$/u.test(identity.immutableId ?? '') || typeof identity.logsIngestion !== 'string') fail('GENERATED_IDENTITY_REQUIRED');
+  } else if (type === 'microsoft.authorization/roledefinitions') {
+    identity.createdAt = p.createdOn ?? null;
+    identity.roleGuid = value.name;
+    if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/u.test(identity.roleGuid ?? '')) fail('GENERATED_IDENTITY_REQUIRED');
   }
   if (['microsoft.containerregistry/registries', 'microsoft.operationalinsights/workspaces', 'microsoft.app/managedenvironments',
-    'microsoft.operationalinsights/workspaces/tables', 'microsoft.insights/datacollectionrules'].includes(type) &&
+    'microsoft.operationalinsights/workspaces/tables', 'microsoft.insights/datacollectionrules', 'microsoft.authorization/roledefinitions'].includes(type) &&
       (typeof identity.createdAt !== 'string' || !Number.isFinite(Date.parse(identity.createdAt)))) fail('CREATION_TIME_REQUIRED');
   return identity;
 }
@@ -80,7 +87,7 @@ function historicalTemplate(c, phase) {
   }
   return copy;
 }
-export const RECONCILABLE_PHASES = Object.freeze(PHASES.slice(0, 4));
+export const RECONCILABLE_PHASES = Object.freeze(PHASES.slice(0, 5));
 function prerequisiteWorkspace(c, receipts) {
   return receipts['workspace-access']?.resources?.[ids(c).workspace] ?? receipts.core?.resources?.[ids(c).workspace] ?? null;
 }
@@ -206,7 +213,7 @@ export function verifyReconciliation(c, foundation, origins, proposal, sourceSha
         const metadata = proposal.inventory.value.filter(v => sameId(v.id, descriptor.id));
         const creation = origins.records.find(v => v.whatIf.changes.some(change => sameId(change.resourceId, descriptor.id) && change.changeType === 'Create'));
         const created = metadata.length === 1 ? Date.parse(metadata[0].createdTime)
-          : metadata.length === 0 && descriptor.type === 'Microsoft.OperationalInsights/workspaces/tables' ? Date.parse(pin.createdAt) : NaN;
+          : metadata.length === 0 && ['Microsoft.OperationalInsights/workspaces/tables', 'Microsoft.Authorization/roleDefinitions'].includes(descriptor.type) ? Date.parse(pin.createdAt) : NaN;
         if (!creation || !Number.isFinite(created) || created < canonicalInstant(creation.journal.intentAt) ||
             created > canonicalInstant(proposal.checkedAt)) fail('CREATION_TIME_OUTSIDE_EXECUTION');
       }
@@ -318,6 +325,29 @@ function columnsWithDisplayMetadata(actual, expected) {
     Object.keys(column).every(k => ['name', 'type', 'isDefaultDisplay', 'isHidden'].includes(k)) &&
     ['isDefaultDisplay', 'isHidden'].every(k => !Object.hasOwn(column, k) || typeof column[k] === 'boolean'));
 }
+export function roleDefinitionSignature(c, target, actual) {
+  const p = actual?.properties;
+  if (!sameId(actual?.id, target.roleDefinitionId) || !sameId(actual?.type, 'Microsoft.Authorization/roleDefinitions') ||
+      !sameId(actual?.name, target.roleDefinitionId.split('/').at(-1)) ||
+      p?.type !== target.roleType || p.roleName !== target.roleName || !Array.isArray(p.permissions) || !p.permissions.length ||
+      typeof p.createdOn !== 'string' || !Number.isFinite(Date.parse(p.createdOn)) ||
+      !Array.isArray(p.assignableScopes) || !p.assignableScopes.length || p.assignableScopes.some(v => typeof v !== 'string' || !v)) fail('ASSIGNMENT_ROLE_IDENTITY_MISMATCH');
+  if (target.roleType === 'CustomRole') {
+    const expected = uploadRoleProperties(c);
+    if (!isDeepStrictEqual(p.permissions, expected.permissions) || !isDeepStrictEqual(p.assignableScopes, expected.assignableScopes)) fail('UPLOAD_ROLE_SCOPE_DRIFT');
+  }
+  if (!p.assignableScopes.some(scope => scope === '/' || sameId(scope, target.scope) ||
+      target.scope.toLowerCase().startsWith(scope.toLowerCase() + '/'))) fail('ASSIGNMENT_ROLE_SCOPE_MISMATCH');
+  const permissions = p.permissions.map(value => {
+    closed(value, ['actions', 'notActions', 'dataActions', 'notDataActions']);
+    return Object.fromEntries(['actions', 'notActions', 'dataActions', 'notDataActions'].map(key => {
+      if (!Array.isArray(value[key]) || value[key].some(v => typeof v !== 'string')) fail('ASSIGNMENT_ROLE_PERMISSIONS_INVALID');
+      return [key, value[key]];
+    }));
+  });
+  return { scope: target.scope, roleDefinitionId: target.roleDefinitionId, roleName: p.roleName,
+    roleType: p.type, createdAt: p.createdOn, permissions, assignableScopes: p.assignableScopes };
+}
 export function verifyResource(c, phase, descriptor, actual, context = {}) {
   const r = ids(c), expected = descriptor.expected, p = actual?.properties;
   if (!sameId(actual?.id, descriptor.id)) fail('RESOURCE_ID_MISMATCH');
@@ -372,7 +402,7 @@ export function verifyResource(c, phase, descriptor, actual, context = {}) {
     if (phase.phase === 'project-budget') assertBudget(actual, c, c.budget.projectAmount, projectBudgetFilter(c));
     else assertBudget(actual, c, c.budget.telemetryAmount);
   } else if (expected.type === 'Microsoft.Authorization/roleDefinitions') {
-    if (p.roleName !== expected.properties.roleName || !isDeepStrictEqual(p.permissions, expected.properties.permissions) ||
+    if (p.type !== 'CustomRole' || p.roleName !== expected.properties.roleName || !isDeepStrictEqual(p.permissions, expected.properties.permissions) ||
         !isDeepStrictEqual(p.assignableScopes, [r.group])) fail('UPLOAD_ROLE_SCOPE_DRIFT');
   } else if (expected.type === 'Microsoft.Authorization/roleAssignments') {
     if (!sameId(p.scope, expected.scope) || p.principalId !== expected.properties.principalId ||

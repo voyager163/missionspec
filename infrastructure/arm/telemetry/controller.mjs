@@ -7,9 +7,9 @@ import { basename, dirname, resolve, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual, types } from 'node:util';
 import { PHASES, buildPhase, deploymentName, validateConfig, ids, digest, json, fail, sameId, storageContract, firstReleaseCost, assertOwned, RECEIVER_COMMAND,
-  closed, budgetConfiguration, projectBudgetFilter, verifyFoundationBudgets, reconciliationBinding } from './definition.mjs';
+  closed, budgetConfiguration, projectBudgetFilter, verifyFoundationBudgets, reconciliationBinding, assignmentRoleTargets } from './definition.mjs';
 import { assertBudget, verifyWhatIf, verifyResource, verifyApproval, verifyFreshReview, sourceContractsSummary, permitFirstPush,
-  executionIdentity, verifyExecutionOrigins, verifyReconciliation, verifyDeploymentIdentity } from './policy.mjs';
+  executionIdentity, verifyExecutionOrigins, verifyReconciliation, verifyDeploymentIdentity, roleDefinitionSignature } from './policy.mjs';
 
 const execute = promisify(execFile), here = dirname(fileURLToPath(import.meta.url));
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -168,6 +168,9 @@ export async function az(args, timeout = 60000, run = execute) {
         /^https:\/\/management\.azure\.com\/subscriptions\/[0-9a-f-]{36}(?:\/resourceGroups\/[a-z0-9-]+)?\/providers\/Microsoft\.Consumption\/budgets\/[a-z0-9-]+\?api-version=2024-08-01$/u.test(args[args.indexOf('--url') + 1] ?? '')) return null;
     if (args[0] === 'rest' && args[args.indexOf('--method') + 1] === 'GET' && status === 404 && code === 'RoleDefinitionDoesNotExist' &&
         /^https:\/\/management\.azure\.com\/subscriptions\/[0-9a-f-]{36}\/providers\/Microsoft\.Authorization\/roleDefinitions\/[0-9a-f-]{36}\?api-version=2022-04-01$/u.test(args[args.indexOf('--url') + 1] ?? '')) return null;
+    const assignment = /^https:\/\/management\.azure\.com\/subscriptions\/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\/resourceGroups\/[a-z0-9-]+\/providers\/(?:Microsoft\.ContainerRegistry\/registries\/[a-z0-9]+|Microsoft\.Insights\/dataCollectionRules\/[a-z0-9-]+|Microsoft\.OperationalInsights\/workspaces\/[a-z0-9-]+)\/providers\/Microsoft\.Authorization\/roleAssignments\/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\?api-version=2022-04-01$/iu.exec(args[args.indexOf('--url') + 1] ?? '');
+    if (args[0] === 'rest' && args[args.indexOf('--method') + 1] === 'GET' && status === 404 && code === 'RoleAssignmentNotFound' &&
+        assignment && sameId(assignment[1], args[args.indexOf('--subscription') + 1])) return null;
     const safe = new Error('ARM_OPERATION_FAILED'); safe.armCode = code; safe.httpStatus = status; throw safe;
   }
 }
@@ -175,7 +178,7 @@ export function transport(c, phase, directory, invoke = az) {
   const r = ids(c);
   const forbiddenOperations = new Set(['listkeys', 'listsecrets', 'listaccountsas', 'listservicesas', 'regeneratekey', 'register']);
   const diagnosticTargets = [r.workspace, r.environment, r.app].map(id => id + '/providers/Microsoft.Insights/diagnosticSettings');
-  return async (method, id, version, body, filter, beforeDispatch) => {
+  return async (method, id, version, body, filter, beforeDispatch, beforeAssignmentWrite) => {
     const diagnosticRead = diagnosticTargets.includes(id) && method === 'GET' && version === DIAGNOSTIC_API && body === undefined && filter === undefined;
     if (!['GET', 'POST', 'PUT'].includes(method) || (id !== r.sub && !id.startsWith(`${r.sub}/`)) ||
         /[?#\\]|\.\.|%/u.test(id) || (!/^\d{4}-\d{2}-\d{2}$/u.test(version) && !diagnosticRead) ||
@@ -183,6 +186,8 @@ export function transport(c, phase, directory, invoke = az) {
         id.split('/').some(component => forbiddenOperations.has(component.toLowerCase()))) fail('ARM_SCOPE_FORBIDDEN');
     if (method === 'PUT' && id !== phase.deploymentId) fail('FIXED_PHASE_PUT_ONLY');
     if (method === 'PUT' && (typeof beforeDispatch !== 'function' || types.isAsyncFunction(beforeDispatch))) fail('DISPATCH_GUARD_REQUIRED');
+    if (method === 'PUT' && phase.phase === 'assignments' && typeof beforeAssignmentWrite !== 'function') fail('ASSIGNMENT_ROLE_READBACK_REQUIRED');
+    if (beforeAssignmentWrite !== undefined && (method !== 'PUT' || phase.phase !== 'assignments')) fail('ASSIGNMENT_ROLE_READBACK_ONLY');
     if (method === 'POST' && id !== `${r.sub}/providers/Microsoft.ContainerRegistry/checkNameAvailability`) fail('NONMUTATING_POST_ONLY');
     const inventoryMetadata = method === 'GET' && id === `${r.group}/resources` && version === '2021-04-01' &&
       body === undefined && filter === '$expand=createdTime,changedTime';
@@ -195,6 +200,10 @@ export function transport(c, phase, directory, invoke = az) {
       args.push('--body', '@' + resolve(directory, name), '--headers', 'Content-Type=application/json');
     }
     try {
+      if (method === 'PUT' && phase.phase === 'assignments') {
+        if (beforeDispatch() !== undefined) fail('DISPATCH_GUARD_REQUIRED');
+        await beforeAssignmentWrite();
+      }
       // No await between the guard and transport invocation, including body-file preparation.
       if (method === 'PUT' && beforeDispatch() !== undefined) fail('DISPATCH_GUARD_REQUIRED');
       const result = await invoke(args);
@@ -297,6 +306,27 @@ export async function readPrivacy(c, phase, arm) {
   }
   return { diagnostics, exports };
 }
+export async function readAssignmentRoleDefinitions(c, phase, arm, uploadRoleReceipt) {
+  const targets = assignmentRoleTargets(c), r = ids(c);
+  if (phase.phase !== 'assignments' || phase.resources.length !== targets.length) fail('EXACT_ASSIGNMENT_SCOPES_REQUIRED');
+  if (uploadRoleReceipt?.qualified !== true || uploadRoleReceipt.configSha256 !== digest(json(c)) ||
+      !uploadRoleReceipt.resources?.[r.uploadRole]) fail('UPLOAD_ROLE_RECEIPT_REQUIRED');
+  const roles = [], readbacks = [];
+  // Check the mutable custom role last, immediately before the dispatch guard in the write path.
+  for (const target of targets) {
+    const matches = phase.resources.filter(v => sameId(v.expected.scope, target.scope));
+    const properties = matches[0]?.expected?.properties;
+    if (matches.length !== 1 || !sameId(properties?.roleDefinitionId, target.roleDefinitionId) ||
+        properties.principalType !== (target.scope === r.workspace ? 'User' : 'ServicePrincipal') ||
+        (target.scope === r.workspace && properties.principalId !== c.operatorPrincipalId)) fail('EXACT_ASSIGNMENT_SCOPES_REQUIRED');
+    const resource = await arm('GET', `${target.scope}/providers/Microsoft.Authorization/roleDefinitions/${target.roleDefinitionId.split('/').at(-1)}`, '2022-04-01');
+    if (target.roleType === 'CustomRole' && !isDeepStrictEqual(executionIdentity(resource, 'Microsoft.Authorization/roleDefinitions'),
+      executionIdentity(uploadRoleReceipt.resources[r.uploadRole], 'Microsoft.Authorization/roleDefinitions'))) fail('UPLOAD_ROLE_IDENTITY_CHANGED');
+    roles.push(roleDefinitionSignature(c, target, resource));
+    readbacks.push({ scope: target.scope, resource });
+  }
+  return { roles, readbacks };
+}
 async function readReconciledPhase(c, record, arm, context = {}) {
   const phase = record.phase, deployment = await arm('GET', phase.deploymentId, '2022-09-01'), resources = {}, identityPins = {};
   verifyDeploymentIdentity(record.firstReadback.deployment, deployment);
@@ -391,14 +421,14 @@ export async function validateReadOnly(c, phase, receipts, directory, invoke = a
   await save(directory, `${phase.phase}-what-if.json`, whatif);
   return { whatIfSha256: verifyWhatIf(phase, whatif, known), templateValidationOnly: true };
 }
-export async function checkReadOnly(c, phase, origin, receipts, directory, evidenceFiles, invoke = az) {
+export async function checkReadOnly(c, phase, origin, receipts, directory, evidenceFiles, invoke = az, lookup = publishedSourceDigest) {
   const started = Date.now(), arm = transport(c, phase, directory, invoke), r = ids(c);
   const foundation = verifyFoundationBudgets(c, evidenceFiles.foundationBudgets);
   if (evidenceFiles.reconciliation?.origins?.records.some(v => v.phase.phase === phase.phase)) fail('COMPLETED_PHASE_REQUIRES_RECONCILIATION');
   const source = await sourceDigest();
   let reconciled = {};
   if (evidenceFiles.reconciliation?.origins) {
-    reconciled = await reviewedReconciliationReceipts(c, foundation, evidenceFiles.reconciliation, source);
+    reconciled = await reviewedReconciliationReceipts(c, foundation, evidenceFiles.reconciliation, source, lookup);
     if (!isDeepStrictEqual(phase.reconciliation, reconciliationBinding(evidenceFiles.reconciliation)) ||
         Object.entries(reconciled).some(([name, value]) => !isDeepStrictEqual(receipts[name], value))) fail('RECONCILIATION_RECEIPTS_REQUIRED');
   }
@@ -455,11 +485,19 @@ export async function checkReadOnly(c, phase, origin, receipts, directory, evide
   assertBudget(await arm('GET', r.projectBudget, '2024-08-01'), c,
     phase.phase === 'project-budget' ? c.budget.previousProjectAmount : c.budget.projectAmount, projectBudgetFilter(c));
   assertBudget(await arm('GET', r.stateBudget, '2024-08-01'), c, c.budget.stateAmount);
+  let roleDefinitionsSha256;
+  if (phase.phase === 'assignments') {
+    const definitions = await readAssignmentRoleDefinitions(c, phase, arm, receipts['upload-role']);
+    roleDefinitionsSha256 = digest(json(definitions.roles));
+    await save(directory, 'assignments-role-definitions.json', { checkedAt: new Date().toISOString(), ...definitions, roleDefinitionsSha256 });
+  }
   const { whatIfSha256 } = await validateReadOnly(c, phase, receipts, directory, invoke);
   const cost = firstReleaseCost(1);
   const proof = { startedAt: started, completedAt: Date.now(), qualified: cost.withinEstimate, configSha256: digest(json(c)),
     phaseSha256: digest(json(phase)), sourceSha256: await sourceDigest(), originSha256: digest(json(origin)),
-    receiptsSha256: digest(json(receipts)), baselineSha256: baseline, whatIfSha256,
+    receiptsSha256: digest(json(receipts)),
+    baselineSha256: roleDefinitionsSha256 ? digest(json({ foundationBaselineSha256: baseline, roleDefinitionsSha256 })) : baseline, whatIfSha256,
+    ...(roleDefinitionsSha256 ? { foundationBaselineSha256: baseline, roleDefinitionsSha256 } : {}),
     cost, computedValuesReviewed: phase.computedReadbacksRequired.length === 0 };
   await save(directory, `${phase.phase}-preflight.json`, proof);
   if (!cost.withinEstimate) fail('FIRST_RELEASE_COST_EXCEEDS_ESTIMATE');
@@ -476,6 +514,11 @@ export class CollectorController {
     const proof = await this.io.check();
     const beforeDispatch = () => { verifyFreshReview(proof, approval, checkStartedAt, this.io.now()); };
     beforeDispatch();
+    if (p.phase === 'assignments' && typeof this.io.assignmentRoleDefinitions !== 'function') fail('ASSIGNMENT_ROLE_READBACK_REQUIRED');
+    const beforeAssignmentWrite = p.phase === 'assignments' ? async () => {
+      const current = await this.io.assignmentRoleDefinitions();
+      if (digest(json(current.roles)) !== proof.roleDefinitionsSha256) fail('ASSIGNMENT_ROLE_DEFINITION_DRIFT');
+    } : undefined;
     if (await this.io.arm('GET', p.deploymentId, '2022-09-01')) fail('DEPLOYMENT_NAME_EXISTS');
     beforeDispatch();
     const journal = { phase: p.phase, phaseSha256: approval.phaseSha256, intentAt: new Date(this.io.now()).toISOString(), outcome: 'submission-possible' };
@@ -484,7 +527,7 @@ export class CollectorController {
       beforeDispatch();
       await this.io.arm('PUT', p.deploymentId, '2022-09-01',
         { ...(p.scope === ids(this.config).sub ? { location: this.config.location } : {}),
-          properties: { mode: 'Incremental', template: p.template } }, undefined, beforeDispatch);
+          properties: { mode: 'Incremental', template: p.template } }, undefined, beforeDispatch, beforeAssignmentWrite);
       while (this.io.now() < Date.parse(approval.expiresAt)) {
         const d = await this.io.arm('GET', p.deploymentId, '2022-09-01');
         const state = d?.properties?.provisioningState;
@@ -584,6 +627,7 @@ async function main() {
     const arm = transport(c, phase, directory);
     const controller = new CollectorController(c, phase, {
       now: Date.now, sourceDigest, sleep: pause, arm,
+      assignmentRoleDefinitions: () => readAssignmentRoleDefinitions(c, phase, arm, receipts['upload-role']),
       loadJournal: () => load(directory, `${phaseName}-journal.json`, true),
       saveJournal: value => save(directory, `${phaseName}-journal.json`, value),
       check: () => checkReadOnly(c, phase, origin, receipts, directory, evidenceFiles),

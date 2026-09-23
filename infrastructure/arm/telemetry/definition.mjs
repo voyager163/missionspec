@@ -91,6 +91,19 @@ export function budgetProperties(c, amount) {
 export function projectBudgetFilter(c) {
   return { dimensions: { name: 'ResourceGroupName', operator: 'In', values: ['telemetry', 'state', 'managed'].map(s => `${c.namePrefix}-${s}`) } };
 }
+export function uploadRoleProperties(c) {
+  return { roleName: `${c.namePrefix}-dcr-upload-only`, description: 'Only upload to the intended MissionSpec DCR.',
+    type: 'CustomRole', permissions: [{ actions: [], notActions: [], dataActions: ['Microsoft.Insights/Telemetry/Write'], notDataActions: [] }],
+    assignableScopes: [ids(c).group] };
+}
+export function assignmentRoleTargets(c) {
+  const r = ids(c);
+  return [
+    { scope: r.registry, roleDefinitionId: `${r.sub}/providers/Microsoft.Authorization/roleDefinitions/7f951dda-4ed3-4680-a7ca-43fe172d538d`, roleName: 'AcrPull', roleType: 'BuiltInRole' },
+    { scope: r.workspace, roleDefinitionId: `${r.sub}/providers/Microsoft.Authorization/roleDefinitions/73c42c96-874c-492b-b04d-ab87d138a893`, roleName: 'Log Analytics Reader', roleType: 'BuiltInRole' },
+    { scope: r.dcr, roleDefinitionId: r.uploadRole, roleName: `${c.namePrefix}-dcr-upload-only`, roleType: 'CustomRole' },
+  ];
+}
 export function notificationKeys(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) fail('BUDGET_NOTIFICATIONS_INVALID');
   const result = {};
@@ -237,11 +250,7 @@ export function buildPhase(c, phase, contract, receipts = {}, foundation, source
   }
   if (phase === 'upload-role') {
     bindPrior(c, receipts, 'data', r.dcr); scope = r.sub;
-    resources = [resource('Microsoft.Authorization/roleDefinitions', '2022-04-01', r.uploadRole.split('/').at(-1), {
-      roleName: `${c.namePrefix}-dcr-upload-only`, description: 'Only upload to the intended MissionSpec DCR.',
-      type: 'CustomRole', permissions: [{ actions: [], notActions: [], dataActions: ['Microsoft.Insights/Telemetry/Write'], notDataActions: [] }],
-      assignableScopes: [r.group],
-    })];
+    resources = [resource('Microsoft.Authorization/roleDefinitions', '2022-04-01', r.uploadRole.split('/').at(-1), uploadRoleProperties(c))];
   }
   if (phase === 'assignments') {
     requireAccess(bindPrior(c, receipts, 'workspace-access', r.workspace));

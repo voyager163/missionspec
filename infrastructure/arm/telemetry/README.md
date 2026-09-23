@@ -13,7 +13,10 @@ collector phases; `prepare` makes no cloud calls, and `check`/`validate-preview`
 perform only nonmutating reads and ARM validation/what-if. No checked-in file
 contains deployment authority or account-specific configuration.
 
-The completed budget/core/workspace-access/data sequence uses `reconcile data`
-for a read-only, unapproved version-2 proposal. `qualify-reconciliation data` requires a separate exact
+The completed budget/core/workspace-access/data/upload-role sequence uses
+`reconcile upload-role` for a read-only, unapproved version-2 proposal.
+`qualify-reconciliation upload-role` requires a separate exact
 parent review and repeats live reads before issuing new read-only receipts.
 Neither command deploys resources or rewrites original execution history.
+Assignment grants additionally require fresh scoped role-definition checks
+bound to the approval and repeated after request-body preparation.

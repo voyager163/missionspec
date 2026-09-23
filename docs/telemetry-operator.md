@@ -41,7 +41,7 @@ paths, so the local operator and private directory remain part of the trust boun
 
 ```sh
 node --test infrastructure/arm/telemetry/tests/*.test.mjs
-node infrastructure/arm/telemetry/controller.mjs reconcile data infrastructure/arm/telemetry/.operator-private/revision-20260923-data-reconcile
+node infrastructure/arm/telemetry/controller.mjs reconcile upload-role infrastructure/arm/telemetry/.operator-private/revision-20260923-assignment-absence
 ```
 
 `prepare` is local. `check` rechecks account/permissions/providers/region/quota,
@@ -80,8 +80,11 @@ succeeded under `fa92e9b` with a qualified receipt. Data then reached ARM
 `Succeeded` under the same source, but its strict readback stopped on Table
 display metadata and the DCR's computed workspace ID. Its original
 `reconciliation-required` journal and absent success receipt remain unchanged.
+The custom upload-role definition later succeeded and qualified under `4ee9324`.
+Its original source, approval, journal and receipt remain unchanged. No role
+assignment is implied by defining that role.
 
-One versioned contract now covers these **four existing phases**, rather than
+One versioned contract now covers these **five existing phases**, rather than
 adding per-source trust exceptions:
 
 1. `execution-origins-v2.json` contains immutable records of the original
@@ -97,7 +100,7 @@ adding per-source trust exceptions:
    byte-for-byte. Fixed Git blob reads verify each declared source hash and its
    ancestry in the repository; historical code is never executed. The parent
    independently confirms publication and scanner results.
-2. `reconcile data` uses only scoped GETs for all recorded completed phases.
+2. `reconcile upload-role` uses only scoped GETs for all recorded completed phases.
    The command names the latest phase in the recorded sequence. It verifies the original approval's
    validity **at intent time**, full phase/config/preflight bindings, validated
    ARM template hash and successful deployment identity. It rereads the exact
@@ -111,7 +114,7 @@ adding per-source trust exceptions:
    current source/proposal and cannot predate the snapshot or lie in the future.
    There is no force flag, inferred approval, or automatic historical-source
    exception.
-4. Only then may `qualify-reconciliation data` repeat the live read-only checks
+4. Only then may `qualify-reconciliation upload-role` repeat the live read-only checks
    and write **new** `reconciliation-receipts.json` and a qualification record.
    These explicitly identify a reviewed read-only reconciliation, retain the
    original executed source and journal outcome, and distinguish legacy receipt
@@ -152,6 +155,39 @@ write is **never replayed**, nor repaired by deleting a resource group. Preserve
 its journal and exact owned resources for read-only reconciliation and a new
 reviewed decision. ARM operations can outlive the local request; budget alerts
 are not cancellation or a hard cap.
+
+### Assignment absence and mutable role definitions
+
+`RoleAssignmentNotFound` is treated as absence only when Azure returns HTTP 404
+for GET API `2022-04-01`, the URL has a canonical role-assignment UUID beneath a
+registry, DCR or workspace resource, and its subscription matches the explicitly
+selected subscription. Wrong methods, APIs, paths, subscription, auth failures
+and throttling remain failures. This is an absence read, not authority to grant.
+
+Before assignment review, the controller reads the actual `AcrPull` definition
+at the registry, `Log Analytics Reader` at the workspace, and the custom upload
+definition at the DCR. Built-in GUID, name, type and scope availability must
+match; the custom role must still have its recorded creation identity, the sole
+`Microsoft.Insights/Telemetry/Write` data action, empty other permission arrays
+and only the owned telemetry-group assignable scope. A prior success receipt
+alone cannot establish that a mutable role still has the intended permissions.
+
+`assignments-role-definitions.json` preserves these scoped reads and canonical
+permission signatures. Assignment preflight records `roleDefinitionsSha256`
+and `foundationBaselineSha256`; its approval-bound `baselineSha256` hashes
+both, rather than reusing the foundation-only baseline. Full built-in permission
+lists are included, including any export-job capability in Log Analytics Reader.
+Their definition-wide assignable scope does not expand the three resource-scoped
+assignments, nor remove the operator's independently inherited Owner access.
+
+After intent persistence and request-body preparation, assignment dispatch
+requires another live read of all three definitions. The mutable custom role
+is read last. Any identity, permission or assignable-scope drift stops before
+PUT, leaving the intent for reconciliation. The existing synchronous
+expiry/preflight-freshness guard runs again after these awaited reads,
+immediately before transport invocation. These checks are not an atomic Azure
+role-version lock: an external administrator can still change a role after the
+last read, so concurrent role administration must remain controlled.
 
 ## Explicit phases
 
@@ -228,7 +264,8 @@ GUID when returned, and provider creation metadata are pinned to the original
 readbacks. ARM inventory `createdTime` supplies the execution-window check
 against each resource's original **Create**, not a later NoChange access update.
 The Table API's own creation stamp covers the child table when it is absent
-from generic ARM inventory. Inventory membership derives from recorded resource
+from generic ARM inventory; the subscription-level custom role's `createdOn`
+and role GUID are similarly pinned to its original readback. Inventory membership derives from recorded resource
 IDs across all completed phases; it is not a fixed five-resource assumption.
 The environment's provider `systemData.createdAt` differed from ARM inventory
 time in the observed response: it is retained exactly as an opaque immutable
