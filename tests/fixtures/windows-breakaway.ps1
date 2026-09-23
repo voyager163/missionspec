@@ -1,33 +1,18 @@
-param([string]$Program, [string]$WorkingDirectory)
+param([string]$Program, [string]$WorkingDirectory, [string]$Assembly, [string]$AssemblyDigest)
 $phase = 'bootstrap'
 $nativeStatus = 0
 try {
   . ($PSScriptRoot + '\..\..\assets\platform\windows-execution-native.ps1')
   try {
     if ([string]::IsNullOrEmpty($WorkingDirectory)) { throw 'working-directory' }
-    # A test-only compiled stub captures BOOL and last-error in one managed return.
-    Microsoft.PowerShell.Utility\Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-using System.Text;
-public sealed class BreakawayCreation {
-  public bool Created;
-  public int ErrorCode;
-}
-public static class BreakawayProbe {
-  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
-  private static extern bool CreateProcessW(string application, StringBuilder command,
-    IntPtr processAttributes, IntPtr threadAttributes, bool inheritHandles, uint flags,
-    IntPtr environment, string directory, IntPtr startup, IntPtr information);
-  public static BreakawayCreation Create(string application, StringBuilder command,
-    uint flags, string directory, IntPtr startup, IntPtr information) {
-    bool created = CreateProcessW(application, command, IntPtr.Zero, IntPtr.Zero,
-      false, flags, IntPtr.Zero, directory, startup, information);
-    int error = Marshal.GetLastWin32Error();
-    return new BreakawayCreation { Created = created, ErrorCode = error };
-  }
-}
-'@
+    $bytes = [IO.File]::ReadAllBytes($Assembly)
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try {
+      $observed = 'sha256:' + [BitConverter]::ToString($hash.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant()
+      if ($AssemblyDigest -cnotmatch '^sha256:[a-f0-9]{64}$' -or $observed -cne $AssemblyDigest) { throw 'probe-assembly' }
+    } finally { $hash.Dispose() }
+    # Compilation belongs to fixture setup, not the owned job's measured deadline.
+    [void][Reflection.Assembly]::Load($bytes)
     $startup = Memory 104
     [Runtime.InteropServices.Marshal]::WriteInt32($startup, 0, 104)
     $info = Memory 24

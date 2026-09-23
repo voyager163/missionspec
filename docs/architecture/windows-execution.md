@@ -148,6 +148,10 @@ unexplained last-error value cannot qualify breakaway denial. If creation
 succeeds, the fixture retains the exact PID and native creation time for
 identity-checked cleanup of only that test child. This fixture does
 not add a compiler or generated binary dependency to the production adapter.
+The fixture compiles its original P/Invoke stub before starting the timed check,
+then verifies and loads those exact bytes inside the helper. Compiler startup
+under runner contention must not consume the unchanged ten-second process
+deadline or masquerade as a containment failure.
 The process cases launch real programs and
 ordinary descendants, test output/timeout cancellation, parent death,
 breakaway refusal and held-path replacement. The integration cases use the real

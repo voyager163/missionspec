@@ -67,11 +67,15 @@ test('Breakaway fixture proves normal creation and retains the identity of an ac
   assert.doesNotMatch(source, /\[IntPtr\]::Zero, \$null, \$startup, \$info/u);
   assert.match(source, /if \(\$nativeStatus -ne 5\)/u);
   assert.match(source, /if \(\$nativeStatus -notin @\(3, 267\)\)/u);
-  assert.match(source, /DllImport\("kernel32.dll".*SetLastError = true/u);
-  const nativeCall = source.indexOf('bool created = CreateProcessW');
-  const errorCapture = source.indexOf('int error = Marshal.GetLastWin32Error()');
-  const wrapperReturn = source.indexOf('return new BreakawayCreation');
-  assert(nativeCall >= 0 && errorCapture > nativeCall && wrapperReturn > errorCapture && ordinary > wrapperReturn);
+  const stub = readFileSync(new URL('./fixtures/windows-breakaway-native.cs', import.meta.url), 'utf8');
+  assert.match(stub, /DllImport\("kernel32.dll".*SetLastError = true/u);
+  const nativeCall = stub.indexOf('bool created = CreateProcessW');
+  const errorCapture = stub.indexOf('int error = Marshal.GetLastWin32Error()');
+  const wrapperReturn = stub.indexOf('return new BreakawayCreation');
+  assert(nativeCall >= 0 && errorCapture > nativeCall && wrapperReturn > errorCapture);
+  assert.match(source, /\$observed -cne \$AssemblyDigest/u);
+  assert.match(source, /\[Reflection.Assembly\]::Load\(\$bytes\)/u);
+  assert.doesNotMatch(source, /Add-Type/u);
   assert.match(source, /setTimeout\(\(\)=>process\.exit\(0\),60000\)/u);
   assert.match(source, /\$native::GetProcessTimes\(\$child/u);
   assert.match(source, /'breakaway-child\.json'/u);
@@ -84,4 +88,5 @@ test('Breakaway fixture proves normal creation and retains the identity of an ac
   assert.match(cases, /stdio: \['ignore', 'inherit', 'inherit'\]/u);
   assert.match(cases, /helper\.once\('exit',/u);
   assert.doesNotMatch(cases, /\.spawnSync\(/u);
+  assert(cases.indexOf('const assemblyDigest = digest(assembly)') < cases.indexOf('const result = await executeWindowsCheck({ program,'));
 });

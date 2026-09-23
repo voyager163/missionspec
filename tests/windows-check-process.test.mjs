@@ -193,6 +193,15 @@ try {
     } finally { removeFixtureRoot(f.root, f.identity); }
   });
   windowsExecutionAsset('windows-check-process.ps1');
+  const assembly = path.join(f.root, 'breakaway-native.dll');
+  const compiled = powershell(String.raw`
+$request = [Console]::In.ReadToEnd() | Microsoft.PowerShell.Utility\ConvertFrom-Json
+if ([IO.File]::Exists([string]$request.output)) { throw 'probe-output-exists' }
+Microsoft.PowerShell.Utility\Add-Type -Path ([string]$request.source) -OutputAssembly ([string]$request.output)
+[Console]::Out.Write('{"compiled":true}')
+`, { source: path.resolve('tests/fixtures/windows-breakaway-native.cs'), output: assembly });
+  assert.deepEqual(compiled, { compiled: true });
+  const assemblyDigest = digest(assembly);
   t.diagnostic(`Fixed OS host: canonicalSpelling=${realpathSync.native(windowsPowerShell) === windowsPowerShell}; links=${lstatSync(windowsPowerShell).nlink}`);
   // Fixed machine-host validation does not prove an ordinary, single-link image.
   // Keep the held canonical Node image as the check and launch the fixed probe
@@ -200,11 +209,12 @@ try {
   const result = await executeWindowsCheck({ program, programDigest: digest(program), cwd: f.root, timeoutMs: 10_000, argv: ['-e', `
     const helper = require('node:child_process').spawn(process.argv[1],
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', process.argv[2],
-        '-Program', process.argv[3], '-WorkingDirectory', process.cwd()],
+        '-Program', process.argv[3], '-WorkingDirectory', process.cwd(),
+        '-Assembly', process.argv[4], '-AssemblyDigest', process.argv[5]],
       { shell: false, stdio: ['ignore', 'inherit', 'inherit'] });
     helper.once('error', () => process.exit(1));
     helper.once('exit', (code, signal) => process.exit(signal || code !== 0 ? 1 : 0));
-  `, '--', windowsPowerShell, path.resolve('tests/fixtures/windows-breakaway.ps1'), program] });
+  `, '--', windowsPowerShell, path.resolve('tests/fixtures/windows-breakaway.ps1'), program, assembly, assemblyDigest] });
   const failure = result.stdout.match(/^WINDOWS_BREAKAWAY_FAILURE:\{"phase":"(bootstrap|control-create|breakaway-create)","line":([0-9]{1,4}),"nativeStatus":(-?[0-9]{1,10})\}$/u);
   assert.equal(result.exitCode, 0, failure
     ? `breakaway phase=${failure[1]}; line=${failure[2]}; nativeStatus=${failure[3]}`
