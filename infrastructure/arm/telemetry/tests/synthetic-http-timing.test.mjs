@@ -16,7 +16,7 @@ function assertPrivate(result) {
   assert.deepEqual(Object.keys(result.timingsMs), keys);
   for (const value of Object.values(result.timingsMs)) assert(value === null || (Number.isFinite(value) && value >= 0 && value <= result.durationMs));
   const text = JSON.stringify(result);
-  for (const value of [secret, host, '127.0.0.1', 'localhost', 'Authorization', 'set-cookie']) assert(!text.includes(value), value);
+  for (const value of [secret, host, '127.0.0.1', 'localhost', 'Authorization', 'set-cookie', 'fixture-cookie']) assert(!text.includes(value), value);
   assert.equal(result.safeHeaders, undefined);
 }
 async function tlsFixture(t) {
@@ -40,7 +40,7 @@ async function tlsFixture(t) {
     }
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('Content-Type', secret);
-    response.setHeader('Set-Cookie', secret);
+    response.setHeader('Set-Cookie', 'fixture-cookie=public-test-value; Secure; HttpOnly; SameSite=Strict');
     response.setHeader('X-Private', secret);
     response.setHeader('Connection', 'close');
     if (mode === 'partial-body') {
