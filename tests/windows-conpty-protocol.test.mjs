@@ -73,7 +73,8 @@ test('Breakaway fixture proves normal creation and retains the identity of an ac
   const errorCapture = stub.indexOf('int error = Marshal.GetLastWin32Error()');
   const wrapperReturn = stub.indexOf('return new BreakawayCreation');
   assert(nativeCall >= 0 && errorCapture > nativeCall && wrapperReturn > errorCapture);
-  assert.match(source, /\$observed -cne \$AssemblyDigest/u);
+  assert.match(source, /\$observed -cne \$ProbeAssemblyDigest/u);
+  assert.doesNotMatch(source, /\[string\]\$(?:assembly|nativeType|native|allocations|handles)(?:[,)])/iu);
   assert.match(source, /\[Reflection.Assembly\]::Load\(\$bytes\)/u);
   assert.doesNotMatch(source, /Add-Type/u);
   assert.match(source, /setTimeout\(\(\)=>process\.exit\(0\),60000\)/u);

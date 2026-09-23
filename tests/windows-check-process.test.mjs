@@ -210,7 +210,7 @@ Microsoft.PowerShell.Utility\Add-Type -Path ([string]$request.source) -OutputAss
     const helper = require('node:child_process').spawn(process.argv[1],
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', process.argv[2],
         '-Program', process.argv[3], '-WorkingDirectory', process.cwd(),
-        '-Assembly', process.argv[4], '-AssemblyDigest', process.argv[5]],
+        '-ProbeAssembly', process.argv[4], '-ProbeAssemblyDigest', process.argv[5]],
       { shell: false, stdio: ['ignore', 'inherit', 'inherit'] });
     helper.once('error', () => process.exit(1));
     helper.once('exit', (code, signal) => process.exit(signal || code !== 0 ? 1 : 0));

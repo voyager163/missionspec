@@ -1,15 +1,15 @@
-param([string]$Program, [string]$WorkingDirectory, [string]$Assembly, [string]$AssemblyDigest)
+param([string]$Program, [string]$WorkingDirectory, [string]$ProbeAssembly, [string]$ProbeAssemblyDigest)
 $phase = 'bootstrap'
 $nativeStatus = 0
 try {
   . ($PSScriptRoot + '\..\..\assets\platform\windows-execution-native.ps1')
   try {
     if ([string]::IsNullOrEmpty($WorkingDirectory)) { throw 'working-directory' }
-    $bytes = [IO.File]::ReadAllBytes($Assembly)
+    $bytes = [IO.File]::ReadAllBytes($ProbeAssembly)
     $hash = [Security.Cryptography.SHA256]::Create()
     try {
       $observed = 'sha256:' + [BitConverter]::ToString($hash.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant()
-      if ($AssemblyDigest -cnotmatch '^sha256:[a-f0-9]{64}$' -or $observed -cne $AssemblyDigest) { throw 'probe-assembly' }
+      if ($ProbeAssemblyDigest -cnotmatch '^sha256:[a-f0-9]{64}$' -or $observed -cne $ProbeAssemblyDigest) { throw 'probe-assembly' }
     } finally { $hash.Dispose() }
     # Compilation belongs to fixture setup, not the owned job's measured deadline.
     [void][Reflection.Assembly]::Load($bytes)
