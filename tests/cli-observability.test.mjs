@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { chmod, lstat, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -10,6 +10,7 @@ import { createAuthorizedJsonlSink } from '../dist/adapters/logging/jsonl.js';
 import { serializeDiagnosticEvent } from '../dist/adapters/logging/diagnostics.js';
 import { createUserTelemetryPreferenceStore } from '../dist/adapters/telemetry/preferences.js';
 import { digestContent } from '../dist/kernel/revisions.js';
+import { checkCliProcess, cliProcessDiagnostic, networkGuardSpecifier, parseCliEnvelope } from './fixtures/cli-observability-process.mjs';
 
 const exec = promisify(execFile);
 const moduleUrl = new URL('../dist/cli/observability.js', import.meta.url).href;
@@ -17,7 +18,7 @@ const errorsUrl = new URL('../dist/application/errors.js', import.meta.url).href
 const authorityUrl = new URL('../dist/adapters/authority/terminal.js', import.meta.url).href;
 const localAuthorityUrl = new URL('../dist/adapters/authority/local-authority.js', import.meta.url).href;
 const driver = path.resolve('tests/fixtures/terminal-driver.py');
-const networkGuard = path.resolve('tests/fixtures/cli-observability-network-guard.mjs');
+const networkGuard = networkGuardSpecifier();
 const cli = path.resolve('dist/cli/main.js');
 const commandSource = `
   const { runObservabilityCommand } = await import(${JSON.stringify(moduleUrl)});
@@ -28,6 +29,57 @@ const commandSource = `
 `;
 const posix = ['darwin', 'linux'].includes(process.platform);
 const options = { skip: !posix && 'POSIX CLI fixtures; Windows has a separate native suite.' };
+
+test('CLI preload specifiers stay file URLs and the real guard blocks caught HTTP, HTTPS and fetch attempts', () => {
+  assert.equal(new URL(networkGuard).protocol, 'file:');
+  assert.equal(networkGuardSpecifier('file:///D:/a/check%20out/tests/fixtures/process.mjs'),
+    'file:///D:/a/check%20out/tests/fixtures/cli-observability-network-guard.mjs');
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) if (key.toUpperCase() === 'NODE_OPTIONS') delete env[key];
+  const launch = (specifier, source) => spawnSync(process.execPath,
+    ['--import', specifier, '--input-type=module', '-e', source],
+    { env, encoding: 'utf8', shell: false, timeout: 15_000, maxBuffer: 65_536 });
+  const ready = launch(networkGuard, 'console.log(JSON.stringify({ contractVersion: 1, status: "ok", value: "guard-loaded" }))');
+  assert.equal(parseCliEnvelope(ready).value, 'guard-loaded');
+  for (const source of [
+    "import { request } from 'node:http'; try { request('http://telemetry.invalid'); } catch {}",
+    "import { request } from 'node:https'; try { request('https://telemetry.invalid'); } catch {}",
+    "try { await fetch('https://telemetry.invalid'); } catch {}",
+  ]) {
+    const blocked = launch(networkGuard, source);
+    assert.equal(blocked.status, 98, cliProcessDiagnostic(blocked));
+    assert.throws(() => checkCliProcess(blocked), /CLI child network-attempt; exit=98/u);
+  }
+  const rawDrivePath = launch(String.raw`D:\not-a-user\cli-observability-network-guard.mjs`, 'console.log("must-not-run")');
+  assert.match(cliProcessDiagnostic(rawDrivePath), /exit=1; node=ERR_UNSUPPORTED_ESM_URL_SCHEME/u);
+  assert.throws(() => parseCliEnvelope(rawDrivePath), /startup-or-exit-failure.*ERR_UNSUPPORTED_ESM_URL_SCHEME/u);
+});
+
+test('CLI startup diagnostics precede envelope parsing and console assertions without exposing raw output', () => {
+  const sentinel = 'PRIVATE_ENV_PATH_MUST_NOT_LEAK';
+  const cases = [
+    { code: 1, stdout: '', stderr: `Error [ERR_UNSUPPORTED_ESM_URL_SCHEME]: ${sentinel}` },
+    { code: 1, challenges: 0, output: `Error [ERR_MODULE_NOT_FOUND]: ${sentinel}` },
+    { code: 1, stdout: sentinel, stderr: sentinel },
+    { code: 0, stdout: JSON.stringify({ status: 'ok', value: sentinel }) },
+    { status: null, stdout: '', error: { code: 'ETIMEDOUT', message: sentinel } },
+    { code: 98, stdout: '', stderr: sentinel },
+  ];
+  for (const result of cases) {
+    assert.throws(() => parseCliEnvelope(result, result.output !== undefined), (error) => {
+      assert.match(error.message, /^CLI child /u);
+      assert.doesNotMatch(error.message, new RegExp(sentinel, 'u'));
+      assert(error.message.length < 512);
+      return true;
+    });
+  }
+  const envelope = { contractVersion: 1, status: 'blocked', error: { code: 'authority-required' } };
+  const serialized = JSON.stringify(envelope);
+  assert.deepEqual(parseCliEnvelope({
+    code: 2, challenges: 1, output: `Exact console review\n${serialized.slice(0, 45)}\r\n${serialized.slice(45)}\r\n`,
+  }, true), envelope);
+  assert.throws(() => parseCliEnvelope({ code: 0, stdout: serialized }), /invalid-envelope/u);
+});
 
 async function fixture(t, extraEnv = {}) {
   const root = path.resolve(`.cli-observability-test-${randomUUID()}`);

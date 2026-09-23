@@ -14,10 +14,11 @@ import { windowsExecutionAsset, windowsPowerShell } from '../dist/adapters/platf
 import { digestContent } from '../dist/kernel/revisions.js';
 import { conptyDiagnostic, parseConptyChild, parseConptyDriver } from './fixtures/windows-conpty-protocol.mjs';
 import { createPrivateFixtureRoot, powershell, privateEntry, removeFixtureRoot } from './fixtures/windows-private-state.mjs';
+import { checkCliProcess, cliProcessDiagnostic, networkGuardSpecifier, parseCliEnvelope } from './fixtures/cli-observability-process.mjs';
 
 const windows = { skip: process.platform !== 'win32', timeout: 720_000 };
 const cli = fileURLToPath(new URL('../dist/cli/main.js', import.meta.url));
-const guard = fileURLToPath(new URL('./fixtures/cli-observability-network-guard.mjs', import.meta.url));
+const guard = networkGuardSpecifier();
 const consoleDriver = fileURLToPath(new URL('./fixtures/windows-conpty.ps1', import.meta.url));
 const terminalUrl = new URL('../dist/adapters/authority/terminal.js', import.meta.url).href;
 const optOuts = ['NODE_TEST_CONTEXT', 'NODE_ENV', 'CI', 'DO_NOT_TRACK', 'MISSIONSPEC_TELEMETRY'];
@@ -48,17 +49,17 @@ function fixture(t, preferences = false) {
     const result = spawnSync(process.execPath, ['--import', guard, ...argv], {
       cwd: root, env, encoding: 'utf8', shell: false, windowsHide: true, timeout: 150_000, maxBuffer: 1_048_576,
     });
-    assert.equal(result.error, undefined, 'Native CLI process must complete within its bound');
-    assert.equal(result.signal, null);
-    assert.notEqual(result.status, 98, 'No HTTP, HTTPS or fetch attempt is permitted');
-    assert.doesNotMatch(result.stderr, /optional usage analytics|operation-started|operation-stopped/u);
+    checkCliProcess(result);
+    if (/optional usage analytics|operation-started|operation-stopped/u.test(result.stderr)) {
+      throw new Error(`Unexpected control observation; ${cliProcessDiagnostic(result)}`);
+    }
     return { code: result.status, stdout: result.stdout, stderr: result.stderr };
   };
   return {
     root, env, spawn, preferencePath: path.join(root, 'preferences', 'telemetry.sqlite'),
     cli(args) {
       const result = spawn([cli, ...args, '--json']);
-      return { ...result, value: JSON.parse(result.stdout) };
+      return { ...result, value: parseCliEnvelope(result) };
     },
     conpty(argv, responses) {
       windowsExecutionAsset('windows-console.ps1');
@@ -69,8 +70,13 @@ function fixture(t, preferences = false) {
         cwd: root, env, encoding: 'utf8', shell: false, windowsHide: true, timeout: 220_000, maxBuffer: 12_000_000,
       });
       const response = parseConptyDriver(result);
-      assert.notEqual(response.code, 98, 'ConPTY controls must not attempt network delivery');
+      checkCliProcess(response);
       assert.equal(response.parentKilled, false);
+      if (argv[0] === cli) parseCliEnvelope(response, true);
+      else {
+        if (response.code !== 0) throw new Error(`CLI receipt child failed; ${cliProcessDiagnostic(response)}`);
+        parseConptyChild(response);
+      }
       return response;
     },
   };
@@ -285,17 +291,7 @@ async function diagnosticFixture(f) {
 }
 
 function cliConsole(response) {
-  const marker = '{"contractVersion":1,"status":';
-  const start = response.output.indexOf(marker);
-  assert.notEqual(start, -1, conptyDiagnostic(response));
-  assert.equal(response.output.indexOf(marker, start + marker.length), -1);
-  let frame = '';
-  // The real CLI writes one JSON line; ConPTY may wrap it at its column bound.
-  for (const line of response.output.slice(start).split('\n')) {
-    frame += line;
-    try { return JSON.parse(frame); } catch { /* Continue a wrapped frame. */ }
-  }
-  assert.fail(`Missing complete CLI envelope: ${conptyDiagnostic(response)}`);
+  return parseCliEnvelope(response, true);
 }
 
 test('Windows native CLI diagnostic preview and rejected non-TTY pruning preserve every file and mtime', windows, async (t) => {
