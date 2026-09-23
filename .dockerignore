@@ -1,6 +1,7 @@
 # The only permitted Docker context is the separately deployed ingestion service.
 **
 !LICENSE
+!.dockerignore
 !licenses/
 !licenses/reviewed-texts.json
 !licenses/telemetry-runtime.json
@@ -12,6 +13,7 @@
 !services/telemetry-ingest/package.json
 !services/telemetry-ingest/package-lock.json
 !services/telemetry-ingest/tsconfig.json
+!services/telemetry-ingest/runtime-sources.lock.json
 !services/telemetry-ingest/Dockerfile
 !services/telemetry-ingest/src/
 !services/telemetry-ingest/src/**
@@ -19,6 +21,9 @@
 !services/telemetry-ingest/schema/**
 !services/telemetry-ingest/scripts/
 !services/telemetry-ingest/scripts/schema.mjs
+!services/telemetry-ingest/scripts/runtime-sources.mjs
+!services/telemetry-ingest/scripts/container-smoke.mjs
+!services/telemetry-ingest/scripts/container-qualification.mjs
 !services/telemetry-ingest/tests/
 !services/telemetry-ingest/tests/**
 !assets/

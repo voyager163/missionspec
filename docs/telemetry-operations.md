@@ -5,11 +5,24 @@ production endpoint, permission grants, deployed retention guarantees, or public
 are established by these files. Cloud authentication, planning/readback, apply,
 image publication, synthetic ingestion, and CLI endpoint activation each require
 separate operator authorization. Normal MissionSpec use never depends on this service.
+An authorized read-only account preflight is not evidence that resources were
+deployed. Keep its account inventory, identities, budget recipients, private
+configuration, and cost report outside versioned/public source. The controller's
+ignored, access-restricted `.operator-private/` directory is local operator data,
+not a repository artifact to publish.
+
+The [direct ARM operator](telemetry-operator.md) is the supported deployment
+route: fixed phases, full local private what-if review, explicit subscription,
+ownership and readback gates. The private-runner OpenTofu/VM/Job route is retired.
+Its source/diff and all private receipts remain archived; its foundation remains
+preserved. No runner, operator image, authentication broker or encrypted relay is
+needed for ARM control-plane review. Image publication, disabled receiver,
+synthetic admission and client activation remain separate authority boundaries.
 
 The private package at `services/telemetry-ingest/` in a source checkout is an
 original Apache-2.0 operator artifact, not a CLI dependency or business engine.
-The original OpenTofu module at `infrastructure/opentofu/telemetry/` provisions only
-new MissionSpec resources. Operator sources are intentionally excluded from the
+The canonical ARM definition at `infrastructure/arm/telemetry/` provisions only
+the explicitly reviewed new/owned MissionSpec resources. Operator sources are intentionally excluded from the
 CLI package; use the [source repository](https://github.com/voyager163/missionspec)
 for these files. The implementation does not import another product's source, endpoints,
 identities, or infrastructure. The client remains unconfigured until release qualification.
@@ -61,23 +74,19 @@ evidence**. Do not add a shared secret to the distributed CLI.
 
 ## Local checks (no Azure credentials)
 
-Use Node.js **24.21.0 or newer on the 24.x LTS line** and the installed OpenTofu
-1.12.x-or-newer 1.x binary. The service owns its own lockfile and dependencies:
+Use Node.js **24.21.0 or newer on the 24.x LTS line**. The service owns its
+own lockfile and dependencies; direct ARM requires no OpenTofu/provider install:
 
 ```sh
 npm --prefix services/telemetry-ingest ci --ignore-scripts --no-audit --no-fund
 npm --prefix services/telemetry-ingest test
-node --test infrastructure/opentofu/telemetry/tests/*.test.mjs
-tofu -chdir=infrastructure/opentofu/telemetry fmt -check -recursive
-tofu -chdir=infrastructure/opentofu/telemetry init -backend=false -input=false
-tofu -chdir=infrastructure/opentofu/telemetry validate
+node --test infrastructure/arm/telemetry/tests/*.test.mjs
 ```
 
-`init -backend=false` downloads the pinned, publisher-signed providers but neither
-initializes state nor configures Azure credentials. `validate` checks provider schemas
-locally; it does not prove Azure accepts the deployment. Do not run `plan`, `apply`,
-`refresh`, or provider readback merely to extend local checks. Static policy tests
-guard source settings and schema equality; they are not cloud integration tests.
+The Node infrastructure tests make no Azure calls. The separately invoked
+operator `check` performs scoped reads and nonmutating ARM validation/what-if;
+it is not permission to create resources. Full what-if/readback JSON remains
+private on this machine. Unit tests are not deployed integration evidence.
 
 HTTP tests bind ephemeral **loopback** listeners with injected storage. Azure SDK
 transport tests inject an in-memory HTTP transport and synthetic credential object:
@@ -94,12 +103,16 @@ was tested.
 
 ### Container qualification
 
-The Dockerfile pins Node 24.21.0 bookworm-slim by immutable manifest digest, performs
-schema equality/type/HTTP tests, prunes development dependencies, and runs as `node`,
-not root. The root `.dockerignore` allowlists only the required service and canonical
-schema files; local configuration, state, source trees, and caches are not submitted.
+The Dockerfile pins Node 24.21.0 bookworm-slim for the build stage and a maintained
+Debian 13 distroless C++ runtime by immutable AMD64 manifest digest. It performs
+schema/type/HTTP tests, prunes development dependencies, and copies only Node and
+the service production closure into the non-root `65532:65532` runtime.
+The root `.dockerignore` allowlists only the required service and canonical
+schema files; local configuration, state, unrelated source trees, and caches are not submitted.
 Review the digest and dependency notices again before releasing. A successful local
 build is not an image vulnerability/license audit or a signature/publication.
+The same image carries a verified versioned corresponding-source archive and
+readable runtime notices; see [minimal runtime qualification](telemetry-runtime.md).
 
 First inspect the Docker context and builder: both must resolve to a trusted local
 daemon, not a remote builder. Do not install Docker or send repository context to a
@@ -112,13 +125,19 @@ docker buildx build --builder LOCAL_BUILDER --platform linux/amd64 --load \
   -f services/telemetry-ingest/Dockerfile .
 docker run --rm --platform linux/amd64 --network none --read-only --cap-drop ALL \
   --security-opt no-new-privileges -i missionspec-telemetry-ingest:local-qualification \
-  node --input-type=module < services/telemetry-ingest/scripts/container-smoke.mjs
+  /usr/local/bin/node --no-turbofan --no-maglev --disable-sigusr1 --input-type=module < services/telemetry-ingest/scripts/container-smoke.mjs
 ```
 
 The smoke test checks non-root execution, health, and one synthetic in-memory event
 inside the container's loopback network; it has no external network or Azure adapter.
 Running the unconfigured default entrypoint must exit `1` with only `CONFIG_MISSING`.
 The mutable local test tag is never an acceptable deployment image reference.
+Inspect the selected image's actual architecture and shipped license/notices,
+not its tag name or a prior build report. A previously built AMD64 image may
+predate the notice-copying stage. Rebuild the current Dockerfile on the explicitly
+verified local builder and repeat the offline checks before publication; do not
+silently publish an older image or treat a local config digest as a registry
+manifest readback.
 
 ## Explicit service startup
 
@@ -165,7 +184,11 @@ Container Apps' platform-managed identity endpoint variables remain platform-own
 Do not inject tracing agents, startup wrappers, or payload-capturing sidecars.
 
 Missing/invalid/unsafe configuration exits visibly with `CONFIG_MISSING`,
-`CONFIG_INVALID`, or `CONFIG_UNSAFE_ENVIRONMENT`, without values or exceptions.
+`CONFIG_INVALID`, `CONFIG_UNSAFE_ENVIRONMENT` or `CONFIG_UNSAFE_RUNTIME`, without
+application-supplied values or exceptions. The image disables SIGUSR1 inspector
+activation and rejects inspector/debugger arguments and TLS trust overrides.
+Do not override the image command or inject native startup options; Node itself
+can process such options before the application's validation runs.
 Other startup/listener failures expose only `SERVICE_START_FAILED` or
 `SERVICE_LISTENER_FAILED`. There are no access logs, raw error dumps, or environment
 logging. The library's `snapshot()` returns only fixed aggregate counters; there is
@@ -218,13 +241,17 @@ silently extend the CLI's one-second budget to mask slow startup.
 
 ## Infrastructure and deployment prerequisites
 
-The module pins AzureRM 5.6.0 and AzAPI 2.12.0 in its provider lockfile. AzAPI is used
-for creating the custom table and a `kind = Direct` DCR with its own ingestion
-endpoint; a DCE is unnecessary for this public-endpoint design. The resources are:
+The one canonical direct ARM definition uses explicit resource interfaces,
+including the custom table and a `kind = Direct` DCR with its own ingestion
+endpoint; a DCE is unnecessary for this public-endpoint design. It does not
+retrieve workspace or storage login keys. The resources are:
 
 - MissionSpec resource group, Consumption Container Apps environment/app, and
   **authenticated private-pull** ACR repository. ACR's network endpoint remains
   public in this design; “private” means no anonymous/admin-key pull, not Private Link.
+  The environment's platform-managed infrastructure group is explicitly named
+  `${name_prefix}-managed`, so its ownership and any separately billed resources
+  can be included in the deployment inventory and cost review.
 - Separate user-assigned pull and upload identities: ACR-scoped `AcrPull`, and a
   custom upload-only data action assigned at the one intended DCR.
 - Dedicated Log Analytics workspace and `MissionSpecTelemetry_CL` Analytics table,
@@ -236,16 +263,16 @@ endpoint; a DCE is unnecessary for this public-endpoint design. The resources ar
   Insights, diagnostic routes, raw console/request persistence, export, or archive.
 
 **Every deployment needs operator decisions**, supplied privately, never real values
-committed as tfvars:
+committed as deployment configuration:
 
-1. Subscription, Entra tenant, federated deployment principal, role-grant authority,
+1. Subscription, Entra tenant, explicit authorized local operator principal, role-grant authority,
    and registered `Microsoft.App`, `Microsoft.ContainerRegistry`,
    `Microsoft.ManagedIdentity`, `Microsoft.OperationalInsights`,
    `Microsoft.Insights`, and `Microsoft.Consumption` providers. Registration is not
    performed automatically. Review custom-role and budget creation permissions.
 2. Region/data residency/capacity, globally unique `missionspec-…` resource prefix
-   and ACR name, and named query operators/groups.
-3. Domain decision: this module requires the explicit `azure-managed` choice and
+   and ACR name, and the named query operator.
+3. Domain decision: the definition uses the explicit Azure-managed hostname choice and
    outputs an **unqualified candidate** hostname only. If a branded/custom hostname
    is required, stop and separately authorize DNS ownership verification and TLS
    binding work; this module does not pretend to provision them.
@@ -255,26 +282,76 @@ committed as tfvars:
 5. All service limits, warm/cold scaling decision, supported bounded CPU/memory pair,
    cost-policy review, daily workspace quota, monthly budget/currency and active
    first-of-month start/end dates, and monitored budget email contacts.
-6. **Pre-existing private remote state**: a dedicated nonpublic blob container in an
-   operator-owned storage account with public network disabled/private endpoint,
-   approved runner connectivity, encrypted storage, appropriate state recovery/
-   versioning policy, and narrowly scoped Entra data-plane access. No state account
-   is bootstrapped here; backend initialization must not fall back to local state,
-   account keys, or SAS. State may contain provider-returned sensitive metadata even
-   with shared-key workspace authentication disabled. Restrict access accordingly.
+6. **Preserved foundation and history**: the existing private Blob/PE/DNS
+   foundation and all former state/approval/ledger/source receipts stay intact.
+   Direct ARM does not initialize or use a Terraform backend. The approved
+   governance delta is exact; a newly observed change still blocks deployment
+   until separately reviewed. Full local templates/what-if/readbacks remain
+   potentially sensitive private operator data.
 
-`infrastructure/opentofu/telemetry/backend.hcl.example` in the source checkout
-contains placeholders only. After explicit authorization, replace them in ignored
-`backend.hcl`, supply federated credentials externally, and initialize the backend
-with `-backend-config=backend.hcl`. Do not commit state, plans, credentials, token
-files, or operator tfvars. Review state-locking and failure recovery before apply.
+### Read-only prerequisite and cost review
 
-Deployment is intentionally two-stage to avoid a nonexistent-image bootstrap:
-first review/apply with `deploy_app=false` to create registry and data resources;
-then separately authorize image publication to that registry. Supply the published
-manifest digest and review/apply with `deploy_app=true`, initially leaving
-`ingestion_enabled=false`. There are no local-exec/provisioner publication shortcuts.
-Provider validation is not permission to execute either stage.
+Before authorizing creation, pin every account-specific CLI/ARM read to the
+approved subscription. Verify its tenant and enabled state, effective/inherited
+RBAC and deny assignments, provider registration, regional resource types and
+quotas, inherited policies, and the resource inventory. Name-availability checks
+do not reserve names. A supported SKU and unused quota do not guarantee capacity.
+Do not reuse another product's registry, identities, workspace, storage, network,
+or state merely because they are visible to the current operator.
+
+The authorized local operator makes only fixed ARM requests and separately
+reviewed role assignments. Existing owned groups are verified, not imported,
+retagged or recreated. There is no runner registration, remote initializer,
+CLI-token transfer to a guest, shared-key/SAS fallback or public state change.
+
+Price the complete incremental deployment with current regional retail meters,
+including preserved private state endpoints/DNS/storage/recovery, registry,
+ingestion/retention, possible managed LB/IP, inherited security and the uncertain
+environment-management meter. The conservative model charges all 180 retention
+days rather than relying on included retention. Do not assume subscription/billing-account
+free allowances remain available. Include billing-month length, enforced image
+digest count, initial/daily scanning, and a fully active warm-replica scenario. A resource-group
+budget does not cover a separate state/runner group: allocate budgets across
+every new billed group, or explicitly filter a dedicated combined budget to those
+groups. Do not change an unrelated subscription-wide budget. The reviewed
+direct ARM revision permits only the dedicated project-filtered budget's
+USD 250-to-350 amount change, preserving its dates/filter/notifications. The
+state budget stays USD 50; the planned telemetry budget is USD 300. The complete
+31-day estimate is USD 301.66 with unchanged traffic and security reserves.
+The combined budget still covers the separately named managed group.
+
+Inspect inherited Defender pricing and extensions as well as Azure Policy:
+subscription-enabled plans can automatically cover new resources without an
+explicit resource in this module. Paid CSPM can count Container Apps and blob
+storage accounts; storage protection, registry-image scanning and temporary VM
+protection have separate billing semantics. Do not assume daily image rescans
+are free from a legacy registry-plan statement. Carry an explicit reserve until
+the applicable plan's assessment counting is verified, and do not disable global
+security protections to make an estimate fit.
+
+Private state networking does not exclude authorized platform security scanning.
+Malware scanning can read state blob bytes and write scan-result tags; sensitive
+data discovery can sample contents and retain classified metadata; agentless VM
+scanning can inspect runner disks. These are separate processing boundaries from
+the eight-field analytics event. Minimize credential collection, but do not claim
+state is secret-free or that private endpoints prevent all platform access. No raw telemetry
+payload, state copy, or scanner output becomes an analytics export.
+
+Record the current prices, uncertainties, selected caps and stop conditions in
+the private gate report. App quotas reset on restart, workspace caps can
+overshoot, and rejected public requests can still incur ingress request charges.
+Neither these controls nor budget alerts establish a monetary hard cap.
+
+Deployment is explicitly phased: the separately approved exact project-budget
+amount update and qualified USD 350 readback **before** core creation/readback, workspace access,
+data schema/DCR, role definition/assignments, separately authorized image
+publication, disabled app, then separately authorized synthetic admission.
+Generated IDs/endpoints are literal reviewed inputs only after their readbacks;
+the controller does not pretend unknown values have been reviewed.
+No arbitrary ARM/shell execution or automatic image push is exposed.
+Initial publication authority is limited to **one reviewed immutable AMD64
+digest**. A future-build count in a cost estimate is not advance publication
+permission for those builds.
 
 ## Retention and activation gates
 
@@ -308,8 +385,10 @@ After separate authorization, operators must:
 
 Cloud availability, identity behavior, actual diagnostic settings, retention
 enforcement, quotas, custom domains, and release publication remain unqualified.
-This work did not authenticate to Azure, query/control its resources, deploy, publish,
-sign, push, or contact a production telemetry collector.
+The local checks above did not authenticate to Azure, query/control its resources,
+deploy, publish, sign, push, or contact a production telemetry collector.
+Any later authorized read-only preflight is separate evidence; it must not be
+reported as successful deployment, enforced retention or client activation.
 
 ## Kill switch, rollback, and recovery
 
@@ -339,6 +418,6 @@ These documents informed the original implementation, not a claim of deployed st
 - [Logs Ingestion API, direct DCR endpoints and DCE conditions](https://learn.microsoft.com/en-us/azure/azure-monitor/logs/logs-ingestion-api-overview)
 - [Container Apps log destinations](https://learn.microsoft.com/en-us/azure/container-apps/log-options)
 - [Analytics and total retention](https://learn.microsoft.com/en-us/azure/azure-monitor/logs/data-retention-configure)
-- [AzureRM 5.6.0 workspace settings](https://github.com/hashicorp/terraform-provider-azurerm/blob/v5.6.0/website/docs/r/log_analytics_workspace.html.markdown)
-- [AzureRM 5.6.0 Container Apps environment settings](https://github.com/hashicorp/terraform-provider-azurerm/blob/v5.6.0/website/docs/r/container_app_environment.html.markdown)
+- [ARM workspace properties](https://learn.microsoft.com/azure/templates/microsoft.operationalinsights/workspaces)
+- [ARM Container Apps environment properties](https://learn.microsoft.com/azure/templates/microsoft.app/managedenvironments)
 - [AzAPI 2.12.0 provider](https://github.com/Azure/terraform-provider-azapi/tree/v2.12.0)

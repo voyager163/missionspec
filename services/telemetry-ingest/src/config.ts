@@ -4,7 +4,7 @@ import type { Limits } from './server.js';
 export const STREAM_NAME = 'Custom-MissionSpecTelemetry';
 
 export class ConfigError extends Error {
-  constructor(readonly code: 'CONFIG_MISSING' | 'CONFIG_INVALID' | 'CONFIG_UNSAFE_ENVIRONMENT') {
+  constructor(readonly code: 'CONFIG_MISSING' | 'CONFIG_INVALID' | 'CONFIG_UNSAFE_ENVIRONMENT' | 'CONFIG_UNSAFE_RUNTIME') {
     super(code);
   }
 }
@@ -37,10 +37,16 @@ export const limitEnvironment: Readonly<Record<keyof Limits, string>> = {
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+export function validateRuntimeArguments(argumentsValue: readonly string[]): void {
+  if (argumentsValue.some(argument => /^--(?:inspect|debug|experimental-(?:network|storage|worker|inspector)-inspection|experimental-inspector-network-resource)/u.test(argument))) {
+    throw new ConfigError('CONFIG_UNSAFE_RUNTIME');
+  }
+}
+
 export function parseConfig(environment: Readonly<Record<string, string | undefined>>): OperatorConfig {
   for (const [key, value] of Object.entries(environment)) {
     if (value && (/^(APPLICATIONINSIGHTS|APPINSIGHTS|OTEL_)/i.test(key) ||
-      /^(AZURE_LOG_LEVEL|AZURE_AUTHORITY_HOST|NODE_OPTIONS|NODE_DEBUG|NODE_DEBUG_NATIVE|DEBUG|HTTPS?_PROXY|ALL_PROXY)$/i.test(key))) {
+      /^(AZURE_LOG_LEVEL|AZURE_AUTHORITY_HOST|NODE_OPTIONS|NODE_DEBUG|NODE_DEBUG_NATIVE|NODE_TLS_REJECT_UNAUTHORIZED|NODE_EXTRA_CA_CERTS|DEBUG|HTTPS?_PROXY|ALL_PROXY)$/i.test(key))) {
       throw new ConfigError('CONFIG_UNSAFE_ENVIRONMENT');
     }
   }

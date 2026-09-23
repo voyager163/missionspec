@@ -69,6 +69,14 @@ test('Windows lifecycle qualification runs the complete native suite behind the 
   assert(lifecycle.steps.some((step) => step.run === 'node --test --test-concurrency=1 tests/windows-runtime-lifecycle.test.mjs'));
 });
 
+test('telemetry CI checks only the canonical ARM definition without executing cloud operations', async () => {
+  const workflow = parseYaml(await readFile(new URL('../.github/workflows/repository.yml', import.meta.url), 'utf8'), 'repository workflow');
+  const steps = workflow.jobs['repository-checks'].steps;
+  const telemetry = steps.find((step) => step.name === 'Check telemetry infrastructure policy without cloud access');
+  assert.equal(telemetry.run, 'node --test infrastructure/arm/telemetry/tests/*.test.mjs');
+  assert(steps.every((step) => !step.run?.includes('infrastructure/opentofu/telemetry')));
+});
+
 test('Windows execution matrix covers each console and registered-check case once and the complete process suite', async () => {
   const workflow = parseYaml(await readFile(new URL('../.github/workflows/repository.yml', import.meta.url), 'utf8'), 'repository workflow');
   const job = workflow.jobs['windows-execution'];

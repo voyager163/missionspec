@@ -46,7 +46,7 @@ jobs:
       - name: Check the local telemetry service without Azure credentials
         run: npm --prefix services/telemetry-ingest test
       - name: Check telemetry infrastructure policy without cloud access
-        run: node --test infrastructure/opentofu/telemetry/tests/*.test.mjs
+        run: node --test infrastructure/arm/telemetry/tests/*.test.mjs
   windows-read-only:
     name: Windows read-only compatibility
     runs-on: windows-latest

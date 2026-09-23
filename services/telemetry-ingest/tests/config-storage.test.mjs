@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { gunzipSync } from 'node:zlib';
 import { LogsIngestionClient } from '@azure/monitor-ingestion';
 import { createHttpHeaders } from '@azure/core-rest-pipeline';
-import { parseConfig, limitEnvironment, STREAM_NAME } from '../dist/config.js';
+import { parseConfig, limitEnvironment, STREAM_NAME, validateRuntimeArguments } from '../dist/config.js';
 import { createStorageAdapter, azureClientOptions } from '../dist/azure-storage.js';
 import { createProjector } from '../dist/contract.js';
 import { event, limits } from './helpers.mjs';
@@ -39,12 +39,24 @@ test('operator config has no credential/destination/limit defaults and rejects u
     ['AZURE_LOG_LEVEL', 'verbose'],
     ['DEBUG', '*'],
     ['NODE_OPTIONS', '--import=not-allowed'],
+    ['NODE_TLS_REJECT_UNAUTHORIZED', '0'],
+    ['NODE_EXTRA_CA_CERTS', '/unreviewed/ca.pem'],
     ['APPLICATIONINSIGHTS_CONNECTION_STRING', 'private'],
     ['OTEL_EXPORTER_OTLP_ENDPOINT', 'http://invalid'],
     ['HTTPS_PROXY', 'http://invalid'],
   ]) assert.throws(() => parseConfig({ ...environment, [key]: value }), /^Error: CONFIG_/);
 });
 
+test('production startup rejects debugger and inspector runtime flags', () => {
+  validateRuntimeArguments([]);
+  validateRuntimeArguments(['--disable-sigusr1']);
+  validateRuntimeArguments(['--no-turbofan', '--no-maglev', '--disable-sigusr1']);
+  for (const argument of ['--inspect', '--inspect-brk=127.0.0.1:9229', '--inspect-wait', '--inspect-port=9229',
+    '--debug', '--experimental-network-inspection', '--experimental-storage-inspection', '--experimental-worker-inspection',
+    '--experimental-inspector-network-resource']) {
+    assert.throws(() => validateRuntimeArguments([argument]), { code: 'CONFIG_UNSAFE_RUNTIME' });
+  }
+});
 test('SDK transport uses a single projected record, no retry or redirect, and propagates failure', async () => {
   const record = createProjector()(event, new Date('2026-01-01T00:00:00Z'));
   for (const status of [204, 500, 429, 307]) {

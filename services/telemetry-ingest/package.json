@@ -13,7 +13,7 @@
     "schema:check": "node scripts/schema.mjs",
     "build": "tsc -p tsconfig.json",
     "test": "npm run schema:check && npm run build && node --test tests/*.test.mjs",
-    "start": "node dist/main.js"
+    "start": "node --no-turbofan --no-maglev --disable-sigusr1 dist/main.js"
   },
   "dependencies": {
     "@azure/identity": "4.13.3",

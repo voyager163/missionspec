@@ -1,11 +1,12 @@
 import { pathToFileURL } from 'node:url';
-import { ConfigError, parseConfig } from './config.js';
+import { ConfigError, parseConfig, validateRuntimeArguments } from './config.js';
 import { createAzureStorage } from './azure-storage.js';
 import { createTelemetryServer } from './server.js';
 
 export async function main(): Promise<void> {
   let receiver: ReturnType<typeof createTelemetryServer> | undefined;
   try {
+    validateRuntimeArguments(process.execArgv);
     const config = parseConfig(process.env);
     const storage = await createAzureStorage(config.azure);
     receiver = createTelemetryServer({ storage, limits: config.limits, enabled: config.enabled });
