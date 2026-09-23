@@ -859,6 +859,16 @@ test('transport absence handling does not convert auth/quota/general strings int
   await assert.rejects(az([...args, '--url', `https://management.azure.com${r.registry}?api-version=2024-08-01`],
     10, error('ERROR: Not Found({"error":{"code":"404"}})')), /ARM_OPERATION_FAILED/);
   await assert.rejects(az(['rest', '--method', 'PUT', ...budgetArgs.slice(3)], 10, error('ERROR: Not Found({"error":{"code":"404"}})')), /ARM_OPERATION_FAILED/);
+  const roleArgs = [...args, '--url', `https://management.azure.com${r.uploadRole}?api-version=2022-04-01`];
+  const roleAbsent = 'ERROR: Not Found({"error":{"code":"RoleDefinitionDoesNotExist"}})';
+  assert.equal(await az(roleArgs, 10, error(roleAbsent)), null);
+  for (const changed of [
+    ['rest', '--method', 'PUT', ...roleArgs.slice(3)],
+    [...args, '--url', `https://management.azure.com${r.registry}?api-version=2022-04-01`],
+    [...args, '--url', `https://management.azure.com${r.uploadRole}?api-version=2024-08-01`],
+  ]) await assert.rejects(az(changed, 10, error(roleAbsent)), /ARM_OPERATION_FAILED/);
+  await assert.rejects(az(roleArgs, 10, error('ERROR: Forbidden({"error":{"code":"RoleDefinitionDoesNotExist"}})')), /ARM_OPERATION_FAILED/);
+  await assert.rejects(az(roleArgs, 10, error('ERROR: Not Found({"error":{"code":"AuthorizationFailed"}})')), /ARM_OPERATION_FAILED/);
   const p = buildPhase(c, 'core', contract), arm = transport(c, p, 'unused', async () => ({}));
   await assert.rejects(arm('PUT', r.workspace, '2023-09-01'), /FIXED_PHASE/);
   await assert.rejects(arm('POST', r.registry + '/listCredentials', '2023-07-01'), /NONMUTATING/);

@@ -166,6 +166,8 @@ export async function az(args, timeout = 60000, run = execute) {
     // Consumption's individual-budget GET uses a numeric error code for an absent budget.
     if (args[0] === 'rest' && args[args.indexOf('--method') + 1] === 'GET' && status === 404 && code === '404' &&
         /^https:\/\/management\.azure\.com\/subscriptions\/[0-9a-f-]{36}(?:\/resourceGroups\/[a-z0-9-]+)?\/providers\/Microsoft\.Consumption\/budgets\/[a-z0-9-]+\?api-version=2024-08-01$/u.test(args[args.indexOf('--url') + 1] ?? '')) return null;
+    if (args[0] === 'rest' && args[args.indexOf('--method') + 1] === 'GET' && status === 404 && code === 'RoleDefinitionDoesNotExist' &&
+        /^https:\/\/management\.azure\.com\/subscriptions\/[0-9a-f-]{36}\/providers\/Microsoft\.Authorization\/roleDefinitions\/[0-9a-f-]{36}\?api-version=2022-04-01$/u.test(args[args.indexOf('--url') + 1] ?? '')) return null;
     const safe = new Error('ARM_OPERATION_FAILED'); safe.armCode = code; safe.httpStatus = status; throw safe;
   }
 }
