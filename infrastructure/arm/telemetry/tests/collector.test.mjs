@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, readdir, rm } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { chmod, link, mkdir, open, readFile, readdir, rename, rm, symlink, truncate, writeFile } from 'node:fs/promises';
 import { buildPhase, storageContract, ids, json, digest, ownerTags, firstReleaseCost, PHASES, LIMITS, RECEIVER_DIGEST, RECEIVER_COMMAND,
   BUDGET, budgetProperties, budgetConfiguration, projectBudgetFilter, validateConfig } from '../definition.mjs';
 import { verifyWhatIf, assertBudget, permitFirstPush, verifyResource } from '../policy.mjs';
 import { CollectorController, az, transport, validateReadOnly, verifyScannerAdoption, verifyOrigin, verifyProjectBudgetReceipt,
-  checkReadOnly, saveImmutable } from '../controller.mjs';
+  checkReadOnly, load, saveImmutable, MAX_PRIVATE_ARTIFACT_BYTES, PUBLISHED_BUDGET_SOURCE,
+  verifyBudgetSourceLineageProposal, verifyBudgetDeploymentReadback } from '../controller.mjs';
 
 const c = { version: 2, subscriptionId: '00000000-0000-4000-8000-000000000001',
   tenantId: '00000000-0000-4000-8000-000000000002', operatorPrincipalId: '00000000-0000-4000-8000-000000000003',
@@ -55,6 +58,96 @@ async function scratch(t) {
   t.after(() => rm(directory, { recursive: true }));
   return directory;
 }
+async function interleavePrivateStat(t, path, action) {
+  const probe = await open(path, 'r'), prototype = Object.getPrototypeOf(probe), initial = await probe.stat({ bigint: true });
+  await probe.close();
+  const original = prototype.stat;
+  let held;
+  t.mock.method(prototype, 'stat', async function (...args) {
+    const info = await original.apply(this, args);
+    if (!held && info.ino === initial.ino && info.dev === initial.dev) { held = this; await action(info, this); }
+    return info;
+  });
+  return () => held;
+}
+test('private JSON loads use a single no-follow held inode with exact permissions, bounded reads and closed errors', async t => {
+  const directory = await scratch(t);
+  await saveImmutable(directory, 'valid.json', { valid: true });
+  assert.deepEqual(await load(directory, 'valid.json'), { valid: true });
+  assert.equal(await load(directory, 'missing.json', true), null);
+  await assert.rejects(load(directory, 'missing.json'), /PRIVATE_FILE_OPEN_FAILED/);
+  await writeFile(`${directory}/invalid.json`, '{"private":"must-not-appear",BAD}', { mode: 0o600 });
+  await assert.rejects(load(directory, 'invalid.json', true), { message: 'PRIVATE_JSON_INVALID' });
+  for (const mode of [0o400, 0o640, 0o644, 0o700, 0o1600]) await t.test(`rejects mode ${mode.toString(8)}`, async () => {
+    await chmod(`${directory}/valid.json`, mode);
+    await assert.rejects(load(directory, 'valid.json', true), /PRIVATE_FILE_REQUIRED/);
+    await chmod(`${directory}/valid.json`, 0o600);
+  });
+  await symlink('valid.json', `${directory}/symlink.json`);
+  await symlink('missing.json', `${directory}/dangling.json`);
+  for (const name of ['symlink.json', 'dangling.json']) await assert.rejects(load(directory, name, true), /PRIVATE_FILE_OPEN_FAILED/);
+  await link(`${directory}/valid.json`, `${directory}/hardlink.json`);
+  for (const name of ['valid.json', 'hardlink.json']) await assert.rejects(load(directory, name), /PRIVATE_FILE_REQUIRED/);
+  await rm(`${directory}/hardlink.json`);
+  await mkdir(`${directory}/directory.json`, { mode: 0o700 });
+  await assert.rejects(load(directory, 'directory.json'), /PRIVATE_FILE_REQUIRED/);
+  await promisify(execFile)('mkfifo', [`${directory}/fifo.json`]);
+  await assert.rejects(load(directory, 'fifo.json'), /PRIVATE_FILE_REQUIRED/);
+});
+test('real replacement, link, permission and content races never return unchecked replacement bytes', async t => {
+  for (const operation of ['replace', 'symlink', 'hardlink', 'chmod', 'rewrite', 'foreign-owner-stat', 'read-failure', 'parse-failure', 'success']) {
+    await t.test(operation, async t => {
+      const directory = await scratch(t), path = `${directory}/input.json`;
+      await saveImmutable(directory, 'input.json', { original: true });
+      await saveImmutable(directory, 'replacement.json', { unchecked: true });
+      const held = await interleavePrivateStat(t, path, async (info, handle) => {
+        if (operation === 'replace') { await rename(path, `${directory}/old.json`); await rename(`${directory}/replacement.json`, path); }
+        if (operation === 'symlink') { await rm(path); await symlink('replacement.json', path); }
+        if (operation === 'hardlink') await link(path, `${directory}/extra.json`);
+        if (operation === 'chmod') await chmod(path, 0o644);
+        if (operation === 'rewrite') await writeFile(path, '{"unchecked":true}');
+        // Keep real OS identity APIs untouched; unit-test the owner mismatch returned by fstat.
+        if (operation === 'foreign-owner-stat') info.uid += 1n;
+        if (operation === 'read-failure') t.mock.method(handle, 'read', async () => { throw Object.assign(new Error('private-path'), { code: 'ENOENT' }); });
+        if (operation === 'parse-failure') await writeFile(path, 'invalid-json');
+      });
+      if (operation === 'replace') {
+        try { assert.deepEqual(await load(directory, 'input.json'), { original: true }); }
+        catch (error) { assert.match(error.message, /^PRIVATE_FILE_CHANGED$/u); }
+      } else if (operation === 'success') assert.deepEqual(await load(directory, 'input.json'), { original: true });
+      else await assert.rejects(load(directory, 'input.json', true), /^Error: PRIVATE_(FILE_REQUIRED|FILE_CHANGED|FILE_READ_FAILED)$/u);
+      assert.equal(held().fd, -1);
+    });
+  }
+});
+test('private artifact limits cover exact boundary, oversize and growth during the held-handle read', async t => {
+  const directory = await scratch(t), path = `${directory}/bounded.json`;
+  const data = Buffer.alloc(MAX_PRIVATE_ARTIFACT_BYTES, 32); data.write('{}');
+  await writeFile(path, data, { mode: 0o600 });
+  assert.deepEqual(await load(directory, 'bounded.json'), {});
+  await truncate(path, MAX_PRIVATE_ARTIFACT_BYTES + 1);
+  await assert.rejects(load(directory, 'bounded.json'), /PRIVATE_FILE_TOO_LARGE/);
+  await writeFile(path, '{}');
+  const held = await interleavePrivateStat(t, path, () => truncate(path, MAX_PRIVATE_ARTIFACT_BYTES + 1));
+  await assert.rejects(load(directory, 'bounded.json'), /PRIVATE_FILE_TOO_LARGE/);
+  assert.equal(held().fd, -1);
+});
+test('private parse and close failures close the held object and do not expose private values', async t => {
+  const directory = await scratch(t), path = `${directory}/input.json`;
+  await writeFile(path, '{"sensitive":', { mode: 0o600 });
+  const held = await interleavePrivateStat(t, path, () => {});
+  await assert.rejects(load(directory, 'input.json'), { message: 'PRIVATE_JSON_INVALID' });
+  assert.equal(held().fd, -1);
+  await t.test('close failure remains a failure', async t => {
+    await writeFile(path, '{}');
+    const getHandle = await interleavePrivateStat(t, path, (_info, handle) => {
+      const close = handle.close.bind(handle);
+      t.mock.method(handle, 'close', async () => { await close(); throw new Error('private-path'); });
+    });
+    await assert.rejects(load(directory, 'input.json'), { message: 'PRIVATE_FILE_CLOSE_FAILED' });
+    assert.equal(getHandle().fd, -1);
+  });
+});
 function executionFixture(phase = 'core') {
   const p = buildPhase(c, phase, contract, fixtureReceipts(), foundation);
   let now = Date.parse('2026-09-23T00:00:00.000Z'), journal = null, writes = 0, receipt = null;
@@ -310,6 +403,78 @@ test('later phases require a matching qualified budget deployment receipt, never
   }
   assert.throws(() => verifyProjectBudgetReceipt(c, undefined, foundation, digest('source')));
 });
+function fixtureBudgetSourceLineage() {
+  const receipt = fixtureReceipts()['project-budget'], source = digest('new hardened source');
+  receipt.sourceSha256 = PUBLISHED_BUDGET_SOURCE.sourceSha256;
+  receipt.completedAt = '2026-09-23T00:02:00.000Z';
+  Object.assign(receipt.deployment.properties, { mode: 'Incremental', correlationId: 'budget-correlation',
+    templateHash: 'budget-template-hash', timestamp: '2026-09-23T00:01:00.000Z' });
+  const phase = buildPhase(c, 'project-budget', null, {}, foundation);
+  const approval = { action: 'direct-arm-project-budget', configSha256: digest(json(c)), phaseSha256: digest(json(phase)),
+    sourceSha256: receipt.sourceSha256, ...Object.fromEntries(['origin', 'receipts', 'baseline', 'whatIf'].map(k => [k + 'Sha256', digest(k)])),
+    approvedAt: '2026-09-23T00:00:00.000Z', expiresAt: '2026-09-23T00:30:00.000Z' };
+  const journal = { phase: 'project-budget', phaseSha256: receipt.phaseSha256, intentAt: '2026-09-23T00:01:00.000Z', outcome: 'readback-qualified' };
+  const proposal = { version: 1, kind: 'reconcile-published-budget-source', priorCommitSha: PUBLISHED_BUDGET_SOURCE.commitSha,
+    priorSourceSha256: receipt.sourceSha256, currentSourceSha256: source, configSha256: digest(json(c)), phaseSha256: receipt.phaseSha256,
+    receiptSha256: digest(json(receipt)), approvalSha256: digest(json(approval)), journalSha256: digest(json(journal)),
+    readback: { checkedAt: '2026-09-23T00:03:00.000Z', deployment: structuredClone(receipt.deployment),
+      projectBudget: structuredClone(receipt.resources[r.projectBudget]), stateBudget: structuredClone(foundation.state) } };
+  const review = { version: 1, action: 'accept-exact-budget-source-lineage', proposalSha256: digest(json(proposal)),
+    sourceSha256: source, reviewedAt: '2026-09-23T00:04:00.000Z' };
+  return { receipt, source, lineage: { proposal, review, approval, journal } };
+}
+test('only an explicit exact lineage review reconciles the immutable published-source budget receipt', () => {
+  const { receipt, source, lineage } = fixtureBudgetSourceLineage(), original = json(receipt);
+  const target = buildPhase(c, 'core', contract, {}, foundation, lineage);
+  verifyBudgetSourceLineageProposal(c, receipt, foundation, source, lineage);
+  verifyProjectBudgetReceipt(c, receipt, foundation, source, lineage, target);
+  assert.equal(json(receipt), original);
+  assert.equal(receipt.sourceSha256, PUBLISHED_BUDGET_SOURCE.sourceSha256);
+  assert.throws(() => verifyProjectBudgetReceipt(c, receipt, foundation, source), /BUDGET_SOURCE_LINEAGE_REVIEW_REQUIRED/);
+  assert.throws(() => verifyProjectBudgetReceipt(c, receipt, foundation, source, { ...lineage, review: null }, target), /BUDGET_SOURCE_LINEAGE_REVIEW_REQUIRED/);
+  assert.throws(() => verifyProjectBudgetReceipt(c, receipt, foundation, source, lineage, buildPhase(c, 'core', contract)), /BUDGET_SOURCE_LINEAGE_INVALID/);
+  assert.notEqual(digest(json(target)), digest(json(buildPhase(c, 'core', contract, {}, foundation, { ...lineage, review: null }))));
+  const budget = buildPhase(c, 'project-budget', null, {}, foundation);
+  assert.deepEqual(buildPhase(c, 'project-budget', null, {}, foundation, lineage), budget);
+});
+test('source reconciliation rejects changed source, commit, config, execution history, review and live readbacks', () => {
+  for (const mutate of [
+    v => { v.proposal.priorSourceSha256 = digest('other'); }, v => { v.proposal.priorCommitSha = 'a'.repeat(40); },
+    v => { v.proposal.currentSourceSha256 = digest('other'); }, v => { v.proposal.configSha256 = digest('other'); },
+    v => { v.proposal.phaseSha256 = digest('other'); }, v => { v.proposal.receiptSha256 = digest('other'); },
+    v => { v.proposal.approvalSha256 = digest('other'); }, v => { v.proposal.journalSha256 = digest('other'); },
+    v => { v.proposal.extra = true; }, v => { v.proposal.readback.projectBudget.properties.amount = 250; },
+    v => { v.proposal.readback.stateBudget.properties.amount = 100; },
+    v => { v.proposal.readback.deployment.properties.correlationId = 'different'; },
+    v => { v.proposal.readback.deployment.properties.templateHash = 'different'; },
+    v => { v.proposal.readback.deployment.properties.timestamp = 'different'; },
+    v => { v.proposal.readback.deployment.properties.mode = 'Complete'; },
+    v => { v.proposal.readback.deployment.properties.provisioningState = 'Running'; },
+    v => { v.proposal.readback.checkedAt = '2099-09-23T00:00:00.000Z'; },
+    v => { v.proposal.readback.checkedAt = '2026-09-23T00:00:00.000Z'; },
+    v => { v.journal.outcome = 'reconciliation-required'; v.proposal.journalSha256 = digest(json(v.journal)); },
+    v => { v.journal.intentAt = '2026-09-23T01:00:00.000Z'; v.proposal.journalSha256 = digest(json(v.journal)); },
+    v => { v.approval.action = 'direct-arm-core'; v.proposal.approvalSha256 = digest(json(v.approval)); },
+  ]) {
+    const { receipt, source, lineage } = fixtureBudgetSourceLineage();
+    mutate(lineage); lineage.review.proposalSha256 = digest(json(lineage.proposal));
+    const target = buildPhase(c, 'core', contract, {}, foundation, lineage);
+    assert.throws(() => verifyProjectBudgetReceipt(c, receipt, foundation, source, lineage, target));
+  }
+  for (const mutate of [
+    v => { v.action = 'accept-any-source'; }, v => { v.proposalSha256 = digest('other'); },
+    v => { v.sourceSha256 = digest('other'); }, v => { v.extra = true; },
+    v => { v.reviewedAt = '2026-09-23T00:00:00.000Z'; }, v => { v.reviewedAt = 'NaN'; },
+    v => { v.reviewedAt = '2099-09-23T00:00:00.000Z'; },
+  ]) {
+    const { receipt, source, lineage } = fixtureBudgetSourceLineage(); mutate(lineage.review);
+    assert.throws(() => verifyProjectBudgetReceipt(c, receipt, foundation, source, lineage, buildPhase(c, 'core', contract, {}, foundation, lineage)));
+  }
+  const { receipt } = fixtureBudgetSourceLineage(), actual = structuredClone(receipt.deployment);
+  verifyBudgetDeploymentReadback(receipt, actual);
+  actual.properties.templateHash = 'new';
+  assert.throws(() => verifyBudgetDeploymentReadback(receipt, actual), /BUDGET_DEPLOYMENT_READBACK_CHANGED/);
+});
 function fixtureAdoption() {
   const config = structuredClone(c), storageId = `${r.stateGroup}/providers/Microsoft.Storage/storageAccounts/fixturestate`;
   const snapshot = { id: storageId, properties: { publicNetworkAccess: 'Disabled', allowSharedKeyAccess: false,
@@ -404,6 +569,24 @@ test('transport absence handling does not convert auth/quota/general strings int
   await assert.rejects(arm('PUT', r.workspace, '2023-09-01'), /FIXED_PHASE/);
   await assert.rejects(arm('POST', r.registry + '/listCredentials', '2023-07-01'), /NONMUTATING/);
   await assert.rejects(arm('DELETE', r.group, '2024-03-01'), /FORBIDDEN/);
+});
+test('forbidden ARM operations match complete components in every position without precedence gaps', async () => {
+  let calls = 0;
+  const p = buildPhase(c, 'core', contract), arm = transport(c, p, 'unused', async () => { calls++; return {}; });
+  for (const operation of ['listKeys', 'listSecrets', 'listAccountSas', 'listServiceSas', 'regenerateKey', 'register']) {
+    for (const component of [operation, operation.toUpperCase(), operation.toLowerCase()]) {
+      for (const id of [`${r.registry}/${component}`, `${r.registry}/${component}/`, `${r.registry}/${component}/nested`,
+        `${r.sub}/providers/${component}/resource`]) {
+        await assert.rejects(arm('GET', id, '2024-08-01'), /ARM_SCOPE_FORBIDDEN/);
+      }
+    }
+    assert.equal(calls, 0);
+  }
+  for (const name of ['allowlistKeys', 'listKeysBackup', 'register-helper', 'deregistered']) await arm('GET', `${r.group}/providers/Microsoft.Example/items/${name}`, '2024-08-01');
+  assert.equal(calls, 4);
+  await assert.rejects(arm('POST', `${r.registry}/allowlistKeys`, '2024-08-01'), /NONMUTATING_POST_ONLY/);
+  await assert.rejects(arm('PUT', `${r.registry}/register-helper`, '2024-08-01'), /FIXED_PHASE_PUT_ONLY/);
+  assert.equal(calls, 4);
 });
 test('uncertain submission is never replayed or followed by destructive rollback', async () => {
   const f = executionFixture(), controller = new CollectorController(c, f.p, f.io);

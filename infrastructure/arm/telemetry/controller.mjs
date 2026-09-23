@@ -1,24 +1,41 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
-import { readFile, open, mkdir, lstat, rename, rm } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { readFile, open, mkdir, rename, rm } from 'node:fs/promises';
 import { basename, dirname, resolve, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual, types } from 'node:util';
 import { PHASES, buildPhase, deploymentName, validateConfig, ids, digest, json, fail, sameId, storageContract, firstReleaseCost, assertOwned, RECEIVER_COMMAND,
-  closed, budgetConfiguration, projectBudgetFilter, verifyFoundationBudgets } from './definition.mjs';
+  closed, budgetConfiguration, projectBudgetFilter, verifyFoundationBudgets, budgetSourceLineageBinding } from './definition.mjs';
 import { assertBudget, verifyWhatIf, verifyResource, verifyApproval, verifyFreshReview, sourceContractsSummary, permitFirstPush } from './policy.mjs';
 
 const execute = promisify(execFile), here = dirname(fileURLToPath(import.meta.url));
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+export const MAX_PRIVATE_ARTIFACT_BYTES = 64 * 1024 * 1024;
+function privateOwner() {
+  if (!['darwin', 'linux'].includes(process.platform) || typeof process.getuid !== 'function' ||
+      typeof process.geteuid !== 'function' || !constants.O_NOFOLLOW || !constants.O_DIRECTORY || !constants.O_NONBLOCK) fail('PRIVATE_POSIX_IO_REQUIRED');
+  const uid = process.getuid();
+  if (!Number.isSafeInteger(uid) || uid < 0 || uid !== process.geteuid()) fail('PRIVATE_POSIX_IDENTITY_REQUIRED');
+  return BigInt(uid);
+}
+function verifyPrivateFile(info, owner) {
+  if (!info.isFile() || info.nlink !== 1n || info.uid !== owner || (info.mode & 0o7777n) !== 0o600n) fail('PRIVATE_FILE_REQUIRED');
+  if (info.size < 0n || info.size > BigInt(MAX_PRIVATE_ARTIFACT_BYTES)) fail('PRIVATE_FILE_TOO_LARGE');
+}
 export async function privateDirectory(relative) {
+  const owner = privateOwner();
   const path = resolve(relative), root = resolve(here, '.operator-private');
   if (isAbsolute(relative) || (path !== root &&
       (dirname(path) !== root || !/^revision-\d{8}-[a-z0-9-]{1,32}$/u.test(basename(path))))) fail('PRIVATE_CANONICAL_DIRECTORY_REQUIRED');
   for (const directory of new Set([root, path])) {
     await mkdir(directory, { recursive: true, mode: 0o700 });
-    const info = await lstat(directory);
-    if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o077)) fail('PRIVATE_DIRECTORY_REQUIRED');
+    const handle = await open(directory, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_DIRECTORY);
+    try {
+      const info = await handle.stat({ bigint: true });
+      if (!info.isDirectory() || info.uid !== owner || (info.mode & 0o7777n) !== 0o700n) fail('PRIVATE_DIRECTORY_REQUIRED');
+    } finally { await handle.close(); }
   }
   return path;
 }
@@ -40,11 +57,39 @@ export async function save(directory, name, value) {
 }
 export async function load(directory, name, optional = false) {
   if (!/^[a-z0-9.-]+$/u.test(name)) fail('PRIVATE_FILENAME_INVALID');
+  const owner = privateOwner();
+  let handle;
   try {
-    const path = resolve(directory, name), info = await lstat(path);
-    if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o077)) fail('PRIVATE_FILE_REQUIRED');
-    return JSON.parse(await readFile(path, 'utf8'));
-  } catch (e) { if (optional && e.code === 'ENOENT') return null; throw e; }
+    handle = await open(resolve(directory, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch (error) {
+    if (optional && error.code === 'ENOENT') return null;
+    throw new Error('PRIVATE_FILE_OPEN_FAILED');
+  }
+  try {
+    const before = await handle.stat({ bigint: true });
+    verifyPrivateFile(before, owner);
+    const chunks = [];
+    let size = 0;
+    while (true) {
+      const buffer = Buffer.alloc(Math.min(65536, MAX_PRIVATE_ARTIFACT_BYTES + 1 - size));
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, size);
+      size += bytesRead;
+      if (size > MAX_PRIVATE_ARTIFACT_BYTES) fail('PRIVATE_FILE_TOO_LARGE');
+      if (!bytesRead) break;
+      chunks.push(buffer.subarray(0, bytesRead));
+    }
+    const after = await handle.stat({ bigint: true });
+    verifyPrivateFile(after, owner);
+    if (BigInt(size) !== before.size ||
+        ['dev', 'ino', 'uid', 'gid', 'mode', 'nlink', 'size', 'mtimeNs', 'ctimeNs'].some(k => before[k] !== after[k])) fail('PRIVATE_FILE_CHANGED');
+    try { return JSON.parse(Buffer.concat(chunks, size).toString('utf8')); }
+    catch { fail('PRIVATE_JSON_INVALID'); }
+  } catch (error) {
+    if (['PRIVATE_FILE_REQUIRED', 'PRIVATE_FILE_TOO_LARGE', 'PRIVATE_FILE_CHANGED', 'PRIVATE_JSON_INVALID'].includes(error.message)) throw error;
+    throw new Error('PRIVATE_FILE_READ_FAILED');
+  } finally {
+    try { await handle.close(); } catch { fail('PRIVATE_FILE_CLOSE_FAILED'); }
+  }
 }
 export async function sourceDigest() {
   const names = ['definition.mjs', 'policy.mjs', 'controller.mjs'];
@@ -123,10 +168,11 @@ export async function az(args, timeout = 60000, run = execute) {
 }
 export function transport(c, phase, directory, invoke = az) {
   const r = ids(c);
+  const forbiddenOperations = new Set(['listkeys', 'listsecrets', 'listaccountsas', 'listservicesas', 'regeneratekey', 'register']);
   return async (method, id, version, body, filter, beforeDispatch) => {
     if (!['GET', 'POST', 'PUT'].includes(method) || (id !== r.sub && !id.startsWith(`${r.sub}/`)) ||
         /[?#\\]|\.\.|%/u.test(id) || !/^\d{4}-\d{2}-\d{2}$/u.test(version) ||
-        /listKeys|listSecrets|listAccountSas|listServiceSas|regenerateKey|\/register$/iu.test(id)) fail('ARM_SCOPE_FORBIDDEN');
+        id.split('/').some(component => forbiddenOperations.has(component.toLowerCase()))) fail('ARM_SCOPE_FORBIDDEN');
     if (method === 'PUT' && id !== phase.deploymentId) fail('FIXED_PHASE_PUT_ONLY');
     if (method === 'PUT' && (typeof beforeDispatch !== 'function' || types.isAsyncFunction(beforeDispatch))) fail('DISPATCH_GUARD_REQUIRED');
     if (method === 'POST' && id !== `${r.sub}/providers/Microsoft.ContainerRegistry/checkNameAvailability`) fail('NONMUTATING_POST_ONLY');
@@ -206,14 +252,64 @@ export async function verifyOrigin(origin, arm, c, adoption) {
   if (dep?.properties?.provisioningState !== 'Succeeded' ||
       ['correlationId', 'timestamp', 'templateHash'].some(k => dep.properties[k] !== origin.bootstrap[k])) fail('ORIGINAL_CREATION_RECEIPT_CHANGED');
 }
-export function verifyProjectBudgetReceipt(c, receipt, foundation, sourceSha256) {
+export const PUBLISHED_BUDGET_SOURCE = Object.freeze({
+  commitSha: '39fa4f80f489cf208fdfe9d03e3ba6b3f27313e8',
+  sourceSha256: '4df9940e035ed7f3bf81156cb3aa8075e84fb21121a81b51a05c3e5b51630827',
+});
+function lineageInstant(value) {
+  const time = typeof value === 'string' ? Date.parse(value) : NaN;
+  if (!Number.isSafeInteger(time) || new Date(time).toISOString() !== value) fail('BUDGET_SOURCE_LINEAGE_INVALID');
+  return time;
+}
+export function verifyBudgetDeploymentReadback(receipt, actual) {
+  if (!sameId(actual?.id, receipt.deployment.id) || actual.properties?.provisioningState !== 'Succeeded' ||
+      actual.properties.mode !== 'Incremental' ||
+      ['correlationId', 'timestamp', 'templateHash'].some(k => typeof receipt.deployment.properties[k] !== 'string' ||
+        !receipt.deployment.properties[k] || actual.properties[k] !== receipt.deployment.properties[k])) fail('BUDGET_DEPLOYMENT_READBACK_CHANGED');
+}
+export function verifyBudgetSourceLineageProposal(c, receipt, foundation, sourceSha256, lineage, now = Date.now()) {
+  const proposal = lineage?.proposal, phase = buildPhase(c, 'project-budget', null, {}, foundation), r = ids(c);
+  closed(proposal, ['version', 'kind', 'priorCommitSha', 'priorSourceSha256', 'currentSourceSha256', 'configSha256',
+    'phaseSha256', 'receiptSha256', 'approvalSha256', 'journalSha256', 'readback']);
+  closed(proposal.readback, ['checkedAt', 'deployment', 'projectBudget', 'stateBudget']);
+  closed(lineage.journal, ['phase', 'phaseSha256', 'intentAt', 'outcome']);
+  if (proposal.version !== 1 || proposal.kind !== 'reconcile-published-budget-source' ||
+      proposal.priorCommitSha !== PUBLISHED_BUDGET_SOURCE.commitSha ||
+      proposal.priorSourceSha256 !== PUBLISHED_BUDGET_SOURCE.sourceSha256 || receipt.sourceSha256 !== proposal.priorSourceSha256 ||
+      !/^[0-9a-f]{64}$/u.test(sourceSha256) || proposal.currentSourceSha256 !== sourceSha256 || sourceSha256 === proposal.priorSourceSha256 ||
+      proposal.configSha256 !== digest(json(c)) || proposal.phaseSha256 !== digest(json(phase)) ||
+      proposal.receiptSha256 !== digest(json(receipt)) || proposal.approvalSha256 !== digest(json(lineage.approval)) ||
+      proposal.journalSha256 !== digest(json(lineage.journal)) || lineage.journal.phase !== 'project-budget' ||
+      lineage.journal.phaseSha256 !== proposal.phaseSha256 || lineage.journal.outcome !== 'readback-qualified') fail('BUDGET_SOURCE_LINEAGE_INVALID');
+  verifyProjectBudgetReceipt(c, receipt, foundation, proposal.priorSourceSha256);
+  verifyApproval(lineage.approval, c, phase, proposal.priorSourceSha256, lineageInstant(lineage.approval.approvedAt));
+  const intentAt = lineageInstant(lineage.journal.intentAt), completedAt = lineageInstant(receipt.completedAt);
+  const checkedAt = lineageInstant(proposal.readback.checkedAt);
+  if (intentAt < lineageInstant(lineage.approval.approvedAt) || intentAt >= lineageInstant(lineage.approval.expiresAt) ||
+      completedAt < intentAt || checkedAt < completedAt || checkedAt > now) fail('BUDGET_SOURCE_LINEAGE_INVALID');
+  verifyBudgetDeploymentReadback(receipt, proposal.readback.deployment);
+  if (!sameId(proposal.readback.projectBudget?.id, r.projectBudget) || !sameId(proposal.readback.stateBudget?.id, r.stateBudget)) fail('BUDGET_SOURCE_LINEAGE_INVALID');
+  assertBudget(proposal.readback.projectBudget, c, c.budget.projectAmount, projectBudgetFilter(c));
+  assertBudget(proposal.readback.stateBudget, c, c.budget.stateAmount);
+}
+export function verifyProjectBudgetReceipt(c, receipt, foundation, sourceSha256, lineage, targetPhase) {
   const phase = buildPhase(c, 'project-budget', null, {}, foundation), r = ids(c);
   if (receipt?.qualified !== true || receipt.phase !== 'project-budget' ||
       receipt.phaseSha256 !== digest(json(phase)) || receipt.configSha256 !== digest(json(c)) ||
-      receipt.sourceSha256 !== sourceSha256 || !sameId(receipt.deployment?.id, phase.deploymentId) ||
+      !sameId(receipt.deployment?.id, phase.deploymentId) ||
       receipt.deployment.properties?.provisioningState !== 'Succeeded' ||
       !isDeepStrictEqual(Object.keys(receipt.resources ?? {}), [r.projectBudget])) fail('PROJECT_BUDGET_RECEIPT_REQUIRED');
   verifyResource(c, phase, phase.resources[0], receipt.resources[r.projectBudget]);
+  if (receipt.sourceSha256 !== sourceSha256) {
+    if (!lineage?.proposal || !lineage.review) fail('BUDGET_SOURCE_LINEAGE_REVIEW_REQUIRED');
+    verifyBudgetSourceLineageProposal(c, receipt, foundation, sourceSha256, lineage);
+    const review = lineage.review;
+    closed(review, ['version', 'action', 'proposalSha256', 'sourceSha256', 'reviewedAt']);
+    if (review.version !== 1 || review.action !== 'accept-exact-budget-source-lineage' ||
+        review.proposalSha256 !== digest(json(lineage.proposal)) || review.sourceSha256 !== sourceSha256 ||
+        lineageInstant(review.reviewedAt) < lineageInstant(lineage.proposal.readback.checkedAt) || lineageInstant(review.reviewedAt) > Date.now() ||
+        !targetPhase || !isDeepStrictEqual(targetPhase.budgetSourceLineage, budgetSourceLineageBinding(lineage))) fail('BUDGET_SOURCE_LINEAGE_INVALID');
+  }
 }
 export async function validateReadOnly(c, phase, receipts, directory, invoke = az) {
   const r = ids(c), known = Object.values(receipts).flatMap(v => Object.keys(v.resources ?? {}));
@@ -236,7 +332,11 @@ export async function checkReadOnly(c, phase, origin, receipts, directory, evide
   const account = await invoke(['account', 'show', '--subscription', c.subscriptionId, '--only-show-errors', '--output', 'json']);
   if (account?.id !== c.subscriptionId || account?.tenantId !== c.tenantId || account?.state !== 'Enabled' || account?.environmentName !== 'AzureCloud') fail('EXPLICIT_ACCOUNT_MISMATCH');
   await verifyOrigin(origin, arm, c, evidenceFiles.scannerAdoption);
-  if (phase.phase !== 'project-budget') verifyProjectBudgetReceipt(c, receipts['project-budget'], foundation, await sourceDigest());
+  if (phase.phase !== 'project-budget') {
+    const source = await sourceDigest(), receipt = receipts['project-budget'];
+    verifyProjectBudgetReceipt(c, receipt, foundation, source, evidenceFiles.budgetSourceLineage, phase);
+    if (receipt.sourceSha256 !== source) verifyBudgetDeploymentReadback(receipt, await arm('GET', receipt.deployment.id, '2022-09-01'));
+  }
   const evidence = {};
   for (const [name, id, api] of [
     ['providers', `${r.sub}/providers`, '2021-04-01'],
@@ -346,7 +446,11 @@ async function main() {
   if (Object.entries(process.env).some(([key, value]) => value && /^(CI$|GITHUB_|ACTIONS_|RUNNER_)/u.test(key))) fail('UNTRUSTED_RUNNER_FORBIDDEN');
   const origin = await load(directory, 'origin.json'), receipts = await load(directory, 'receipts.json');
   const evidenceFiles = { scannerAdoption: await load(directory, 'scanner-adoption.json'),
-    foundationBudgets: await load(directory, 'foundation-budgets.json') };
+    foundationBudgets: await load(directory, 'foundation-budgets.json'),
+    budgetSourceLineage: { proposal: await load(directory, 'budget-source-lineage.json', true),
+      review: await load(directory, 'budget-source-lineage-review.json', true),
+      approval: await load(directory, 'project-budget-approval.json', true),
+      journal: await load(directory, 'project-budget-journal.json', true) } };
   verifyScannerAdoption(c, origin, evidenceFiles.scannerAdoption);
   verifyFoundationBudgets(c, evidenceFiles.foundationBudgets);
   if (['image-before-push', 'image-readback'].includes(operation)) {
@@ -354,7 +458,7 @@ async function main() {
     await registryReview(c, receipts, directory, operation === 'image-before-push');
     console.log('PRIVATE_IMAGE_REVIEW_RECORDED_NO_PUSH_AUTHORITY'); return;
   }
-  const phase = buildPhase(c, phaseName, await storageContract(), receipts, evidenceFiles.foundationBudgets);
+  const phase = buildPhase(c, phaseName, await storageContract(), receipts, evidenceFiles.foundationBudgets, evidenceFiles.budgetSourceLineage);
   if (operation === 'prepare') {
     if (await load(directory, `${phaseName}-journal.json`, true) || await load(directory, `${phaseName}-approval.json`, true)) fail('PRESERVE_PHASE_HISTORY');
     await save(directory, `${phaseName}-plan.json`, { ...phase, sourceSha256: await sourceDigest(), config: c,
@@ -364,7 +468,8 @@ async function main() {
   }
   const prepared = await load(directory, `${phaseName}-plan.json`);
   if (prepared.sourceSha256 !== await sourceDigest() || prepared.configSha256 !== digest(json(c)) ||
-      !isDeepStrictEqual(prepared.template, phase.template)) fail('PREPARED_PHASE_DRIFT');
+      !isDeepStrictEqual(prepared.template, phase.template) ||
+      !isDeepStrictEqual(prepared.budgetSourceLineage ?? null, phase.budgetSourceLineage ?? null)) fail('PREPARED_PHASE_DRIFT');
   if (operation === 'check') {
     await checkReadOnly(c, phase, origin, receipts, directory, evidenceFiles); console.log('READONLY_PHASE_CHECK_PASSED'); return;
   }

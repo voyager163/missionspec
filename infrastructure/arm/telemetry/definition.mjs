@@ -191,7 +191,11 @@ function appResource(c, receipts, enabled) {
   }, { location: c.location, tags: ownerTags(c), identity: {
     type: 'UserAssigned', userAssignedIdentities: { [r.ingestIdentity]: {}, [r.pullIdentity]: {} } } });
 }
-export function buildPhase(c, phase, contract, receipts = {}, foundation) {
+export function budgetSourceLineageBinding(lineage) {
+  return lineage?.proposal ? { proposalSha256: digest(json(lineage.proposal)),
+    reviewSha256: lineage.review ? digest(json(lineage.review)) : null } : null;
+}
+export function buildPhase(c, phase, contract, receipts = {}, foundation, sourceLineage) {
   validateConfig(c); if (!PHASES.includes(phase)) fail('PHASE_NOT_SUPPORTED');
   const r = ids(c), regional = { location: c.location, tags: ownerTags(c) };
   let resources, scope = r.group;
@@ -263,6 +267,7 @@ export function buildPhase(c, phase, contract, receipts = {}, foundation) {
   return { version: 1, phase, configSha256: digest(json(c)), scope,
     deploymentId: `${scope}/providers/Microsoft.Resources/deployments/${deploymentName(c, phase)}`,
     template: template(resources, scope === r.sub), resources: descriptors,
+    ...(phase !== 'project-budget' && sourceLineage?.proposal ? { budgetSourceLineage: budgetSourceLineageBinding(sourceLineage) } : {}),
     requiredReceipts: phase === 'project-budget' ? [] : ['project-budget'],
     ...(phase === 'project-budget' ? { budgetBefore: budgetConfiguration(foundation.project) } : {}),
     allowedModify: phase === 'project-budget' ? { [r.projectBudget]: ['properties.amount'] }
