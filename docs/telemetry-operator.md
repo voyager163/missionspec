@@ -41,7 +41,7 @@ paths, so the local operator and private directory remain part of the trust boun
 
 ```sh
 node --test infrastructure/arm/telemetry/tests/*.test.mjs
-node infrastructure/arm/telemetry/controller.mjs reconcile upload-role infrastructure/arm/telemetry/.operator-private/revision-20260923-assignment-absence
+node infrastructure/arm/telemetry/controller.mjs reconcile disabled-app infrastructure/arm/telemetry/.operator-private/revision-20260923-app-readback
 ```
 
 `prepare` is local. `check` rechecks account/permissions/providers/region/quota,
@@ -83,11 +83,17 @@ display metadata and the DCR's computed workspace ID. Its original
 The custom upload-role definition later succeeded and qualified under `4ee9324`.
 Its original source, approval, journal and receipt remain unchanged. No role
 assignment is implied by defining that role.
+The three scoped assignments subsequently succeeded under `9e07fb3`, followed
+by a separately released, verified single-image publication. The disabled app
+also reached ARM `Succeeded` under that source, but its legacy readback stopped
+on the provider representations described below. Its original failed journal
+and absent qualified receipt remain historical facts. Platform `Running` or
+`Healthy` status is not an independently performed HTTP health/disabled-503 test.
 
-One versioned contract now covers these **five existing phases**, rather than
+One versioned contract now covers these **seven existing ARM phases**, rather than
 adding per-source trust exceptions:
 
-1. `execution-origins-v2.json` contains immutable records of the original
+1. `execution-origins-v3.json` contains immutable records of the original
    publication commit/source, exact phase/template, approval, intent journal,
    preflight, validation, what-if, first readbacks and original receipt (null
    when legacy qualification failed), plus the **recorded prerequisite receipt
@@ -100,7 +106,11 @@ adding per-source trust exceptions:
    byte-for-byte. Fixed Git blob reads verify each declared source hash and its
    ancestry in the repository; historical code is never executed. The parent
    independently confirms publication and scanner results.
-2. `reconcile upload-role` uses only scoped GETs for all recorded completed phases.
+   The assignment record separately retains its scoped role-definition reads
+   and compound approval baseline; other phases retain their foundation-only
+   baseline. Neither is substituted for the other.
+2. `reconcile disabled-app` uses only scoped GETs and authenticated registry
+   inventory/manifest reads for all recorded completed phases.
    The command names the latest phase in the recorded sequence. It verifies the original approval's
    validity **at intent time**, full phase/config/preflight bindings, validated
    ARM template hash and successful deployment identity. It rereads the exact
@@ -109,12 +119,12 @@ adding per-source trust exceptions:
    deployment resubmission or next-phase preparation is available in this path.
    The immutable `reconciliation-proposal.json` is **not qualified authority**.
 3. The parent must separately author `reconciliation-review.json`, with exactly
-   `version: 2`, `action: "accept-exact-arm-reconciliation"`, `proposalSha256`,
+   `version: 3`, `action: "accept-exact-arm-reconciliation"`, `proposalSha256`,
    `sourceSha256` and canonical UTC `reviewedAt`. Review must bind the exact
    current source/proposal and cannot predate the snapshot or lie in the future.
    There is no force flag, inferred approval, or automatic historical-source
    exception.
-4. Only then may `qualify-reconciliation upload-role` repeat the live read-only checks
+4. Only then may `qualify-reconciliation disabled-app` repeat the live read-only checks
    and write **new** `reconciliation-receipts.json` and a qualification record.
    These explicitly identify a reviewed read-only reconciliation, retain the
    original executed source and journal outcome, and distinguish legacy receipt
@@ -128,8 +138,18 @@ each actual effect still requires full what-if review and its own unexpired
 phase approval. Completed phases are refused by `prepare`, `check`,
 `validate-preview` and `execute`. A later source change requires a fresh
 read-only proposal/review, **not replay of any completed phase**. Old budget-only
-lineage and version-1 reconciliation artifacts remain historical evidence, not
+lineage and version-1/version-2 reconciliation artifacts remain historical evidence, not
 an active parallel authority path or a substitute for the new review.
+
+Image publication is **not an ARM execution**. The origin bundle's separate
+`imagePublication` record binds the original one-copy release and validity at
+intent, publication binding, journal, qualification record, exact manifest/config
+bytes and the unmodified publication receipt. Manifest and config hashes are
+verified independently, including the source/notices graph and retained scanner
+and native conditions. Current registry reads must still show exactly the one
+reviewed repository/digest/config with admin and anonymous access disabled.
+No publication is repeated, promoted into a fictitious ARM deployment, or
+rewritten as execution by the new policy source.
 
 Review full private JSON on this machine. SHA-256 binds bytes, not human
 authority. Only a separately authorized exact phase approval can invoke
@@ -301,6 +321,50 @@ output stream, Direct kind, actual immutable ID and HTTPS ingestion endpoint
 remain mandatory. These documented metadata fields are not classified as
 secrets merely because they are read-only; complete operator records still
 contain scoped account/resource identifiers and stay in the private directory.
+
+### Disabled-app provider representations and security defaults
+
+The [2025-07-01 common schema](https://github.com/Azure/azure-rest-api-specs/blob/main/specification/app/resource-manager/Microsoft.App/ContainerApps/stable/2025-07-01/CommonDefinitions.json)
+marks `ephemeralStorage` read-only and identifies probes by `type`.
+[Microsoft's storage limits](https://learn.microsoft.com/azure/container-apps/storage-mounts#ephemeral-storage)
+provide **1 GiB at 0.25 vCPU or lower**. Readback permits only `"1Gi"` for the
+reviewed **0.25 vCPU/0.5 GiB** profile; other values or types fail. This is
+provider-allocated temporary storage, not a newly requested volume, durable
+archive, or proof of a read-only production filesystem.
+
+The [Container Apps schema](https://github.com/Azure/azure-rest-api-specs/blob/main/specification/app/resource-manager/Microsoft.App/ContainerApps/stable/2025-07-01/ContainerApps.json)
+defines HTTP transport and optional registry username/secret-reference strings.
+The observed GET returned `Http` rather than the template's `http`; only that
+exact pair is equivalent, not arbitrary enum/string case folding. Registry
+`username` and `passwordSecretRef` may be absent or empty strings in this
+identity-only route. Null, nonempty credentials, extra registries or unknown
+registry properties fail. These optional strings are not misrepresented as
+globally read-only properties.
+
+Probes compare by **unique exact type**, not array order. Their entire reviewed
+definitions still match: missing/duplicate/extra probes or changed paths,
+headers, periods, thresholds or commands fail. ARM resource-ID casing alone is
+ignored for the two UAMI attachments, lifecycle settings and registry identity,
+with case-folded duplicate detection. The actual attached client/principal IDs
+must match independent reads of the exact owned UAMIs. GUID values and lifecycle
+names are not case-folded: ingest remains `Main`, pull remains `None`.
+
+Known service representations remain tightly bounded: empty revision suffix,
+KEDA cooldown **300 seconds**, polling **30 seconds**, and unused HTTP
+`exposedPort: 0`. Null/absent/empty optional container, volume and service-bind
+lists mean no extra components. Nonempty init containers, additional containers,
+mounts, volumes, delegated identities, service binds, Dapr, runtime
+instrumentation, secrets, custom ingress or any container security-context
+property are rejected. Unknown fields in these reviewed configuration sections
+are rejected rather than globally stripped.
+
+The actual image stays pinned to manifest `91c72962…`, config `46e59e2d…`,
+nonroot `65532:65532` and the unchanged optimizing-compiler/debugger restrictions.
+No command/argument override or extra environment variable is allowed. HTTPS
+8080, the complete probe/scaler definitions, min=max=1, all request/work limits
+and **`MSR_INGESTION_ENABLED=false`** remain mandatory for this phase.
+No sandbox guarantee, CVE patch claim, HTTP qualification or admission enablement
+follows from accepting these provider representations.
 
 Preserved state remains private Blob/PE/DNS with shared-key/public access
 disabled. The explicitly reviewed Lighthouse NSG/association and opaque

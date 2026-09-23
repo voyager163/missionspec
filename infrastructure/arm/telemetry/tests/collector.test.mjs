@@ -7,7 +7,8 @@ import { chmod, link, mkdir, open, readFile, readdir, rename, rm, symlink, trunc
 import { buildPhase, storageContract, ids, json, digest, ownerTags, firstReleaseCost, PHASES, LIMITS, RECEIVER_DIGEST, RECEIVER_COMMAND,
   BUDGET, budgetProperties, budgetConfiguration, projectBudgetFilter, validateConfig, assignmentRoleTargets } from '../definition.mjs';
 import { verifyWhatIf, assertBudget, permitFirstPush, verifyResource, executionIdentity,
-  verifyExecutionOrigins, verifyReconciliation, verifyDeploymentIdentity, roleDefinitionSignature } from '../policy.mjs';
+  verifyExecutionOrigins, verifyReconciliation, verifyDeploymentIdentity, roleDefinitionSignature, verifyImagePublication, verifyPublicationReadback } from '../policy.mjs';
+import { manifestJson, configJson } from './receiver-oci.fixture.mjs';
 import { CollectorController, az, transport, validateReadOnly, verifyScannerAdoption, verifyOrigin, verifyProjectBudgetReceipt,
   checkReadOnly, load, saveImmutable, MAX_PRIVATE_ARTIFACT_BYTES, DIAGNOSTIC_API, privateDirectory, sourceDigest,
   publishedSourceDigest, collectReconciliation, reviewedReconciliationReceipts, verifyFreshReconciliation, readPrivacy, readAssignmentRoleDefinitions } from '../controller.mjs';
@@ -35,8 +36,8 @@ function fixtureReceipts(config = c) {
   const owned = (id, properties) => ({ id, tags: ownerTags(c), properties });
   const core = { configSha256: digest(json(c)), qualified: true, resources: {
     [r.workspace]: owned(r.workspace, { features: { disableLocalAuth: true, enableLogAccessUsingOnlyResourcePermissions: false } }),
-    [r.ingestIdentity]: owned(r.ingestIdentity, { clientId: '00000000-0000-4000-8000-000000000005', principalId: '00000000-0000-4000-8000-000000000006' }),
-    [r.pullIdentity]: owned(r.pullIdentity, { clientId: '00000000-0000-4000-8000-000000000007', principalId: '00000000-0000-4000-8000-000000000008' }),
+    [r.ingestIdentity]: owned(r.ingestIdentity, { clientId: '00000000-0000-4000-8000-000000000005', principalId: '00000000-0000-4000-8000-000000000006', tenantId: c.tenantId }),
+    [r.pullIdentity]: owned(r.pullIdentity, { clientId: '00000000-0000-4000-8000-000000000007', principalId: '00000000-0000-4000-8000-000000000008', tenantId: c.tenantId }),
     [r.registry]: owned(r.registry, { loginServer: `${c.registryName}.azurecr.io` }),
   } };
   return { 'project-budget': { qualified: true, phase: 'project-budget', configSha256: digest(json(c)),
@@ -269,10 +270,15 @@ test('disabled receiver is digest-bound, singleton HTTPS, explicit identities an
   assert.equal(permitFirstPush(c, [], []).maximumNewImages, 1);
 });
 test('runtime readback rejects command, identity, secret, ingress, scaler and quota drift', () => {
-  const p = buildPhase(c, 'disabled-app', contract, fixtureReceipts()), d = p.resources[0];
+  const receipts = fixtureReceipts(), p = buildPhase(c, 'disabled-app', contract, receipts), d = p.resources[0];
   const actual = { ...structuredClone(d.expected), id: d.id };
   actual.properties.configuration.ingress.fqdn = 'missionspec-test.australiaeast.azurecontainerapps.io';
-  verifyResource(c, p, d, actual);
+  for (const id of [r.ingestIdentity, r.pullIdentity]) {
+    const { clientId, principalId } = receipts.core.resources[id].properties;
+    actual.identity.userAssignedIdentities[id] = { clientId, principalId };
+  }
+  const context = { identities: receipts.core.resources, publication: receipts.publication };
+  verifyResource(c, p, d, actual, context);
   for (const mutate of [
     value => { value.properties.template.containers[0].command = ['sh']; },
     value => { value.properties.template.containers[0].env.push({ name: 'NODE_OPTIONS', value: '--inspect' }); },
@@ -283,7 +289,116 @@ test('runtime readback rejects command, identity, secret, ingress, scaler and qu
     value => { value.properties.template.containers[0].env.find(v => v.name === 'MSR_EVENTS_PER_DAY').value = '1000000'; },
   ]) {
     const bad = structuredClone(actual); mutate(bad);
-    assert.throws(() => verifyResource(c, p, d, bad));
+    assert.throws(() => verifyResource(c, p, d, bad, context));
+  }
+});
+test('actual app defaults qualify only as bounded readback equivalences with independent identity and image proof', () => {
+  const f = fixtureReconciliation(), phase = f.origins.records[6].phase, descriptor = phase.resources[0];
+  const actual = f.proposal.results['disabled-app'].resources[r.app];
+  const context = { identities: f.proposal.identities, publication: f.origins.imagePublication.receipt };
+  verifyResource(c, phase, descriptor, actual, context);
+  for (const transport of ['http', 'Http']) {
+    const value = structuredClone(actual); value.properties.configuration.ingress.transport = transport;
+    value.properties.template.containers[0].probes.reverse();
+    verifyResource(c, phase, descriptor, value, context);
+  }
+  assert.equal(actual.properties.template.containers[0].resources.ephemeralStorage, '1Gi');
+  for (const change of [
+    v => { v.properties.template.containers[0].resources.ephemeralStorage = '2Gi'; },
+    v => { v.properties.template.containers[0].resources.ephemeralStorage = 1; },
+    v => { v.properties.template.containers[0].resources.ephemeralStorage = null; },
+    v => { v.properties.template.containers[0].resources.cpu = 0.5; },
+    v => { v.properties.template.containers[0].resources.memory = '1Gi'; },
+    v => { v.properties.template.containers[0].resources.gpu = 1; },
+    v => { v.properties.configuration.ingress.transport = 'HTTP'; },
+    v => { v.properties.configuration.ingress.transport = 'http2'; },
+    v => { v.properties.template.containers[0].probes.push(v.properties.template.containers[0].probes[0]); },
+    v => { v.properties.template.containers[0].probes.pop(); },
+    v => { v.properties.template.containers[0].probes[0].type = 'Other'; },
+    v => { v.properties.template.containers[0].probes[0].httpGet.path = '/other'; },
+    v => { v.properties.template.containers[0].probes[0].httpGet.httpHeaders = [{ name: 'Authorization', value: 'other' }]; },
+    v => { v.properties.template.containers[0].probes[0].periodSeconds = 99; },
+    v => { v.properties.template.containers[0].probes[0].failureThreshold = 99; },
+    v => { v.properties.template.containers[0].probes[0].command = ['other']; },
+    v => { v.properties.configuration.registries[0].username = 'user'; },
+    v => { v.properties.configuration.registries[0].passwordSecretRef = 'password'; },
+    v => { v.properties.configuration.registries[0].username = null; },
+    v => { v.properties.configuration.registries[0].passwordSecretRef = false; },
+    v => { v.properties.configuration.registries.push(v.properties.configuration.registries[0]); },
+    v => { v.properties.configuration.registries[0].extra = true; },
+    v => { v.properties.configuration.registries[0].identity = r.ingestIdentity; },
+    v => { v.properties.configuration.identitySettings.push({ ...v.properties.configuration.identitySettings[0], identity: r.ingestIdentity.toUpperCase() }); },
+    v => { const [key, value] = Object.entries(v.identity.userAssignedIdentities)[0]; v.identity.userAssignedIdentities[key.toUpperCase()] = value; },
+    v => { v.identity.userAssignedIdentities[r.ingestIdentity.toLowerCase()].clientId = c.operatorPrincipalId; },
+    v => { v.identity.userAssignedIdentities[r.pullIdentity.toLowerCase()].principalId = c.operatorPrincipalId; },
+    v => { v.identity.userAssignedIdentities[r.ingestIdentity.toLowerCase()].unknown = true; },
+    v => { v.identity.userAssignedIdentities[r.workspace] = { clientId: c.runId, principalId: c.operatorPrincipalId }; },
+    v => { v.properties.configuration.identitySettings[1].lifecycle = 'All'; },
+    v => { v.properties.configuration.identitySettings[0].extra = true; },
+    v => { v.properties.configuration.runtime = { java: { enableMetrics: true } }; },
+    v => { v.properties.configuration.secrets = [{ name: 'new' }]; },
+    v => { v.properties.configuration.dapr = { enabled: false }; },
+    v => { v.properties.configuration.service = {}; },
+    v => { v.properties.template.containers[0].securityContext = { privileged: true }; },
+    v => { v.properties.template.containers[0].securityContext = null; },
+    v => { v.properties.template.containers[0].volumeMounts = [{ mountPath: '/data', volumeName: 'extra' }]; },
+    v => { v.properties.template.volumes = [{ name: 'extra', storageType: 'EmptyDir' }]; },
+    v => { v.properties.template.serviceBinds = [{ name: 'other' }]; },
+    v => { v.properties.template.initContainers = [{ name: 'init', image: 'other' }]; },
+    v => { v.properties.template.containers.push(structuredClone(v.properties.template.containers[0])); },
+    v => { v.properties.template.containers[0].command = ['other']; },
+    v => { v.properties.template.containers[0].args = ['--inspect']; },
+    v => { v.properties.template.containers[0].env.push({ name: 'NODE_OPTIONS', value: '--inspect' }); },
+    v => { v.properties.template.containers[0].env.find(v => v.name === 'MSR_INGESTION_ENABLED').value = 'true'; },
+    v => { v.properties.template.scale.cooldownPeriod = 301; },
+    v => { v.properties.template.scale.pollingInterval = 31; },
+    v => { v.properties.template.revisionSuffix = 'changed'; },
+    v => { v.properties.configuration.ingress.exposedPort = 80; },
+    v => { v.properties.configuration.ingress.additionalPortMappings = [{ external: true, targetPort: 9090 }]; },
+    v => { v.properties.configuration.ingress.corsPolicy = {}; },
+    v => { v.properties.delegatedIdentities = [r.ingestIdentity]; },
+    v => { v.properties.configuration.unknown = null; },
+    v => { v.properties.unknown = null; },
+  ]) {
+    const bad = structuredClone(actual); change(bad);
+    assert.throws(() => verifyResource(c, phase, descriptor, bad, context), /^Error: APP_/);
+  }
+  assert.throws(() => verifyResource(c, phase, descriptor, actual, { publication: context.publication }), /APP_IDENTITY_READBACK_REQUIRED/);
+  assert.throws(() => verifyResource(c, phase, descriptor, actual, { identities: context.identities }), /APP_PUBLICATION_READBACK_REQUIRED/);
+  const falseIdentity = structuredClone(context);
+  falseIdentity.identities[r.ingestIdentity].properties.principalId = c.operatorPrincipalId;
+  assert.throws(() => verifyResource(c, phase, descriptor, actual, falseIdentity), /APP_IDENTITY_DRIFT/);
+});
+test('separate publication origin verifies exact bytes, original single-copy authority and retained qualification conditions', () => {
+  const image = fixtureImagePublication();
+  verifyImagePublication(c, image);
+  for (const change of [
+    v => { v.version = 2; }, v => { v.release.publicationBindingSha256 = digest('different'); },
+    v => { v.release.applicationDeploymentAuthorized = true; }, v => { v.release.maximumNewImageDigests = 2; },
+    v => { v.journal.intentAt = v.release.expiresAt; }, v => { v.journal.copyInvocations = 2; },
+    v => { v.journal.outcome = 'submission-possible'; }, v => { v.journal.copySucceeded = false; },
+    v => { v.manifestJson += '\n'; }, v => { v.configJson += '\n'; },
+    v => { v.receipt.configUser = '0:0'; }, v => { v.receipt.command = ['other']; },
+    v => { v.receipt.recentDigestCount = 2; }, v => { v.receipt.configSha256 = v.receipt.digest; },
+    v => { v.receipt.independentlyVerifiedRemoteGraph.blobs.pop(); },
+    v => { v.receipt.correspondingSource.boundToVerifiedRemoteLayerBytes = false; },
+    v => { v.receipt.securityQualification.suppressedFindings = 1; },
+    v => { v.receipt.securityQualification.nativeV8ConditionsRetained = false; },
+    v => { v.receipt.securityQualification.patchedOrCompleteNativeCoverageClaimed = true; },
+    v => { v.receipt.securityQualification.counts.UNKNOWN = 0; },
+  ]) {
+    const bad = structuredClone(image); change(bad);
+    assert.throws(() => verifyImagePublication(c, bad), /^Error: PUBLICATION_/);
+  }
+  const f = fixtureReconciliation();
+  verifyPublicationReadback(c, image, f.proposal.imagePublication);
+  for (const change of [
+    v => { v.repositories.push('extra'); }, v => { v.manifests.push({ digest: 'other' }); },
+    v => { v.manifests[0].digest = 'other'; }, v => { v.manifest.config.digest = 'other'; },
+    v => { v.registry.properties.adminUserEnabled = true; }, v => { v.registry.properties.anonymousPullEnabled = true; },
+  ]) {
+    const bad = structuredClone(f.proposal.imagePublication); change(bad);
+    assert.throws(() => verifyPublicationReadback(c, image, bad), /PUBLICATION_READBACK_CHANGED/);
   }
 });
 test('what-if allows exact creates or narrow approved flags, never unknown modification or deletion', () => {
@@ -404,25 +519,62 @@ test('later phases require a matching qualified budget deployment receipt, never
   }
   assert.throws(() => verifyProjectBudgetReceipt(c, undefined, foundation, digest('source')));
 });
-function fixtureReconciliation(config = c, baseline = digest('baseline')) {
+function fixtureImagePublication(config = c) {
+  const r = ids(config), manifest = JSON.parse(manifestJson), imageConfig = JSON.parse(configJson);
+  assert.equal('sha256:' + digest(manifestJson), config.receiverDigest);
+  assert.equal('sha256:' + digest(configJson), manifest.config.digest);
+  const target = { subscriptionId: config.subscriptionId, registryResourceId: r.registry, registry: `${config.registryName}.azurecr.io`,
+    repository: 'missionspec/telemetry-ingest', tag: 'receiver-91c72962bdb2', manifestDigest: config.receiverDigest,
+    configDigest: manifest.config.digest, maximumNewImageDigests: 1 };
+  const currentScan = { reportSha256: digest('scan'), databaseSha256: digest('db'),
+    databaseUpdatedAt: '2026-09-23T00:00:00.000Z', databaseNextUpdate: '2026-09-24T00:00:00.000Z', counts: { MEDIUM: 13, LOW: 7, UNKNOWN: 2 } };
+  const binding = { target, currentScan };
+  const release = { version: 1, action: 'publish-one-receiver-digest', publicationBindingSha256: digest(json(binding)),
+    ...Object.fromEntries(['registry', 'repository', 'tag', 'manifestDigest', 'configDigest', 'maximumNewImageDigests'].map(k => [k, target[k]])),
+    approvedAt: '2026-09-23T00:27:00.000Z', expiresAt: '2026-09-23T00:57:00.000Z',
+    runtimeQualification: 'CONDITIONAL_DISABLED_OR_SYNTHETIC_ONLY',
+    retainedAdvisories: ['CVE-2026-95818', 'CVE-2026-86805', 'CVE-2026-91745', 'CVE-2026-93377', 'CVE-2026-91728'],
+    applicationDeploymentAuthorized: false, ingestionAuthorized: false, clientActivationAuthorized: false, repushOrDeletionAuthorized: false };
+  const blobs = [manifest.config, ...manifest.layers].map(({ digest, size }) => ({ digest, size }));
+  const receipt = { ...fixtureReceipts(config).publication, manifest, checkedAt: '2026-09-23T00:29:00.000Z',
+    nativeV8Clearance: release.runtimeQualification, publicationReleaseSha256: digest(json(release)), publicationBindingSha256: release.publicationBindingSha256,
+    copyInvocations: 1, copySucceeded: true,
+    independentlyVerifiedRemoteGraph: { manifestDigest: target.manifestDigest, configDigest: target.configDigest, blobs, platform: 'linux/amd64',
+      user: imageConfig.config.User, command: imageConfig.config.Cmd },
+    correspondingSource: { archiveSha256: digest('source archive'), manifestSha256: digest('source manifest'), boundToVerifiedRemoteLayerBytes: true },
+    securityQualification: { scanReportSha256: currentScan.reportSha256, databaseSha256: currentScan.databaseSha256,
+      databaseUpdatedAt: currentScan.databaseUpdatedAt, databaseNextUpdate: currentScan.databaseNextUpdate, counts: currentScan.counts,
+      suppressedFindings: 0, nativeV8ConditionsRetained: true, patchedOrCompleteNativeCoverageClaimed: false,
+      runtimeQualification: release.runtimeQualification, retainedAdvisories: release.retainedAdvisories },
+    applicationDeploymentAuthorized: false, ingestionAuthorized: false, clientActivationAuthorized: false };
+  return { version: 1, receipt, release, binding, manifestJson, configJson,
+    journal: { version: 1, action: release.action, target, bindingSha256: release.publicationBindingSha256, releaseSha256: digest(json(release)),
+      publicationReceiptSha256: digest(json(receipt)), outcome: 'published-readback-qualified', maximumCopyInvocations: 1,
+      copyInvocations: 1, copySucceeded: true, verifiedRemoteBlobCount: blobs.length, intentAt: '2026-09-23T00:28:00.000Z' },
+    qualification: { checkedAt: '2026-09-23T00:29:30.000Z', publicationReceiptSha256: digest(json(receipt)),
+      copyInvocations: 1, copySucceeded: true, remoteBlobCount: blobs.length, credentialDirectoriesRemoved: true } };
+}
+function fixtureReconciliation(config = c, baseline = digest('baseline'), count = 7) {
   const f = fixtureFoundation(config), r = ids(config), source = digest('current policy');
   const records = [], inventory = { value: [] }, base = Date.parse('2026-09-23T00:00:00.000Z');
   const iso = offset => new Date(base + offset).toISOString();
-  for (const [index, name] of ['project-budget', 'core', 'workspace-access', 'data', 'upload-role'].entries()) {
-    const oldSource = digest(index < 2 || index === 4 ? `executed source ${name}` : 'executed workspace and data source');
+  const imagePublication = count === 7 ? fixtureImagePublication(config) : null;
+  for (const [index, name] of PHASES.slice(0, count).entries()) {
+    const oldSource = digest(index >= 5 ? 'executed grants and app source' : index < 2 || index === 4 ? `executed source ${name}` : 'executed workspace and data source');
     const intent = (index * 5 + 1) * 60000, prerequisiteReceipts = {};
     for (const prior of records) {
       const priorName = prior.phase.phase;
-      if (index === 4 || (index >= 2 && ['project-budget', 'core'].includes(priorName))) {
+      if ((index >= 5 && prior.phase.phase !== 'assignments') || index === 4 || (index >= 2 && ['project-budget', 'core'].includes(priorName))) {
         prerequisiteReceipts[priorName] = { qualificationKind: 'reviewed-read-only-reconciliation', qualified: true, phase: priorName,
           configSha256: digest(json(config)), phaseSha256: digest(json(prior.phase)), sourceSha256: prior.publication.sourceSha256,
           deployment: structuredClone(prior.firstReadback.deployment), resources: structuredClone(prior.firstReadback.resources),
           reconciliation: { proposalSha256: digest('historical proposal'), reviewSha256: digest('historical review'),
             executionOriginSha256: digest(json(prior)), policySourceSha256: oldSource,
-            checkedAt: iso((index === 4 ? 18 : 8) * 60000), reviewedAt: iso((index === 4 ? 19 : 9) * 60000),
+            checkedAt: iso((index >= 5 ? 23 : index === 4 ? 18 : 8) * 60000), reviewedAt: iso((index >= 5 ? 24 : index === 4 ? 19 : 9) * 60000),
             originalJournalOutcome: prior.journal.outcome, originalReceiptQualified: prior.originalReceipt?.qualified === true } };
       } else prerequisiteReceipts[priorName] = structuredClone(prior.originalReceipt);
     }
+    if (name === 'disabled-app') prerequisiteReceipts.publication = imagePublication.receipt;
     const phase = buildPhase(config, name, contract, prerequisiteReceipts, f);
     if (name === 'core') {
       phase.resources.find(v => v.id === r.environment).expected.properties.infrastructureResourceGroup = `${config.namePrefix}-managed`;
@@ -449,6 +601,11 @@ function fixtureReconciliation(config = c, baseline = digest('baseline')) {
         delete v.properties.provisioningState;
         v.properties.createdOn = iso(intent + 2000);
       }
+      if (descriptor.type === 'Microsoft.Authorization/roleAssignments') {
+        delete v.properties.provisioningState;
+        v.properties.scope = descriptor.expected.scope;
+        v.properties.createdOn = iso(intent + 2000);
+      }
       if (descriptor.id === r.table) {
         delete v.type;
         v.systemData = { createdAt: iso(intent + 2000) };
@@ -462,8 +619,23 @@ function fixtureReconciliation(config = c, baseline = digest('baseline')) {
         Object.assign(v.properties, { immutableId: 'dcr-' + 'a'.repeat(32), endpoints: { logsIngestion: 'https://fixture.australiaeast-1.ingest.monitor.azure.com' } });
         v.properties.destinations.logAnalytics[0].workspaceId = prerequisiteReceipts['workspace-access'].resources[r.workspace].properties.customerId;
       }
+      if (descriptor.id === r.app) {
+        v.systemData = { createdAt: iso(intent + 2000) };
+        const p = v.properties, container = p.template.containers[0];
+        p.configuration.ingress.fqdn = 'fixture.australiaeast.azurecontainerapps.io';
+        p.configuration.ingress.transport = 'Http'; p.configuration.ingress.exposedPort = 0;
+        p.delegatedIdentities = []; p.template.volumes = null; p.template.initContainers = null; p.template.serviceBinds = null;
+        p.template.revisionSuffix = ''; p.template.scale.cooldownPeriod = 300; p.template.scale.pollingInterval = 30;
+        container.resources.ephemeralStorage = '1Gi'; container.probes.reverse();
+        p.configuration.registries[0].username = ''; p.configuration.registries[0].passwordSecretRef = '';
+        v.identity.userAssignedIdentities = Object.fromEntries([r.ingestIdentity, r.pullIdentity].map(id => {
+          const { clientId, principalId } = prerequisiteReceipts.core.resources[id].properties;
+          return [id.toLowerCase(), { clientId, principalId }];
+        }));
+        p.configuration.identitySettings = p.configuration.identitySettings.map(v => ({ ...v, identity: v.identity.toLowerCase() }));
+      }
       resources[descriptor.id] = v;
-      if (!['Microsoft.Consumption/budgets', 'Microsoft.Authorization/roleDefinitions'].includes(descriptor.type) &&
+      if (!['Microsoft.Consumption/budgets', 'Microsoft.Authorization/roleDefinitions', 'Microsoft.Authorization/roleAssignments'].includes(descriptor.type) &&
           descriptor.id !== r.table && !inventory.value.some(v => v.id === descriptor.id)) {
         inventory.value.push({ id: descriptor.id, type: descriptor.type, createdTime: iso(intent + 2000) });
       }
@@ -480,35 +652,53 @@ function fixtureReconciliation(config = c, baseline = digest('baseline')) {
     }
     const bindings = { sourceSha256: oldSource, phaseSha256: digest(json(phase)), configSha256: digest(json(config)),
       originSha256: config.originSha256, whatIfSha256: digest(json(whatIf)), baselineSha256: baseline, receiptsSha256: digest(json(prerequisiteReceipts)) };
-    const held = ['core', 'data'].includes(name);
+    let roleDefinitions = null;
+    if (name === 'assignments') {
+      const readbacks = assignmentRoleTargets(config).map(target => ({ scope: target.scope,
+        resource: target.roleType === 'CustomRole' ? structuredClone(prerequisiteReceipts['upload-role'].resources[r.uploadRole]) : {
+          id: target.roleDefinitionId, name: target.roleDefinitionId.split('/').at(-1), type: 'Microsoft.Authorization/roleDefinitions',
+          properties: { roleName: target.roleName, type: target.roleType, createdOn: '2015-01-01T00:00:00.000Z',
+            permissions: [{ actions: ['*/read'], notActions: [], dataActions: [], notDataActions: [] }], assignableScopes: ['/'] } } }));
+      const roles = assignmentRoleTargets(config).map((target, i) => roleDefinitionSignature(config, target, readbacks[i].resource));
+      roleDefinitions = { checkedAt: iso(intent - 30000), roles, readbacks, roleDefinitionsSha256: digest(json(roles)) };
+      bindings.foundationBaselineSha256 = baseline;
+      bindings.roleDefinitionsSha256 = roleDefinitions.roleDefinitionsSha256;
+      bindings.baselineSha256 = digest(json({ foundationBaselineSha256: baseline, roleDefinitionsSha256: roleDefinitions.roleDefinitionsSha256 }));
+    }
+    const held = ['core', 'data', 'disabled-app'].includes(name);
     const originalReceipt = held ? null : { qualified: true, phase: name, configSha256: bindings.configSha256,
       phaseSha256: bindings.phaseSha256, sourceSha256: oldSource, deployment, resources, completedAt: iso(intent + 61000) };
-    records.push({ version: 2, publication: { commitSha: String(index + 1).repeat(40), sourceSha256: oldSource }, phase, prerequisiteReceipts,
-      approval: { action: `direct-arm-${name}`, ...bindings, approvedAt: iso(intent - 60000), expiresAt: iso(intent + 29 * 60000) },
+    const { roleDefinitionsSha256, foundationBaselineSha256, ...approvalBindings } = bindings;
+    records.push({ version: 3, publication: { commitSha: String(index + 1).repeat(40), sourceSha256: oldSource }, phase, prerequisiteReceipts, roleDefinitions,
+      approval: { action: `direct-arm-${name}`, ...approvalBindings, approvedAt: iso(intent - 60000), expiresAt: iso(intent + 29 * 60000) },
       journal: { phase: name, phaseSha256: bindings.phaseSha256, intentAt: iso(intent),
         outcome: held ? 'reconciliation-required' : 'readback-qualified',
-        ...(held ? { failureCode: name === 'core' ? 'ENVIRONMENT_PRIVACY_DRIFT' : 'TABLE_RETENTION_SCHEMA_DRIFT' } : {}) },
+        ...(held ? { failureCode: name === 'core' ? 'ENVIRONMENT_PRIVACY_DRIFT' : name === 'data' ? 'TABLE_RETENTION_SCHEMA_DRIFT' : 'APP_PRIVACY_RUNTIME_DRIFT' } : {}) },
       preflight: { ...bindings, qualified: true, cost: firstReleaseCost(), startedAt: base + intent - 40000, completedAt: base + intent - 20000 },
       validation: { properties: { provisioningState: 'Succeeded', templateHash: deployment.properties.templateHash } }, whatIf,
       firstReadback: { checkedAt: iso(intent + 61000), deployment, resources }, originalReceipt });
   }
-  const origins = { version: 2, records };
-  const proposal = { version: 2, kind: 'read-only-completed-phases', sourceSha256: source,
+  const origins = { version: 3, records, imagePublication };
+  const proposal = { version: 3, kind: 'read-only-completed-phases', sourceSha256: source,
     configSha256: digest(json(config)), executionOriginsSha256: digest(json(origins)), baselineSha256: baseline,
     checkedAt: iso(40 * 60000), results: Object.fromEntries(records.map(record => [record.phase.phase, {
       executionOriginSha256: digest(json(record)), deployment: structuredClone(record.firstReadback.deployment),
       resources: structuredClone(record.firstReadback.resources),
       identityPins: Object.fromEntries(record.phase.resources.map(descriptor => [descriptor.id, executionIdentity(record.firstReadback.resources[descriptor.id], descriptor.type)])),
-      diagnostics: Object.fromEntries(record.phase.resources.filter(v => [r.workspace, r.environment].includes(v.id)).map(v => [v.id, { value: [] }])),
-      exports: ['core', 'workspace-access', 'data'].includes(record.phase.phase) ? { value: [] } : null }])),
-    stateBudget: f.state, workspace: structuredClone(records[2].firstReadback.resources[r.workspace]), inventory, managedGroup: null };
-  const review = { version: 2, action: 'accept-exact-arm-reconciliation', sourceSha256: source,
+      diagnostics: Object.fromEntries(record.phase.resources.filter(v => [r.workspace, r.environment, r.app].includes(v.id)).map(v => [v.id, { value: [] }])),
+      exports: ['core', 'workspace-access', 'data', 'assignments', 'disabled-app'].includes(record.phase.phase) ? { value: [] } : null }])),
+    stateBudget: f.state, workspace: structuredClone(records[2].firstReadback.resources[r.workspace]),
+    identities: count === 7 ? Object.fromEntries([r.ingestIdentity, r.pullIdentity].map(id => [id, structuredClone(records[1].firstReadback.resources[id])])) : null,
+    imagePublication: imagePublication ? { registry: structuredClone(records[1].firstReadback.resources[r.registry]), repositories: ['missionspec/telemetry-ingest'],
+      manifests: [{ digest: config.receiverDigest }], manifest: imagePublication.receipt.manifest } : null,
+    roleDefinitions: records[5]?.roleDefinitions ?? null, inventory, managedGroup: null };
+  const review = { version: 3, action: 'accept-exact-arm-reconciliation', sourceSha256: source,
     proposalSha256: digest(json(proposal)), reviewedAt: iso(41 * 60000) };
   const lookup = async commit => records.find(v => v.publication.commitSha === commit)?.publication.sourceSha256;
   return { config, foundation: f, origins, proposal, review, source, lookup };
 }
 function fixtureAssignmentRoleReads(config = c) {
-  const f = fixtureReconciliation(config), rr = ids(config), uploadReceipt = f.origins.records[4].originalReceipt;
+  const f = fixtureReconciliation(config, digest('baseline'), 5), rr = ids(config), uploadReceipt = f.origins.records[4].originalReceipt;
   const phase = buildPhase(config, 'assignments', contract, fixtureReceipts(config)), resources = new Map();
   for (const target of assignmentRoleTargets(config)) {
     const resource = target.roleType === 'CustomRole' ? structuredClone(uploadReceipt.resources[rr.uploadRole]) : {
@@ -749,6 +939,45 @@ test('four-phase origins bind the actual prior receipt maps, their sources, appr
     await assert.rejects(reviewedReconciliationReceipts(c, f.foundation, f, f.source, f.lookup));
   }
 });
+test('assignment compound baseline and app publication/identity history remain separate mandatory reconciliation gates', async () => {
+  const valid = fixtureReconciliation();
+  verifyExecutionOrigins(c, valid.foundation, valid.origins, contract);
+  assert.notEqual(valid.origins.records[5].preflight.baselineSha256, valid.proposal.baselineSha256);
+  assert.equal(valid.origins.records[5].preflight.foundationBaselineSha256, valid.proposal.baselineSha256);
+  verifyReconciliation(c, valid.foundation, valid.origins, valid.proposal, valid.source, null, contract);
+  for (const change of [
+    f => { f.origins.records[5].preflight.baselineSha256 = f.proposal.baselineSha256; f.origins.records[5].approval.baselineSha256 = f.proposal.baselineSha256; },
+    f => { f.origins.records[5].roleDefinitions.roles[0].permissions[0].actions.push('*'); },
+    f => { f.origins.records[5].roleDefinitions.checkedAt = f.origins.records[6].journal.intentAt; },
+    f => { f.origins.records[6].roleDefinitions = f.origins.records[5].roleDefinitions; },
+    f => { f.origins.records[6].prerequisiteReceipts.publication.copySucceeded = false; },
+    f => { delete f.origins.records[6].prerequisiteReceipts.publication; },
+    f => { f.origins.records[6].prerequisiteReceipts.assignments.sourceSha256 = digest('other'); },
+    f => { f.origins.records[6].journal.intentAt = f.origins.records[6].approval.expiresAt; },
+    f => { f.origins.imagePublication.journal.intentAt = f.origins.imagePublication.release.expiresAt; },
+    f => { f.origins.imagePublication = null; },
+    f => { f.proposal.roleDefinitions.readbacks[0].resource.properties.permissions[0].actions.push('*'); },
+    f => { f.proposal.results.assignments.resources[f.origins.records[5].phase.resources[0].id].properties.scope = r.sub; },
+    f => { f.proposal.results.assignments.resources[f.origins.records[5].phase.resources[0].id].properties.condition = 'new'; },
+    f => { f.proposal.results['disabled-app'].resources[r.app].properties.template.containers[0].env.find(v => v.name === 'MSR_INGESTION_ENABLED').value = 'true'; },
+    f => { f.proposal.identities[r.ingestIdentity].properties.principalId = c.operatorPrincipalId;
+      f.proposal.results['disabled-app'].resources[r.app].identity.userAssignedIdentities[r.ingestIdentity.toLowerCase()].principalId = c.operatorPrincipalId; },
+    f => { f.proposal.imagePublication.manifests.push({ digest: 'another' }); },
+    f => { f.proposal.results['disabled-app'].diagnostics[r.app].value.push({ name: 'export' }); },
+    f => { f.proposal.results['disabled-app'].exports.value.push({ name: 'export' }); },
+    f => { f.proposal.results['disabled-app'].resources[r.app].systemData.createdAt = '2020-01-01T00:00:00.000Z'; },
+  ]) {
+    const f = fixtureReconciliation(); change(f);
+    f.proposal.executionOriginsSha256 = digest(json(f.origins));
+    f.review.proposalSha256 = digest(json(f.proposal));
+    await assert.rejects(reviewedReconciliationReceipts(c, f.foundation, f, f.source, f.lookup));
+  }
+  const receipts = await reviewedReconciliationReceipts(c, valid.foundation, valid, valid.source, valid.lookup);
+  assert.equal(receipts.assignments.sourceSha256, valid.origins.records[5].publication.sourceSha256);
+  assert.equal(receipts['disabled-app'].reconciliation.originalJournalOutcome, 'reconciliation-required');
+  assert.equal(receipts['disabled-app'].reconciliation.originalReceiptQualified, false);
+  assert.equal(receipts.publication, undefined);
+});
 test('reconciliation rejects expired original intent, changed template or deployment, identities, routes, inventory and review', async () => {
   for (const change of [
     f => { f.origins.records[1].journal.intentAt = f.origins.records[1].approval.expiresAt; },
@@ -898,7 +1127,8 @@ test('published source lookup uses immutable commit blobs and never evaluates hi
   await assert.rejects(publishedSourceDigest(commit, async () => { throw new Error('private git failure'); }), { message: 'PUBLISHED_ORIGIN_UNAVAILABLE' });
 });
 test('reconciliation and fresh qualification read only the exact deployed resources and supported privacy routes', async t => {
-  const a = fixtureAdoption(), f = fixtureReconciliation(a.config, a.origin.policyBaselineSha256), directory = await scratch(t), rr = ids(a.config);
+ for (const count of [5, 7]) await t.test(`${count} recorded phases`, async t => {
+  const a = fixtureAdoption(), f = fixtureReconciliation(a.config, a.origin.policyBaselineSha256, count), directory = await scratch(t), rr = ids(a.config);
   const evidence = { scannerAdoption: a.adoption, foundationBudgets: f.foundation, reconciliation: f };
   const responses = new Map([
     [a.adoption.resourceId, a.adoption.after],
@@ -913,13 +1143,22 @@ test('reconciliation and fresh qualification read only the exact deployed resour
     responses.set(record.phase.deploymentId, record.firstReadback.deployment);
     for (const [id, value] of Object.entries(record.firstReadback.resources)) responses.set(id, value);
   }
-  for (const id of [rr.workspace, rr.environment]) responses.set(id + '/providers/Microsoft.Insights/diagnosticSettings', { value: [] });
+  for (const id of [rr.workspace, rr.environment, rr.app]) responses.set(id + '/providers/Microsoft.Insights/diagnosticSettings', { value: [] });
+  if (count === 7) for (const [i, target] of assignmentRoleTargets(a.config).entries()) {
+    responses.set(`${target.scope}/providers/Microsoft.Authorization/roleDefinitions/${target.roleDefinitionId.split('/').at(-1)}`, f.proposal.roleDefinitions.readbacks[i].resource);
+  }
   const calls = [];
   let assignmentPhase;
   const invoke = async args => {
     calls.push(args);
     assert.equal(args[args.indexOf('--subscription') + 1], a.config.subscriptionId);
     if (args[0] === 'account') return { id: a.config.subscriptionId, tenantId: a.config.tenantId, state: 'Enabled', environmentName: 'AzureCloud' };
+    if (args[0] === 'acr') {
+      assert.equal(count, 7);
+      if (args[1] === 'repository' && args[2] === 'list') return ['missionspec/telemetry-ingest'];
+      if (args[1] === 'manifest' && args[2] === 'list-metadata') return [{ digest: a.config.receiverDigest }];
+      assert.deepEqual(args.slice(0, 3), ['acr', 'manifest', 'show']); return f.origins.imagePublication.receipt.manifest;
+    }
     if (args[0] === 'deployment') {
       assert(assignmentPhase);
       if (args[2] === 'validate') return { properties: { provisioningState: 'Succeeded' } };
@@ -938,8 +1177,8 @@ test('reconciliation and fresh qualification read only the exact deployed resour
   assert.equal((await readdir(directory)).length, 0);
   const current = { ...f, proposal };
   await verifyFreshReconciliation(a.config, directory, current, invoke);
-  await t.test('assignment preflight binds freshly read role signatures into the approval baseline', async () => {
-    current.review = { version: 2, action: 'accept-exact-arm-reconciliation', sourceSha256: proposal.sourceSha256,
+  if (count === 5) await t.test('assignment preflight binds freshly read role signatures into the approval baseline', async () => {
+    current.review = { version: 3, action: 'accept-exact-arm-reconciliation', sourceSha256: proposal.sourceSha256,
       proposalSha256: digest(json(proposal)), reviewedAt: new Date().toISOString() };
     const receipts = await reviewedReconciliationReceipts(a.config, f.foundation, current, proposal.sourceSha256, f.lookup);
     assignmentPhase = buildPhase(a.config, 'assignments', contract, receipts, f.foundation, current);
@@ -966,8 +1205,9 @@ test('reconciliation and fresh qualification read only the exact deployed resour
   });
   responses.get(rr.workspace).properties.customerId = a.config.operatorPrincipalId;
   await assert.rejects(verifyFreshReconciliation(a.config, directory, current, invoke), /RESOURCE_IDENTITY_CHANGED/);
-  assert(calls.every(args => args[0] === 'account' || args[0] === 'deployment' || args[args.indexOf('--method') + 1] === 'GET'));
+  assert(calls.every(args => ['account', 'deployment', 'acr'].includes(args[0]) || args[args.indexOf('--method') + 1] === 'GET'));
   verifyDeploymentIdentity(f.origins.records[1].firstReadback.deployment, proposal.results.core.deployment);
+ });
 });
 test('CLI refuses to prepare, preview or execute already-deployed phases before any Azure call', async t => {
   const a = fixtureAdoption(), f = fixtureReconciliation(a.config, a.origin.policyBaselineSha256);
@@ -975,14 +1215,14 @@ test('CLI refuses to prepare, preview or execute already-deployed phases before 
   await privateDirectory(directory);
   t.after(() => rm(directory, { recursive: true }));
   for (const [name, value] of Object.entries({ 'config.json': a.config, 'origin.json': a.origin, 'scanner-adoption.json': a.adoption,
-    'foundation-budgets.json': f.foundation, 'receipts.json': {}, 'execution-origins-v2.json': f.origins })) await saveImmutable(directory, name, value);
+    'foundation-budgets.json': f.foundation, 'receipts.json': {}, 'execution-origins-v3.json': f.origins })) await saveImmutable(directory, name, value);
   const untrusted = Object.entries(process.env).some(([key, value]) => value && /^(CI$|GITHUB_|ACTIONS_|RUNNER_)/u.test(key));
   for (const operation of ['prepare', 'check', 'validate-preview', 'execute']) {
-    for (const phase of ['core', 'project-budget', 'workspace-access', 'data', 'upload-role']) await assert.rejects(
+    for (const phase of ['core', 'project-budget', 'workspace-access', 'data', 'upload-role', 'assignments', 'disabled-app']) await assert.rejects(
       promisify(execFile)(process.execPath, ['infrastructure/arm/telemetry/controller.mjs', operation, phase, directory]),
       error => error.code === 1 && error.stderr.trim() === (untrusted ? 'UNTRUSTED_RUNNER_FORBIDDEN' : 'COMPLETED_PHASE_REQUIRES_RECONCILIATION'));
   }
-  await assert.rejects(promisify(execFile)(process.execPath, ['infrastructure/arm/telemetry/controller.mjs', 'qualify-reconciliation', 'upload-role', directory]),
+  await assert.rejects(promisify(execFile)(process.execPath, ['infrastructure/arm/telemetry/controller.mjs', 'qualify-reconciliation', 'disabled-app', directory]),
     error => error.code === 1 && error.stderr.trim() === (untrusted ? 'UNTRUSTED_RUNNER_FORBIDDEN' : 'RECONCILIATION_REVIEW_REQUIRED'));
   assert.equal(await load(directory, 'reconciliation-receipts.json', true), null);
   assert.equal(await load(directory, 'core-journal.json', true), null);
@@ -1151,6 +1391,27 @@ test('data controller reads the workspace independently before validating real c
   assert.equal(workspaceRead, true);
   assert.equal(f.receipt.qualified, true);
   assert.equal(f.receipt.resources[r.dcr].properties.immutableId, 'dcr-' + 'a'.repeat(32));
+  assert.equal(f.journal.outcome, 'readback-qualified');
+});
+test('app controller uses fresh independent UAMI reads and real publication context without health or ingestion requests', async () => {
+  const f = executionFixture('disabled-app'), observed = fixtureReconciliation();
+  observed.proposal.results['disabled-app'].resources[r.app].properties.template.containers[0].env =
+    structuredClone(f.p.resources[0].expected.properties.template.containers[0].env);
+  let submitted = false;
+  const reads = [];
+  f.io.publicationReceipt = observed.origins.imagePublication.receipt;
+  f.io.arm = async (method, id, _api, _body, _filter, guard) => {
+    if (method === 'PUT') { guard(); assert.equal(id, f.p.deploymentId); submitted = true; return {}; }
+    reads.push(id);
+    if (id === f.p.deploymentId) return submitted ? { id, properties: { provisioningState: 'Succeeded' } } : null;
+    if ([r.ingestIdentity, r.pullIdentity].includes(id)) return observed.proposal.identities[id];
+    assert.equal(id, r.app);
+    assert(reads.includes(r.ingestIdentity) && reads.includes(r.pullIdentity));
+    return observed.proposal.results['disabled-app'].resources[r.app];
+  };
+  await new CollectorController(c, f.p, f.io).execute(f.approval);
+  assert.equal(f.receipt.qualified, true);
+  assert.equal(f.receipt.resources[r.app].properties.template.containers[0].env.find(v => v.name === 'MSR_INGESTION_ENABLED').value, 'false');
   assert.equal(f.journal.outcome, 'readback-qualified');
 });
 test('approval is closed, hash-bound and requires finite canonical UTC dates and a bounded interval', async t => {

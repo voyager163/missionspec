@@ -9,7 +9,7 @@ import { isDeepStrictEqual, types } from 'node:util';
 import { PHASES, buildPhase, deploymentName, validateConfig, ids, digest, json, fail, sameId, storageContract, firstReleaseCost, assertOwned, RECEIVER_COMMAND,
   closed, budgetConfiguration, projectBudgetFilter, verifyFoundationBudgets, reconciliationBinding, assignmentRoleTargets } from './definition.mjs';
 import { assertBudget, verifyWhatIf, verifyResource, verifyApproval, verifyFreshReview, sourceContractsSummary, permitFirstPush,
-  executionIdentity, verifyExecutionOrigins, verifyReconciliation, verifyDeploymentIdentity, roleDefinitionSignature } from './policy.mjs';
+  executionIdentity, verifyExecutionOrigins, verifyReconciliation, verifyDeploymentIdentity, roleDefinitionSignature, verifyPublicationReadback } from './policy.mjs';
 
 const execute = promisify(execFile), here = dirname(fileURLToPath(import.meta.url));
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -339,6 +339,37 @@ async function readReconciledPhase(c, record, arm, context = {}) {
   }
   return { executionOriginSha256: digest(json(record)), deployment, resources, identityPins, ...await readPrivacy(c, phase, arm) };
 }
+export async function readPublishedImage(c, imagePublication, arm, invoke = az) {
+  const registry = await arm('GET', ids(c).registry, '2023-07-01');
+  const repositories = await invoke(['acr', 'repository', 'list', '--name', c.registryName,
+    '--subscription', c.subscriptionId, '--only-show-errors', '--output', 'json']);
+  if (!isDeepStrictEqual(repositories, ['missionspec/telemetry-ingest'])) fail('PUBLICATION_READBACK_CHANGED');
+  const manifests = await invoke(['acr', 'manifest', 'list-metadata', '--registry', c.registryName, '--name', 'missionspec/telemetry-ingest',
+    '--subscription', c.subscriptionId, '--only-show-errors', '--output', 'json']);
+  const manifest = await invoke(['acr', 'manifest', 'show', '--registry', c.registryName, '--name', `missionspec/telemetry-ingest@${c.receiverDigest}`,
+    '--subscription', c.subscriptionId, '--only-show-errors', '--output', 'json']);
+  const result = { registry, repositories, manifests, manifest };
+  verifyPublicationReadback(c, imagePublication, result);
+  return result;
+}
+async function reconciliationContext(c, origins, arm, invoke) {
+  const r = ids(c), hasApp = origins.records.some(v => v.phase.phase === 'disabled-app');
+  const workspace = origins.records.some(v => v.phase.phase === 'data') ? await arm('GET', r.workspace, '2023-09-01') : null;
+  let identities = null, imagePublication = null, roleDefinitions = null;
+  if (hasApp) {
+    identities = { [r.ingestIdentity]: await arm('GET', r.ingestIdentity, '2023-01-31'),
+      [r.pullIdentity]: await arm('GET', r.pullIdentity, '2023-01-31') };
+    imagePublication = await readPublishedImage(c, origins.imagePublication, arm, invoke);
+  }
+  const assignments = origins.records.find(v => v.phase.phase === 'assignments');
+  if (assignments) {
+    const upload = origins.records.find(v => v.phase.phase === 'upload-role');
+    const reads = await readAssignmentRoleDefinitions(c, assignments.phase, arm, upload.originalReceipt);
+    roleDefinitions = { checkedAt: new Date().toISOString(), ...reads, roleDefinitionsSha256: digest(json(reads.roles)) };
+    if (roleDefinitions.roleDefinitionsSha256 !== assignments.preflight.roleDefinitionsSha256) fail('ASSIGNMENT_ROLE_DEFINITION_DRIFT');
+  }
+  return { workspace, identities, imagePublication, roleDefinitions };
+}
 export async function collectReconciliation(c, origin, directory, evidence, invoke = az, lookup = publishedSourceDigest) {
   const foundation = verifyFoundationBudgets(c, evidence.foundationBudgets), origins = evidence.reconciliation.origins;
   const contract = await storageContract();
@@ -355,14 +386,15 @@ export async function collectReconciliation(c, origin, directory, evidence, invo
   if (provider?.registrationState !== 'Registered' || !provider.resourceTypes?.some(v =>
     v.resourceType?.toLowerCase() === 'diagnosticsettings' && v.apiVersions?.includes(DIAGNOSTIC_API))) fail('DIAGNOSTIC_API_NOT_REGISTERED');
   const results = {};
-  const workspace = origins.records.some(v => v.phase.phase === 'data') ? await arm('GET', r.workspace, '2023-09-01') : null;
-  for (const record of origins.records) results[record.phase.phase] = await readReconciledPhase(c, record, arm, { workspace });
+  const context = await reconciliationContext(c, origins, arm, invoke);
+  for (const record of origins.records) results[record.phase.phase] = await readReconciledPhase(c, record, arm,
+    { ...context, publication: origins.imagePublication?.receipt });
   const stateBudget = await arm('GET', r.stateBudget, '2024-08-01');
   const inventory = await arm('GET', `${r.group}/resources`, '2021-04-01', undefined, '$expand=createdTime,changedTime');
   const managedGroup = await arm('GET', r.managedGroup, '2024-03-01');
-  const proposal = { version: 2, kind: 'read-only-completed-phases', sourceSha256: await sourceDigest(),
+  const proposal = { version: 3, kind: 'read-only-completed-phases', sourceSha256: await sourceDigest(),
     configSha256: digest(json(c)), executionOriginsSha256: digest(json(origins)), baselineSha256,
-    checkedAt: new Date().toISOString(), results, stateBudget, workspace, inventory, managedGroup };
+    checkedAt: new Date().toISOString(), results, stateBudget, ...context, inventory, managedGroup };
   verifyReconciliation(c, foundation, origins, proposal, proposal.sourceSha256, null, contract);
   return proposal;
 }
@@ -376,16 +408,16 @@ export async function reviewedReconciliationReceipts(c, foundation, evidence, so
     return [phase, { qualificationKind: 'reviewed-read-only-reconciliation', qualified: true, phase,
       configSha256: digest(json(c)), phaseSha256: digest(json(record.phase)), sourceSha256: record.publication.sourceSha256,
       deployment: result.deployment, resources: result.resources,
-      reconciliation: { contractVersion: 2, ...reconciliationBinding(evidence), policySourceSha256: sourceSha256,
+      reconciliation: { contractVersion: 3, ...reconciliationBinding(evidence), policySourceSha256: sourceSha256,
         executionOriginSha256: digest(json(record)), checkedAt: evidence.proposal.checkedAt, reviewedAt: evidence.review.reviewedAt,
         originalJournalOutcome: record.journal.outcome, originalReceiptQualified: record.originalReceipt?.qualified === true } }];
   }));
 }
 export async function verifyFreshReconciliation(c, directory, evidence, invoke = az) {
   const arm = transport(c, evidence.origins.records[0].phase, directory, invoke);
-  const workspace = evidence.origins.records.some(v => v.phase.phase === 'data') ? await arm('GET', ids(c).workspace, '2023-09-01') : null;
+  const context = await reconciliationContext(c, evidence.origins, arm, invoke);
   for (const record of evidence.origins.records) {
-    const current = await readReconciledPhase(c, record, arm, { workspace });
+    const current = await readReconciledPhase(c, record, arm, { ...context, publication: evidence.origins.imagePublication?.receipt });
     if (!isDeepStrictEqual(current.identityPins, evidence.proposal.results[record.phase.phase].identityPins)) fail('RESOURCE_IDENTITY_CHANGED');
   }
   assertBudget(await arm('GET', ids(c).stateBudget, '2024-08-01'), c, 50);
@@ -535,6 +567,12 @@ export class CollectorController {
           const resources = {};
           const context = p.resources.some(v => v.type === 'Microsoft.Insights/dataCollectionRules')
             ? { workspace: await this.io.arm('GET', ids(this.config).workspace, '2023-09-01') } : {};
+          if (p.resources.some(v => v.type === 'Microsoft.App/containerApps')) {
+            const r = ids(this.config);
+            context.identities = { [r.ingestIdentity]: await this.io.arm('GET', r.ingestIdentity, '2023-01-31'),
+              [r.pullIdentity]: await this.io.arm('GET', r.pullIdentity, '2023-01-31') };
+            context.publication = this.io.publicationReceipt;
+          }
           for (const descriptor of p.resources) resources[descriptor.id] =
             verifyResource(this.config, p, descriptor, await this.io.arm('GET', descriptor.id, descriptor.apiVersion), context);
           await this.io.privacyChecks(resources);
@@ -564,9 +602,10 @@ async function main() {
   const origin = await load(directory, 'origin.json'), rawReceipts = await load(directory, 'receipts.json');
   const evidenceFiles = { scannerAdoption: await load(directory, 'scanner-adoption.json'),
     foundationBudgets: await load(directory, 'foundation-budgets.json'),
-    reconciliation: { origins: await load(directory, 'execution-origins-v2.json', true),
+    reconciliation: { origins: await load(directory, 'execution-origins-v3.json', true),
       proposal: await load(directory, 'reconciliation-proposal.json', true),
       review: await load(directory, 'reconciliation-review.json', true) } };
+  if (!evidenceFiles.reconciliation.origins && await load(directory, 'execution-origins-v2.json', true)) fail('RECONCILIATION_REVISION_REQUIRED');
   verifyScannerAdoption(c, origin, evidenceFiles.scannerAdoption);
   verifyFoundationBudgets(c, evidenceFiles.foundationBudgets);
   if (['reconcile', 'qualify-reconciliation'].includes(operation)) {
@@ -627,6 +666,7 @@ async function main() {
     const arm = transport(c, phase, directory);
     const controller = new CollectorController(c, phase, {
       now: Date.now, sourceDigest, sleep: pause, arm,
+      publicationReceipt: receipts.publication,
       assignmentRoleDefinitions: () => readAssignmentRoleDefinitions(c, phase, arm, receipts['upload-role']),
       loadJournal: () => load(directory, `${phaseName}-journal.json`, true),
       saveJournal: value => save(directory, `${phaseName}-journal.json`, value),
