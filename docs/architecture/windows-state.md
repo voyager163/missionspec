@@ -350,7 +350,7 @@ tuples against the held lock bytes; dropping or changing the tuple is rejected.
 Read-only status never reclaims a lock. Partial/unparseable locks require
 manual reconciliation; no force flag or caller assertion grants quiescence.
 
-The process-instance change requires separate native qualification:
+The process-instance change has separate native qualification:
 `node --test --test-concurrency=1 tests/windows-writer-instance.test.mjs`,
 the existing held-file race suite, and the application recovery/pruning and
 runtime-lifecycle jobs. The new suite compares actual OS birth values, exercises
@@ -358,6 +358,10 @@ live/ended writers, legacy refusal, both lease paths and cleanup substitution.
 Its earlier-birth/same-live-PID cases are **synthetic stale-record simulations**,
 not claims that genuine OS PID allocation reuse was observed. Portable parser
 and POSIX format tests do not substitute for these Windows runs.
+The suite passed at `59fae9e` in
+[run 35872342374](https://github.com/voyager163/missionspec/actions/runs/35872342374),
+alongside the held-file races, application source/recovery/pruning and runtime
+lifecycle jobs. Its observed native check is required on both protected branches.
 
 The actual-application cases retain stable unique names and are selected into
 separate **at most 15-minute** Windows jobs; do not add their runtimes together

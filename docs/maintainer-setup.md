@@ -40,7 +40,7 @@ read back these hosted controls:
 
 The effective branch-rules API confirms both branches inherit these rules.
 The implementation has been committed and published through a pull request.
-After observing successful hosted runs, twenty-one required check contexts were bound
+After observing successful hosted runs, twenty-two required check contexts were bound
 to their actual GitHub Apps, with strict up-to-date-branch enforcement:
 
 | Required context | GitHub App ID |
@@ -62,6 +62,7 @@ to their actual GitHub Apps, with strict up-to-date-branch enforcement:
 | Windows execution (registered-checks-success) | 15368 (`github-actions`) |
 | Windows execution (registered-checks-timeout) | 15368 (`github-actions`) |
 | Windows CLI observability qualification | 15368 (`github-actions`) |
+| Windows writer-instance qualification | 15368 (`github-actions`) |
 | Dependency review | 15368 (`github-actions`) |
 | CodeQL (javascript-typescript) | 15368 (`github-actions`) |
 | CodeQL (actions) | 15368 (`github-actions`) |
@@ -124,6 +125,14 @@ That observed context was then added with its actual App ID. Effective readback
 confirms twenty-one strict contexts on both protected branches. This adds
 private preference controls and reviewed diagnostic pruning, not an activated
 production telemetry endpoint.
+
+The writer-instance suite and all existing native Windows recovery, pruning,
+race and lifecycle jobs passed at `59fae9e` in
+[run 35872342374](https://github.com/voyager163/missionspec/actions/runs/35872342374).
+The observed writer-instance context was then required with App ID 15368;
+effective readback confirms twenty-two strict contexts on both branches.
+That run separately exposed a Linux contention-test assumption, not a Windows
+failure; it was corrected without increasing the SQLite busy deadline.
 
 ## 1. Validate locally
 
