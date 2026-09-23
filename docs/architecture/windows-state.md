@@ -325,16 +325,39 @@ confirms already-absent recovery paths before completion. Existing evidence/run
 history is retained and completed pruning never deletes a replacement raw file.
 
 Cooperative lock recovery acquires a destructive handle to the exact lock before
-checking a bounded **complete** `K32EnumProcesses` snapshot,
-including a self-presence sanity check. A live/reused PID, unknown/truncated
-inspection, wrong transaction/prune identity or changed lock blocks reclaim.
+checking its writer. New Windows transaction, runtime, evidence-prune and
+state-lifecycle locks use schema version 2, retaining their transaction/job ID
+and nonce with a closed `{schemaVersion: 1, pid, creationFileTime}` process tuple.
+Creation FILETIME is read with `GetProcessTimes` and the PID with `GetProcessId`
+on one held OS process handle, never inferred from `Date.now()`. The current
+Node process's birth is cached only in that running process.
+
+A matching live PID/birth blocks recovery. An exited matching instance, an
+OS-confirmed absent PID, or a different OS birth under the same PID proves the
+original writer ended; no successor process is killed or modified. A
+future/malformed saved identity, inaccessible process, unknown
+inspection, wrong transaction/prune identity or changed lock fails closed.
+Legacy PID-only locks are not rewritten or upgraded: they retain the bounded
+**complete** `K32EnumProcesses` absence check and self-presence sanity check.
+PID reuse can still conservatively block those legacy records.
 This checks the one local filesystem writer only: it is not host cancellation
 or descendant-process quiescence. Native effects are bound to held objects and
 their verified writer lease. The helpers hold a non-delete-shared native handle to the
 exact writer-lock inode and digest, so a delayed helper cannot create entries
 under a replaced lock and recovery cannot steal a lock still leased by that
-helper. Read-only status never reclaims a lock. Partial/unparseable locks require
+helper. Both native dispatch paths carry and revalidate new leases' process
+tuples against the held lock bytes; dropping or changing the tuple is rejected.
+Read-only status never reclaims a lock. Partial/unparseable locks require
 manual reconciliation; no force flag or caller assertion grants quiescence.
+
+The process-instance change requires separate native qualification:
+`node --test --test-concurrency=1 tests/windows-writer-instance.test.mjs`,
+the existing held-file race suite, and the application recovery/pruning and
+runtime-lifecycle jobs. The new suite compares actual OS birth values, exercises
+live/ended writers, legacy refusal, both lease paths and cleanup substitution.
+Its earlier-birth/same-live-PID cases are **synthetic stale-record simulations**,
+not claims that genuine OS PID allocation reuse was observed. Portable parser
+and POSIX format tests do not substitute for these Windows runs.
 
 The actual-application cases retain stable unique names and are selected into
 separate **at most 15-minute** Windows jobs; do not add their runtimes together

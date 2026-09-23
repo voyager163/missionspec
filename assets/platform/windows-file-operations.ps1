@@ -307,23 +307,14 @@ function Effect-Delete($item, $parent) {
 function Effect-Lease($context, $lease) {
   if ($null -eq $lease) { throw 'writer-lease' }
   $item = Effect-OpenFile $context ([string]$lease.path)
-  if (!(Effect-SameIdentity (Effect-Info $item.handle) $lease) -or (Effect-HashBytes (Effect-Read $item 4096)) -cne [string]$lease.digest) { throw 'writer-lease' }
+  $content = Effect-Read $item 4096
+  if (!(Effect-SameIdentity (Effect-Info $item.handle) $lease) -or (Effect-HashBytes $content) -cne [string]$lease.digest) { throw 'writer-lease' }
+  Check-WriterLeaseProcess $lease $content
   return $item
 }
 
 function Effect-AbsentProcess([int]$processId) {
-  $processes = [Runtime.InteropServices.Marshal]::AllocHGlobal(65536)
-  try {
-    $count = [uint32]0
-    if ($processId -lt 1 -or !$native::K32EnumProcesses($processes, 65536, [ref]$count) -or $count -ge 65536 -or ($count % 4) -ne 0) { throw 'process-inspection' }
-    $self = $false
-    for ($index = 0; $index -lt $count; $index += 4) {
-      $id = [Runtime.InteropServices.Marshal]::ReadInt32($processes, $index)
-      if ($id -eq $PID) { $self = $true }
-      if ($id -eq $processId) { throw 'process-present' }
-    }
-    if (!$self) { throw 'process-inspection' }
-  } finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($processes) }
+  Assert-ProcessAbsent $processId
 }
 
 function Invoke-MissionSpecPublication($context, $operation) {
@@ -454,6 +445,17 @@ function Invoke-MissionSpecFileOperation($operation) {
         if ($null -ne $operation.reference) { Check-EffectReference $item $operation.reference }
         if ((Effect-HashBytes (Effect-Read $item)) -cne [string]$operation.digest) { throw 'effect-preimage' }
         if ($null -ne $operation.absentProcess) { Effect-AbsentProcess ([int]$operation.absentProcess) }
+        if ($null -ne $operation.absentInstance) {
+          if ($null -ne $operation.absentProcess) { throw 'process-instance' }
+          $owner = [Text.UTF8Encoding]::new($false, $true).GetString((Effect-Read $item 4096)) | Microsoft.PowerShell.Utility\ConvertFrom-Json
+          if (!(Check-WriterLock $owner)) { throw 'writer-lease' }
+          Check-ProcessInstance $owner.process
+          Check-ProcessInstance $operation.absentInstance
+          if ($owner.schemaVersion -ne 2 -or $owner.pid -ne $owner.process.pid -or
+              $owner.process.pid -ne $operation.absentInstance.pid -or
+              $owner.process.creationFileTime -cne $operation.absentInstance.creationFileTime) { throw 'writer-lease' }
+          Check-WriterProcess $operation.absentInstance $true
+        }
         Effect-Progress 'delete-held'
         CheckEntry $item.path $true $false $true $false $null $true $item.handle
         if ($null -ne $operation.reference) { Check-EffectReference $item $operation.reference }

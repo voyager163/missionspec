@@ -123,18 +123,25 @@ prune-specific schema, exact plan digest, PID and nonce, and fsyncs that lock
 before preparing SQLite state.
 
 Only an explicit, currently approved operation for the **same plan** may reclaim
-that lock, and only if signal-zero process inspection establishes `ESRCH`
-(the recorded local PID is gone). A live/reused PID, `EPERM`, changed lock
-identity, another plan, ordinary runtime lock, or file-transaction lock blocks
-recovery. No read/status operation steals a lock. An interrupted partial lock
+that lock. POSIX retains signal-zero process inspection requiring `ESRCH`
+(the recorded local PID is gone). New Windows schema-2 locks additionally bind
+the OS-reported process creation FILETIME; a matching live instance blocks,
+while an observed different birth at that PID proves the original writer ended
+without touching the successor. Legacy Windows locks still require actual PID
+absence. Unknown or inaccessible process identity, changed lock identity,
+another plan, ordinary runtime lock, or file-transaction lock blocks recovery.
+No read/status operation steals a lock. An interrupted partial lock
 write that cannot be validated likewise requires separate manual reconciliation.
 
 This is a cooperative local-process protocol, not a distributed lease or a
-same-UID adversarial guarantee. PID reuse can conservatively block recovery.
+same-UID adversarial guarantee. PID reuse can conservatively block legacy/POSIX recovery.
 Current-user ownership, real paths, no symlinks/hard links, root binding and
-identity checks reduce accidental misuse; Node does not provide a race-proof
-unlink-by-verified-file-descriptor API. The machine owner can still defeat
-ordinary filesystem/database controls.
+identity checks reduce accidental misuse. Windows reclamation retains the
+native lock handle and exact identity/digest through deletion and directory
+flush; new leases also revalidate the process tuple. POSIX Node does not provide
+a race-proof unlink-by-verified-file-descriptor API. The machine owner can still
+defeat ordinary filesystem/database controls. See the
+[Windows process-instance boundary](windows-state.md) for qualification limits.
 
 ## Store capability and schema
 

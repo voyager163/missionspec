@@ -17,7 +17,7 @@ import {
   syncWindowsPrivateDirectory, validateWindowsStatePath, windowsPrivateEntries,
   ensureWindowsPrivateDirectories, inspectWindowsPrivateFile, removeWindowsPrivateFile, syncWindowsPrivateFile,
   windowsPublication, writeWindowsPrivateFile, WindowsDirectoryDurabilityError, WindowsPrivateStateError,
-  windowsPrivateStateDiagnostic,
+  windowsPrivateStateDiagnostic, currentWindowsProcessInstance, parseWindowsWriterLock,
   type WindowsFileReference, type WindowsFileScope, type WindowsPrivateEntry, type WindowsWriterLease,
 } from '../platform/windows-private-state.js';
 
@@ -524,9 +524,14 @@ export class LocalWorkspace {
 
   async withRuntimeLock<T>(operation: () => Promise<T>): Promise<T> {
     const lock = parseProjectPath('.missionspec/transaction.lock');
-    const content = JSON.stringify({ kind: 'runtime', pid: process.pid });
+    const writer = process.platform === 'win32' ? currentWindowsProcessInstance() : undefined;
+    const content = JSON.stringify({ kind: 'runtime', pid: process.pid,
+      ...(writer === undefined ? {} : { schemaVersion: 2, nonce: randomUUID(), process: writer }) });
     const identity = await this.exclusive(lock, content);
-    if (identity !== undefined) this.windowsLease = { path: path.join(this.root, lock), dev: BigInt(identity.device), ino: BigInt(identity.inode), digest: identity.digest };
+    if (identity !== undefined) this.windowsLease = {
+      path: path.join(this.root, lock), dev: BigInt(identity.device), ino: BigInt(identity.inode), digest: identity.digest,
+      ...(writer === undefined ? {} : { process: writer }),
+    };
     try {
       if ((await this.pending()).length > 0) throw new WorkflowError('conflict', 'Pending file recovery blocks runtime effects.');
       return await operation();
@@ -614,6 +619,9 @@ export class LocalWorkspace {
     await this.compare(plan, recoveryId !== undefined, recoveryId);
     const id = recoveryId ?? randomUUID();
     const lock = parseProjectPath('.missionspec/transaction.lock');
+    const writer = process.platform === 'win32' ? currentWindowsProcessInstance() : undefined;
+    const lockContent = JSON.stringify({ transactionId: id, pid: process.pid,
+      ...(writer === undefined ? {} : { schemaVersion: 2, nonce: randomUUID(), process: writer }) });
     let locked = false;
     let prepared = false;
     let lockIdentity: WindowsFileReference | undefined;
@@ -622,11 +630,11 @@ export class LocalWorkspace {
         if (process.platform === 'win32') await this.reclaimWindowsTransactionLock(lock, id);
         else if (this.runtimeSelectionLease) await this.reclaimSelectionTransactionLock(lock, id);
       }
-      lockIdentity = await this.exclusive(lock, JSON.stringify({ transactionId: id, pid: process.pid }));
+      lockIdentity = await this.exclusive(lock, lockContent);
       locked = true;
       if (lockIdentity !== undefined) this.windowsLease = {
         path: path.join(this.root, lock), dev: BigInt(lockIdentity.device), ino: BigInt(lockIdentity.inode),
-        digest: lockIdentity.digest,
+        digest: lockIdentity.digest, ...(writer === undefined ? {} : { process: writer }),
       };
       if ((await this.pending()).some((pending) => pending !== recoveryId)) {
         throw new WorkflowError('conflict', 'A pending transaction was observed after acquiring the local writer lock.');
@@ -758,7 +766,7 @@ export class LocalWorkspace {
           try {
             if (lockIdentity === undefined) throw new Error('Writer lock identity unavailable');
             removeWindowsPrivateFile(this.windowsScope(false), path.join(this.root, lock),
-              digestContent(JSON.stringify({ transactionId: id, pid: process.pid })), lockIdentity);
+              digestContent(lockContent), lockIdentity);
           } catch {
             throw new WorkflowError('effect-outcome-unknown', 'Writer-lock release was not confirmed; do not infer transaction completion or steal a replacement lock.');
           }
@@ -771,15 +779,12 @@ export class LocalWorkspace {
     const filename = await this.target(lock, false, true);
     const original = await this.read(lock);
     if (original === null) return;
-    const owner = record(JSON.parse(original.content) as unknown, 'transaction.lock', ['transactionId', 'pid']);
-    if (owner.transactionId !== id || typeof owner.pid !== 'number' || !Number.isSafeInteger(owner.pid)) {
-      throw new WorkflowError('conflict', 'Only this transaction can reclaim its own demonstrably dead writer lock.');
-    }
-
     try {
+      const owner = parseWindowsWriterLock(JSON.parse(original.content) as unknown);
+      if (owner.kind !== 'transaction' || owner.id !== id) throw new Error('Writer lock scope differs');
       const reference = inspectWindowsPrivateFile(this.windowsScope(false), filename);
       if (reference.digest !== original.digest) throw new Error('Writer lock changed');
-      removeWindowsPrivateFile(this.windowsScope(false), filename, original.digest, reference, owner.pid);
+      removeWindowsPrivateFile(this.windowsScope(false), filename, original.digest, reference, owner.process ?? owner.pid);
     } catch (error) {
       throw new WorkflowError('conflict', `The recorded writer may still exist; its lock is preserved. ${windowsIoDetail(error)}`);
     }

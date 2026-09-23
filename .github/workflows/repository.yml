@@ -134,6 +134,25 @@ jobs:
         run: npm run build
       - name: Exercise actual concurrent replacements and native recovery
         run: node --test --test-concurrency=1 tests/windows-file-races.test.mjs
+  windows-writer-instance:
+    name: Windows writer-instance qualification
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24.21.0"
+      - name: Restore locked dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build the instance-bound writer adapters
+        run: npm run build
+      - name: Qualify actual OS process identities and conservative lock recovery
+        run: node --test --test-concurrency=1 tests/windows-writer-instance.test.mjs
   windows-runtime-lifecycle:
     name: Windows runtime lifecycle qualification
     needs: windows-file-races

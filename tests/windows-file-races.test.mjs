@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import {
   ensureWindowsPrivateDirectories, inspectWindowsPrivateFile, removeWindowsPrivateFile, windowsPublication, writeWindowsPrivateFile,
+  currentWindowsProcessInstance,
 } from '../dist/adapters/platform/windows-private-state.js';
 import { digestContent } from '../dist/kernel/revisions.js';
 import { LocalWorkflow } from '../dist/application/local-workflow.js';
@@ -85,13 +86,18 @@ test('held lock deletion excludes concurrent recoverers and preserves a later re
   const f = fixture(t);
   ensureWindowsPrivateDirectories(f.scope, path.join(f.root, '.missionspec'));
   const lock = path.join(f.root, '.missionspec', 'transaction.lock');
-  const exited = spawnSync(process.execPath, ['-e', 'process.exit(0)']);
+  const exited = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    const { currentWindowsProcessInstance } = await import(${JSON.stringify(new URL('../dist/adapters/platform/windows-private-state.js', import.meta.url).href)});
+    console.log(JSON.stringify(currentWindowsProcessInstance()));
+  `], { encoding: 'utf8', timeout: 30_000 });
   assert.equal(exited.status, 0);
-  const body = JSON.stringify({ transactionId: randomUUID(), pid: exited.pid });
+  const instance = JSON.parse(exited.stdout);
+  assert.equal(instance.pid, exited.pid);
+  const body = JSON.stringify({ schemaVersion: 2, transactionId: randomUUID(), pid: exited.pid, nonce: randomUUID(), process: instance });
   const reference = writeWindowsPrivateFile(f.scope, lock, body);
-  const op = controlled(t, { ...f.wire, kind: 'delete', path: lock, digest: reference.digest, reference, absentProcess: exited.pid });
+  const op = controlled(t, { ...f.wire, kind: 'delete', path: lock, digest: reference.digest, reference, absentInstance: instance });
   await op.checkpoint('delete-held');
-  assert.throws(() => removeWindowsPrivateFile(f.scope, lock, reference.digest, reference, exited.pid));
+  assert.throws(() => removeWindowsPrivateFile(f.scope, lock, reference.digest, reference, instance));
   assert.deepEqual(adversary([
     ['rename', lock, `${lock}.moved`, 'rename'], ['write', lock, null, 'write'],
   ]), { rename: 'blocked', write: 'blocked' });
@@ -99,7 +105,7 @@ test('held lock deletion excludes concurrent recoverers and preserves a later re
   assert.equal((await op.finish()).ok, true);
   assert.equal(existsSync(lock), false);
   const next = writeWindowsPrivateFile(f.scope, lock, 'replacement writer lock');
-  assert.throws(() => removeWindowsPrivateFile(f.scope, lock, reference.digest, reference, exited.pid));
+  assert.throws(() => removeWindowsPrivateFile(f.scope, lock, reference.digest, reference, instance));
   assert.equal(readFileSync(lock, 'utf8'), 'replacement writer lock');
   removeWindowsPrivateFile(f.scope, lock, next.digest, next);
 });
@@ -129,8 +135,11 @@ function publicationFixture(t, present = true) {
   ensureWindowsPrivateDirectories(f.scope, path.join(f.root, '.missionspec', 'transactions'));
   const transactionId = randomUUID();
   const lock = path.join(f.root, '.missionspec', 'transaction.lock');
-  const lockRef = writeWindowsPrivateFile(f.scope, lock, JSON.stringify({ transactionId, pid: process.pid }));
-  const lease = { path: lock, dev: BigInt(lockRef.device), ino: BigInt(lockRef.inode), digest: lockRef.digest };
+  const instance = currentWindowsProcessInstance();
+  const lockRef = writeWindowsPrivateFile(f.scope, lock, JSON.stringify({
+    schemaVersion: 2, transactionId, pid: process.pid, nonce: randomUUID(), process: instance,
+  }));
+  const lease = { path: lock, dev: BigInt(lockRef.device), ino: BigInt(lockRef.inode), digest: lockRef.digest, process: instance };
   const scope = { ...f.scope, lease };
   const target = path.join(f.root, 'source.txt');
   if (present) writeWindowsPrivateFile(scope, target, 'original preimage');
@@ -146,7 +155,7 @@ function publicationFixture(t, present = true) {
     intent: path.join(f.root, '.missionspec', 'transactions', `${transactionId}.win-0.json`),
     relative: publication.relative, plan: publication.plan, expected: publication.expected, proposed: publication.proposed,
     stageIdentity: { device: stageRef.device, inode: stageRef.inode },
-    lease: { path: lock, device: lockRef.device, inode: lockRef.inode, digest: lockRef.digest },
+    lease: { path: lock, device: lockRef.device, inode: lockRef.inode, digest: lockRef.digest, process: instance },
   };
   return { ...f, scope, target, stage, publication, operation };
 }

@@ -25,7 +25,7 @@ const diagnosticPhases = [
   'entry-final-path', 'entry-acl-read', 'entry-acl-parse', 'entry-owner', 'entry-aces', 'entry-user-access',
   'entry-inheritance', 'json-module', 'json-input', 'access-policy',
   'directory-identity', 'directory-flush', 'directory-close', 'flush-options',
-  'file-metadata', 'file-security', 'process-inspection', 'process-present',
+  'file-metadata', 'file-security', 'process-inspection', 'process-present', 'process-instance',
   'file-security-owner', 'file-security-group', 'file-security-control', 'file-security-dacl',
   'file-security-descriptor', 'file-security-policy',
   'file-security-copy', 'file-security-set',
@@ -131,6 +131,79 @@ export interface WindowsWriterLease {
   readonly dev: bigint;
   readonly ino: bigint;
   readonly digest: string;
+  readonly process?: WindowsProcessInstance;
+}
+
+export interface WindowsProcessInstance {
+  readonly schemaVersion: 1;
+  readonly pid: number;
+  readonly creationFileTime: string;
+}
+
+function closedRecord(value: unknown, keys: readonly string[], reason: string): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value) ||
+      Reflect.ownKeys(value).length !== keys.length || keys.some((key) => {
+        const field = Object.getOwnPropertyDescriptor(value, key);
+        return field === undefined || !('value' in field);
+      })) throw new WindowsPrivateStateError(reason);
+  return value as Record<string, unknown>;
+}
+
+export function parseWindowsProcessInstance(value: unknown): WindowsProcessInstance {
+  const instance = closedRecord(value, ['schemaVersion', 'pid', 'creationFileTime'], 'process-instance');
+  if (instance.schemaVersion !== 1 || typeof instance.pid !== 'number' || !Number.isSafeInteger(instance.pid) ||
+      instance.pid < 1 || instance.pid > 2147483647 ||
+      typeof instance.creationFileTime !== 'string' || !/^[1-9][0-9]{0,18}$/u.test(instance.creationFileTime) ||
+      BigInt(instance.creationFileTime) < 116_444_736_000_000_000n ||
+      BigInt(instance.creationFileTime) > 0x7fff_ffff_ffff_ffffn) throw new WindowsPrivateStateError('process-instance');
+  return Object.freeze({ schemaVersion: 1, pid: instance.pid, creationFileTime: instance.creationFileTime });
+}
+
+let currentProcessInstance: WindowsProcessInstance | undefined;
+
+/** Module-local only: a running Node process cannot survive its own Windows PID reuse. */
+export function currentWindowsProcessInstance(): WindowsProcessInstance {
+  requireWindowsPrivateState();
+  if (currentProcessInstance?.pid !== process.pid) {
+    const instance = parseWindowsProcessInstance(invokeWindowsHelper({ kind: 'process-instance', pid: process.pid }));
+    if (instance.pid !== process.pid) throw new WindowsPrivateStateError('process-instance');
+    currentProcessInstance = instance;
+  }
+  return currentProcessInstance;
+}
+
+/** Closed legacy/new lock decoding; no stored record is upgraded or repaired. */
+export function parseWindowsWriterLock(value: unknown): {
+  readonly kind: 'transaction' | 'runtime' | 'evidence-prune' | 'state-lifecycle';
+  readonly id?: string;
+  readonly pid: number;
+  readonly process?: WindowsProcessInstance;
+} {
+  if (typeof value !== 'object' || value === null) throw new WindowsPrivateStateError('writer-lease');
+  const fields = Object.getOwnPropertyDescriptors(value);
+  const kind = fields.transactionId !== undefined ? 'transaction' : fields.kind?.value;
+  const version = fields.schemaVersion?.value;
+  const modern = version === 2;
+  const keys = kind === 'transaction' ? ['transactionId', 'pid'] :
+    kind === 'runtime' ? ['kind', 'pid'] :
+      kind === 'evidence-prune' || kind === 'state-lifecycle' ? ['schemaVersion', 'kind', 'id', 'pid', 'nonce'] : undefined;
+  if (keys === undefined) throw new WindowsPrivateStateError('writer-lease');
+  const owner = closedRecord(value, modern ? [...new Set([...keys, 'schemaVersion', 'nonce', 'process'])] : keys, 'writer-lease');
+  if ((!modern && kind !== 'transaction' && kind !== 'runtime' && version !== 1) ||
+      typeof owner.pid !== 'number' || !Number.isSafeInteger(owner.pid) || owner.pid < 1 || owner.pid > 2147483647 ||
+      kind === 'transaction' && (typeof owner.transactionId !== 'string' || !/^[a-f0-9-]{36}$/u.test(owner.transactionId)) ||
+      (kind === 'evidence-prune' || kind === 'state-lifecycle') &&
+        (typeof owner.id !== 'string' || !/^sha256:[a-f0-9]{64}$/u.test(owner.id) ||
+          typeof owner.nonce !== 'string' || owner.nonce.length === 0 || owner.nonce.length > 80) ||
+      modern && (typeof owner.nonce !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(owner.nonce))) {
+    throw new WindowsPrivateStateError('writer-lease');
+  }
+  const instance = modern ? parseWindowsProcessInstance(owner.process) : undefined;
+  if (instance !== undefined && instance.pid !== owner.pid) throw new WindowsPrivateStateError('writer-lease');
+  return Object.freeze({
+    kind, pid: owner.pid, ...(kind === 'runtime' ? {} : { id: String(kind === 'transaction' ? owner.transactionId : owner.id) }),
+    ...(instance === undefined ? {} : { process: instance }),
+  });
 }
 
 export interface WindowsFileReference {
@@ -158,6 +231,7 @@ function operationScope(scope: WindowsFileScope): object {
     root: scope.root, rootIdentity: { device: String(scope.dev), inode: String(scope.ino) },
     ...(scope.lease === undefined ? {} : { lease: {
       path: scope.lease.path, device: String(scope.lease.dev), inode: String(scope.lease.ino), digest: scope.lease.digest,
+      ...(scope.lease.process === undefined ? {} : { process: parseWindowsProcessInstance(scope.lease.process) }),
     } }),
   };
 }
@@ -215,14 +289,15 @@ export function syncWindowsPrivateFile(scope: WindowsFileScope, filename: string
 
 /** Deletes only the held, verified object, never a later pathname occupant. */
 export function removeWindowsPrivateFile(scope: WindowsFileScope, filename: string, digest: string,
-  reference?: WindowsFileReference, absentProcess?: number): void {
-  if (absentProcess !== undefined && (!Number.isSafeInteger(absentProcess) || absentProcess < 1 || absentProcess > 2147483647)) {
+  reference?: WindowsFileReference, absentProcess?: number | WindowsProcessInstance): void {
+  if (typeof absentProcess === 'number' && (!Number.isSafeInteger(absentProcess) || absentProcess < 1 || absentProcess > 2147483647)) {
     throw new WindowsPrivateStateError('process-inspection');
   }
   invokeWindowsHelper({ operation: {
     ...operationScope(scope), kind: 'delete', path: operationPath(scope, filename), digest: operationDigest(digest),
     ...(reference === undefined ? {} : { reference: fileReference(reference) }),
-    ...(absentProcess === undefined ? {} : { absentProcess }),
+    ...(absentProcess === undefined ? {} : typeof absentProcess === 'number' ? { absentProcess } :
+      { absentInstance: parseWindowsProcessInstance(absentProcess) }),
   } });
 }
 
@@ -329,7 +404,8 @@ export function windowsPrivateEntries(entries: readonly WindowsPrivateEntry[], l
     }
   }
   invokeWindowsHelper({ entries, ...(lease === undefined ? {} : {
-    lease: { path: lease.path, device: lease.dev.toString(), inode: lease.ino.toString(), digest: lease.digest },
+    lease: { path: lease.path, device: lease.dev.toString(), inode: lease.ino.toString(), digest: lease.digest,
+      ...(lease.process === undefined ? {} : { process: parseWindowsProcessInstance(lease.process) }) },
   }) });
 }
 

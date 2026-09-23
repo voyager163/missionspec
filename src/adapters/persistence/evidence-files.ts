@@ -13,6 +13,7 @@ import { parsePruneTarget } from './pruning.js';
 import { requireSupportedPlatform } from './filesystem.js';
 import {
   inspectWindowsPrivateFile, removeWindowsPrivateFile, syncWindowsPrivateDirectory, windowsPrivateEntries, writeWindowsPrivateFile,
+  currentWindowsProcessInstance, parseWindowsWriterLock,
   type WindowsFileScope, type WindowsWriterLease,
 } from '../platform/windows-private-state.js';
 
@@ -128,27 +129,26 @@ async function withPrivateStateLock<T>(
   parseDigest(id);
   await scope(files, workspace, kind === 'evidence-prune' ? 'evidence' : 'lifecycle');
   const filename = path.join(files.root, '.missionspec', 'transaction.lock');
-  const lockContent = JSON.stringify({ schemaVersion: 1, kind, id, pid: process.pid, nonce: randomUUID() });
+  const writer = process.platform === 'win32' ? currentWindowsProcessInstance() : undefined;
+  const lockContent = JSON.stringify({ schemaVersion: writer === undefined ? 1 : 2, kind, id, pid: process.pid, nonce: randomUUID(),
+    ...(writer === undefined ? {} : { process: writer }) });
   if (process.platform === 'win32') {
     let old: string | undefined;
     try { old = readFileSync(filename, 'utf8'); } catch (error) { if (!missing(error)) throw error; }
     if (old !== undefined) {
-      const owner = record(JSON.parse(old) as unknown, 'prune.lock', ['schemaVersion', 'kind', 'id', 'pid', 'nonce']);
-      if (owner.schemaVersion !== 1 || owner.kind !== kind || parseDigest(owner.id) !== id) {
-        throw new WorkflowError('conflict', 'Only this prune can reclaim its own dead writer lock.');
-      }
-      text(owner.nonce, 'prune.lock.nonce', 80);
-      const pid = integer(owner.pid, 'prune.lock.pid', 1, 2147483647);
       try {
+        const owner = parseWindowsWriterLock(JSON.parse(old) as unknown);
+        if (owner.kind !== kind || owner.id !== id) throw new Error('Writer lock scope differs');
         const previous = inspectWindowsPrivateFile(windowsScope(files, false), filename);
         if (previous.digest !== digestContent(old)) throw new Error('Writer changed');
-        removeWindowsPrivateFile(windowsScope(files, false), filename, previous.digest, previous, pid);
+        removeWindowsPrivateFile(windowsScope(files, false), filename, previous.digest, previous, owner.process ?? owner.pid);
       } catch (error) {
         throw new WorkflowError('conflict', `The prune writer is live, unknown, or changed; its lock is retained. ${windowsIoDetail(error)}`);
       }
     }
     const owned = writeWindowsPrivateFile(windowsScope(files, false), filename, lockContent);
-    windowsLeases.set(files, { path: filename, dev: BigInt(owned.device), ino: BigInt(owned.inode), digest: owned.digest });
+    windowsLeases.set(files, { path: filename, dev: BigInt(owned.device), ino: BigInt(owned.inode), digest: owned.digest,
+      ...(writer === undefined ? {} : { process: writer }) });
     try {
       if ((await files.pending()).length !== 0) throw new WorkflowError('conflict', 'Pending file transactions block pruning.');
       return await operation();

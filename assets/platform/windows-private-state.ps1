@@ -49,6 +49,11 @@ try {
   Native 'NtSetInformationFile' 'ntdll.dll' ([int]) @([IntPtr], [IntPtr], [IntPtr], [uint32], [int])
   Native 'FlushFileBuffers' 'kernel32.dll' ([bool]) @([IntPtr])
   Native 'K32EnumProcesses' 'kernel32.dll' ([bool]) @([IntPtr], [uint32], [uint32].MakeByRefType())
+  Native 'OpenProcess' 'kernel32.dll' ([IntPtr]) @([uint32], [bool], [uint32])
+  Native 'GetProcessId' 'kernel32.dll' ([uint32]) @([IntPtr])
+  Native 'GetProcessTimes' 'kernel32.dll' ([bool]) @([IntPtr], [IntPtr], [IntPtr], [IntPtr], [IntPtr])
+  Native 'GetSystemTimeAsFileTime' 'kernel32.dll' ([void]) @([IntPtr])
+  Native 'WaitForSingleObject' 'kernel32.dll' ([uint32]) @([IntPtr], [uint32])
   Native 'CloseHandle' 'kernel32.dll' ([bool]) @([IntPtr])
   Native 'CreateDirectoryW' 'kernel32.dll' ([bool]) @([string], [IntPtr])
   Native 'LocalFree' 'kernel32.dll' ([IntPtr]) @([IntPtr])
@@ -56,6 +61,121 @@ try {
   Native 'GetSecurityInfo' 'advapi32.dll' ([uint32]) @([IntPtr], [int], [uint32], [IntPtr].MakeByRefType(), [IntPtr].MakeByRefType(), [IntPtr].MakeByRefType(), [IntPtr].MakeByRefType(), [IntPtr].MakeByRefType())
   Native 'GetSecurityDescriptorLength' 'advapi32.dll' ([uint32]) @([IntPtr])
   $native = $type.CreateType()
+  function Check-ProcessInstance($instance) {
+    $script:phase = 'process-instance'
+    $names = @($instance.psobject.Properties.Name)
+    if ($null -eq $instance -or $names.Count -ne 3 -or
+        @('schemaVersion','pid','creationFileTime' | Where-Object { $_ -cnotin $names }).Count -ne 0 -or
+        ($instance.schemaVersion -isnot [int] -and $instance.schemaVersion -isnot [long]) -or $instance.schemaVersion -ne 1 -or
+        ($instance.pid -isnot [int] -and $instance.pid -isnot [long]) -or $instance.pid -lt 1 -or $instance.pid -gt 2147483647 -or
+        $instance.creationFileTime -isnot [string] -or $instance.creationFileTime -cnotmatch '^[1-9][0-9]{0,18}$' -or
+        [decimal]$instance.creationFileTime -lt 116444736000000000 -or
+        [decimal]$instance.creationFileTime -gt [int64]::MaxValue) { throw 'process-instance' }
+    $clock = [Runtime.InteropServices.Marshal]::AllocHGlobal(8)
+    try {
+      $native::GetSystemTimeAsFileTime($clock)
+      if ([decimal]$instance.creationFileTime -gt [Runtime.InteropServices.Marshal]::ReadInt64($clock)) { throw 'process-instance' }
+    } finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($clock) }
+  }
+  function Assert-ProcessAbsent([int]$processId) {
+    $script:phase = 'process-inspection'
+    $processes = [Runtime.InteropServices.Marshal]::AllocHGlobal(65536)
+    try {
+      $count = [uint32]0
+      if ($processId -lt 1 -or !$native::K32EnumProcesses($processes, 65536, [ref]$count) -or
+          $count -ge 65536 -or ($count % 4) -ne 0) { throw 'process-inspection' }
+      $observedSelf = $false
+      for ($index = 0; $index -lt $count; $index += 4) {
+        $observed = [Runtime.InteropServices.Marshal]::ReadInt32($processes, $index)
+        if ($observed -eq $PID) { $observedSelf = $true }
+        if ($observed -eq $processId) { throw 'process-present' }
+      }
+      if (!$observedSelf) { throw 'process-inspection' }
+    } finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($processes) }
+  }
+  function Read-ProcessInstance([int]$processId, [bool]$allowAbsent = $false) {
+    $script:phase = 'process-inspection'
+    if ($processId -lt 1) { throw 'process-instance' }
+    $handle = $native::OpenProcess(0x101000, $false, [uint32]$processId)
+    if ($handle -eq [IntPtr]::Zero) {
+      $script:nativeStatus = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+      if ($allowAbsent -and $script:nativeStatus -eq 87) {
+        Assert-ProcessAbsent $processId
+        $script:nativeStatus = $null
+        return $null
+      }
+      throw 'process-inspection'
+    }
+    $times = [IntPtr]::Zero
+    try {
+      $times = [Runtime.InteropServices.Marshal]::AllocHGlobal(32)
+      $observedId = $native::GetProcessId($handle)
+      if ($observedId -ne $processId -or
+          !$native::GetProcessTimes($handle, $times, [IntPtr]::Add($times, 8), [IntPtr]::Add($times, 16), [IntPtr]::Add($times, 24))) {
+        throw 'process-inspection'
+      }
+      $instance = [pscustomobject]@{schemaVersion=1;pid=[int]$observedId
+        creationFileTime=([Runtime.InteropServices.Marshal]::ReadInt64($times)).ToString([Globalization.CultureInfo]::InvariantCulture)}
+      Check-ProcessInstance $instance
+      $wait = $native::WaitForSingleObject($handle, 0)
+      if ($wait -notin @(0, 258)) { throw 'process-inspection' }
+      return @{instance=$instance;live=($wait -eq 258)}
+    } finally {
+      if ($times -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::FreeHGlobal($times) }
+      if (!$native::CloseHandle($handle)) { throw 'process-inspection' }
+    }
+  }
+  function Check-WriterProcess($instance, [bool]$ended) {
+    Check-ProcessInstance $instance
+    $observed = Read-ProcessInstance $instance.pid $ended
+    if ($null -eq $observed) { return }
+    $expected = [int64]$instance.creationFileTime
+    $actual = [int64]$observed.instance.creationFileTime
+    if ($ended) {
+      # A different OS birth is another instance, never a process we may terminate.
+      if ($actual -eq $expected -and $observed.live) { throw 'process-present' }
+    } elseif ($actual -ne $expected -or !$observed.live) { throw 'process-instance' }
+  }
+  function Check-WriterLeaseProcess($lease, [byte[]]$bytes) {
+    $owner = [Text.UTF8Encoding]::new($false, $true).GetString($bytes) | Microsoft.PowerShell.Utility\ConvertFrom-Json
+    $modern = Check-WriterLock $owner
+    if (!$modern -and $null -eq $lease.process) { return }
+    if ($owner.schemaVersion -ne 2 -or $null -eq $lease.process) { throw 'writer-lease' }
+    Check-ProcessInstance $owner.process
+    Check-ProcessInstance $lease.process
+    if ($owner.pid -ne $owner.process.pid -or $owner.process.pid -ne $lease.process.pid -or
+        $owner.process.creationFileTime -cne $lease.process.creationFileTime) { throw 'writer-lease' }
+    Check-WriterProcess $lease.process $false
+  }
+  function Check-WriterLock($owner) {
+    $names = @($owner.psobject.Properties.Name)
+    $kind = if ('transactionId' -cin $names) { 'transaction' } else { [string]$owner.kind }
+    if ($kind -cnotin @('transaction','runtime','evidence-prune','state-lifecycle')) { throw 'writer-lease' }
+    $modern = $owner.schemaVersion -eq 2
+    $keys = switch ($kind) {
+      'transaction' { @('transactionId','pid') }
+      'runtime' { @('kind','pid') }
+      { $_ -in @('evidence-prune','state-lifecycle') } { @('schemaVersion','kind','id','pid','nonce') }
+      default { throw 'writer-lease' }
+    }
+    if ($modern) { $keys = @($keys + @('schemaVersion','nonce','process') | Select-Object -Unique) }
+    if ($names.Count -ne $keys.Count -or @($keys | Where-Object { $_ -cnotin $names }).Count -ne 0 -or
+        ($owner.pid -isnot [int] -and $owner.pid -isnot [long]) -or $owner.pid -lt 1 -or $owner.pid -gt 2147483647 -or
+        ($kind -eq 'transaction' -and ($owner.transactionId -isnot [string] -or $owner.transactionId -cnotmatch '^[a-f0-9-]{36}$')) -or
+        ($kind -in @('evidence-prune','state-lifecycle') -and ($owner.id -isnot [string] -or
+          $owner.id -cnotmatch '^sha256:[a-f0-9]{64}$' -or $owner.nonce -isnot [string] -or
+          $owner.nonce.Length -lt 1 -or $owner.nonce.Length -gt 80))) { throw 'writer-lease' }
+    if ('schemaVersion' -cin $names) {
+      if (($owner.schemaVersion -isnot [int] -and $owner.schemaVersion -isnot [long]) -or
+          (!$modern -and $owner.schemaVersion -ne 1)) { throw 'writer-lease' }
+    }
+    if ($modern) {
+      if ($owner.nonce -isnot [string] -or $owner.nonce -cnotmatch '^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$') { throw 'writer-lease' }
+      Check-ProcessInstance $owner.process
+      if ($owner.pid -ne $owner.process.pid) { throw 'writer-lease' }
+    }
+    return $modern
+  }
   function HandleSecurity([IntPtr]$handle, [uint32]$information = 7) {
     $descriptor = [IntPtr]::Zero
     $owner = [IntPtr]::Zero
@@ -224,6 +344,15 @@ try {
     [Console]::Out.Write('{"ok":true}')
     return
   }
+  if ($inputObject.kind -ceq 'process-instance') {
+    if (@($inputObject.PSObject.Properties).Count -ne 2 -or
+        ($inputObject.pid -isnot [int] -and $inputObject.pid -isnot [long]) -or
+        $inputObject.pid -lt 1 -or $inputObject.pid -gt 2147483647) { throw 'process-instance' }
+    $observed = Read-ProcessInstance $inputObject.pid
+    if (!$observed.live) { throw 'process-instance' }
+    [Console]::Out.Write((@{ok=$true;value=$observed.instance} | Microsoft.PowerShell.Utility\ConvertTo-Json -Compress))
+    return
+  }
   if ($null -ne $inputObject.operation) {
     . ($PSScriptRoot + '\windows-file-operations.ps1')
     $result = Invoke-MissionSpecFileOperation $inputObject.operation
@@ -256,25 +385,15 @@ try {
         if ($stream.Length -gt 4096) { throw 'writer-lease' }
         $digest = 'sha256:' + [BitConverter]::ToString($hash.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
         if ($digest -cne [string]$lease.digest) { throw 'writer-lease' }
+        $stream.Position = 0
+        $content = [byte[]]::new([int]$stream.Length)
+        if ($stream.Read($content, 0, $content.Length) -ne $content.Length) { throw 'writer-lease' }
+        Check-WriterLeaseProcess $lease $content
       } finally { $hash.Dispose(); $stream.Dispose(); $safe.Dispose() }
     } finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($leaseInfo) }
   }
   if ($null -ne $inputObject.absentProcess) {
-    $phase = 'process-inspection'
-    $processId = [int]$inputObject.absentProcess
-    if ($processId -le 0) { throw 'process-inspection' }
-    $processes = [Runtime.InteropServices.Marshal]::AllocHGlobal(65536)
-    try {
-      $count = [uint32]0
-      if (!$native::K32EnumProcesses($processes, 65536, [ref]$count) -or $count -ge 65536 -or ($count % 4) -ne 0) { throw 'process-inspection' }
-      $observedSelf = $false
-      for ($index = 0; $index -lt $count; $index += 4) {
-        $observed = [Runtime.InteropServices.Marshal]::ReadInt32($processes, $index)
-        if ($observed -eq $PID) { $observedSelf = $true }
-        if ($observed -eq $processId) { throw 'process-present' }
-      }
-      if (!$observedSelf) { throw 'process-inspection' }
-    } finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($processes) }
+    Assert-ProcessAbsent ([int]$inputObject.absentProcess)
   }
   foreach ($entry in $inputObject.entries) {
     if ($null -ne $entry.flushIdentity) {
@@ -380,7 +499,7 @@ try {
   $reason = $_.Exception.Message
   if ($reason -notin @('system-executable','open','identity','type','links','alias','acl','owner','unsupported-ace','public-access',
       'user-access','inheritance','close','volume','descriptor','create','directory-identity','directory-flush','directory-close','flush-options',
-      'file-metadata','file-security','process-inspection','process-present','writer-lease','lease-close')) { $reason = $phase }
+      'file-metadata','file-security','process-inspection','process-present','process-instance','writer-lease','lease-close')) { $reason = $phase }
   if ($failure.Exception.Message -in @('file-security-owner','file-security-group','file-security-control',
       'file-security-dacl','file-security-descriptor','file-security-policy','file-security-set')) { $reason = $failure.Exception.Message }
   if ($failure.Exception.Message -in @('effect-root','effect-path','effect-open','effect-read','effect-write','effect-size',

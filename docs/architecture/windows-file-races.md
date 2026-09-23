@@ -22,7 +22,7 @@ same-account tamper immunity, console authority or native-host qualification.
 | 6: source publication | Stage/destination checked, then pathname link/replace | Held stage and destination handles; directory-relative no-replace rename; durable retained-preimage intent for replacement |
 | 7: stage cleanup | Validated stage name could be reused before unlink | Stage rename consumes the held object; there is no post-publication unlink of the stage pathname |
 | 8: transaction-lock release | Checked lock could be replaced before unlink | Same identity-bound native delete as runtime-lock release |
-| 9: dead-lock reclaim | Two recoverers could check the same old lock and one delete the other's replacement | Destructive handle acquired before checking identity/content and PID absence; conflicting recoverers cannot simultaneously hold it; deletion affects only that handle |
+| 9: dead-lock reclaim | Two recoverers could check the same old lock and one delete the other's replacement | Destructive handle acquired before checking identity/content and original-writer termination (OS PID/birth for new locks, strict PID absence for legacy); conflicting recoverers cannot simultaneously hold it; deletion affects only that handle |
 
 The JavaScript adapter still performs read-only planning/freshness observations.
 Those observations are **not** the protection for mutation: the native operation
