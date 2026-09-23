@@ -283,6 +283,9 @@ can update `AppData/Local/Microsoft/Windows/PowerShell/StartupProfileData-NonInt
 even with `-NoProfile`. Only that exact 64-byte runtime cache's content and mtime
 may vary; its identity, mode, type and link count, every other profile entry,
 and all project/preference/foreign-file bytes and mtimes remain checked.
+The observed console-runtime `AppData/Local/Microsoft/Windows/Caches` directory
+is also securely precreated in the disposable profile. It is **not** excluded:
+it must remain empty, with unchanged type, identity, mode and modification time.
 This is not telemetry or permission to ignore arbitrary profile writes.
 Synthetic ConPTY does not attest human presence. A non-Windows skip or syntax
 check is not native qualification; this CLI glue requires a passing Windows

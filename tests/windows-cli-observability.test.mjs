@@ -58,12 +58,16 @@ function fixture(t, preferences = false) {
   });
   const directories = ['project', 'user', 'os-profile', 'os-profile/AppData', 'os-profile/AppData/Local',
     'os-profile/AppData/Roaming', 'os-profile/AppData/Local/Microsoft', 'os-profile/AppData/Local/Microsoft/Windows',
-    'os-profile/AppData/Local/Microsoft/Windows/PowerShell'];
+    'os-profile/AppData/Local/Microsoft/Windows/PowerShell', 'os-profile/AppData/Local/Microsoft/Windows/Caches'];
   for (let index = 0; index < directories.length; index += 8) {
     windowsPrivateEntries(directories.slice(index, index + 8).map((relative) => ({
       path: path.join(sandbox.root, relative), directory: true, writable: true, create: true,
     })));
   }
+  const consoleCaches = path.join(profile, 'AppData', 'Local', 'Microsoft', 'Windows', 'Caches');
+  const emptyCaches = tree(consoleCaches);
+  assert.deepEqual(emptyCaches.entries, {});
+  foreign.set(consoleCaches, emptyCaches);
   for (const container of [user, profile]) {
     const filename = path.join(container, 'foreign-settings.json');
     privateFile(filename, '{"unrelated":"retain-exactly"}\n');

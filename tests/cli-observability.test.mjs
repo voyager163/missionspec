@@ -121,6 +121,45 @@ test('isolated profile snapshots exempt only the exact bounded OS cache, never u
   assert.throws(snapshot, /Unexpected PowerShell startup-cache type, links or size/u);
 });
 
+test('profile inventory retains the empty Windows Caches directory and detects actual SQLite changes', async (t) => {
+  const f = await fixture(t);
+  const profile = path.join(f.root, 'os-profile');
+  const caches = path.join(profile, 'AppData', 'Local', 'Microsoft', 'Windows', 'Caches');
+  const preferences = path.join(f.root, 'preferences', 'telemetry.sqlite');
+  await mkdir(caches, { recursive: true, mode: 0o700 });
+  await mkdir(path.dirname(preferences), { mode: 0o700 });
+  const initial = new DatabaseSync(preferences);
+  try { initial.exec("CREATE TABLE fixture_preference (value TEXT); INSERT INTO fixture_preference VALUES ('disabled')"); }
+  finally { initial.close(); }
+  const snapshot = () => observabilityFixtureSnapshot(f.root, { profile });
+  const before = snapshot();
+  const emptyCaches = before.entries['os-profile'].entries.AppData.entries.Local.entries.Microsoft.entries.Windows.entries.Caches;
+  assert.deepEqual(emptyCaches.entries, {});
+  assert.deepEqual(emptyCaches, observabilityFixtureSnapshot(caches));
+  const info = await lstat(caches, { bigint: true });
+  assert.equal(info.isDirectory(), true);
+  assert.equal(emptyCaches.inode, String(info.ino));
+  assert.equal(emptyCaches.mode, String(info.mode));
+  const changed = new DatabaseSync(preferences);
+  try { changed.exec("UPDATE fixture_preference SET value = 'enabled'"); }
+  finally { changed.close(); }
+  assert.notDeepEqual(snapshot(), before);
+  assert.deepEqual(observabilityFixtureSnapshot(caches), emptyCaches);
+  const beforeCacheWrite = snapshot();
+  await writeFile(path.join(caches, 'unexpected-state'), 'must be detected');
+  assert.notDeepEqual(snapshot(), beforeCacheWrite);
+  assert.deepEqual(Object.keys(observabilityFixtureSnapshot(caches).entries), ['unexpected-state']);
+  await rm(path.join(caches, 'unexpected-state'));
+  const beforeTimestamp = snapshot();
+  await utimes(caches, new Date('2020-01-01T00:00:00Z'), new Date('2020-01-01T00:00:00Z'));
+  assert.notDeepEqual(snapshot(), beforeTimestamp);
+  const beforeType = snapshot();
+  await rm(caches, { recursive: true });
+  await writeFile(caches, 'not a directory');
+  assert.notDeepEqual(snapshot(), beforeType);
+  assert.equal(observabilityFixtureSnapshot(caches).entries, undefined);
+});
+
 async function fixture(t, extraEnv = {}) {
   const root = path.resolve(`.cli-observability-test-${randomUUID()}`);
   await mkdir(root, { mode: 0o700 });
