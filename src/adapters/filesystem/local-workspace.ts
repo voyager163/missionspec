@@ -17,6 +17,7 @@ import {
   syncWindowsPrivateDirectory, validateWindowsStatePath, windowsPrivateEntries,
   ensureWindowsPrivateDirectories, inspectWindowsPrivateFile, removeWindowsPrivateFile, syncWindowsPrivateFile,
   windowsPublication, writeWindowsPrivateFile, WindowsDirectoryDurabilityError, WindowsPrivateStateError,
+  windowsPrivateStateDiagnostic,
   type WindowsFileReference, type WindowsFileScope, type WindowsPrivateEntry, type WindowsWriterLease,
 } from '../platform/windows-private-state.js';
 
@@ -225,8 +226,9 @@ function missing(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT';
 }
 
-function windowsIoDetail(error: unknown): string {
-  if (error instanceof WindowsPrivateStateError || error instanceof WindowsDirectoryDurabilityError) return error.message;
+export function windowsIoDetail(error: unknown): string {
+  if (error instanceof WindowsPrivateStateError) return `Windows private-state diagnostic: ${windowsPrivateStateDiagnostic(error)}.`;
+  if (error instanceof WindowsDirectoryDurabilityError) return 'Windows directory durability is unconfirmed.';
   const code: unknown = typeof error === 'object' && error !== null ? Reflect.get(error, 'code') : undefined;
   return typeof code === 'string' && ['EACCES', 'EPERM', 'EBADF', 'EIO', 'EEXIST', 'ENOENT', 'EBUSY', 'ENOTDIR', 'ENOSPC'].includes(code)
     ? `Filesystem code: ${code}.` : 'Filesystem outcome is unconfirmed.';
@@ -743,7 +745,11 @@ export class LocalWorkspace {
       if (process.platform === 'win32' && error instanceof WorkflowError && error.code === 'effect-outcome-unknown') throw error;
       if (prepared) throw new WorkflowError('effect-outcome-unknown', 'The prepared file transaction did not finish. Inspect pending transactions and recover without overwriting changed files.' +
         (process.platform === 'win32' ? ` ${windowsIoDetail(error)}` : ''));
-      if (!locked) throw new WorkflowError('conflict', 'Local transaction lock or audit storage is unavailable. Do not remove a lock without establishing writer quiescence.');
+      if (!locked) {
+        if (error instanceof WorkflowError) throw error;
+        throw new WorkflowError('conflict', 'Local transaction lock or audit storage is unavailable. Do not remove a lock without establishing writer quiescence.' +
+          (process.platform === 'win32' ? ` ${windowsIoDetail(error)}` : ''));
+      }
       throw error;
     } finally {
       if (locked) {
@@ -774,8 +780,8 @@ export class LocalWorkspace {
       const reference = inspectWindowsPrivateFile(this.windowsScope(false), filename);
       if (reference.digest !== original.digest) throw new Error('Writer lock changed');
       removeWindowsPrivateFile(this.windowsScope(false), filename, original.digest, reference, owner.pid);
-    } catch {
-      throw new WorkflowError('conflict', 'The recorded writer may still exist; its lock is preserved.');
+    } catch (error) {
+      throw new WorkflowError('conflict', `The recorded writer may still exist; its lock is preserved. ${windowsIoDetail(error)}`);
     }
   }
 
