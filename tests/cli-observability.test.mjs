@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { chmod, lstat, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, link, lstat, mkdir, readFile, readdir, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { promisify } from 'node:util';
@@ -10,7 +10,8 @@ import { createAuthorizedJsonlSink } from '../dist/adapters/logging/jsonl.js';
 import { serializeDiagnosticEvent } from '../dist/adapters/logging/diagnostics.js';
 import { createUserTelemetryPreferenceStore } from '../dist/adapters/telemetry/preferences.js';
 import { digestContent } from '../dist/kernel/revisions.js';
-import { checkCliProcess, cliProcessDiagnostic, networkGuardSpecifier, parseCliEnvelope } from './fixtures/cli-observability-process.mjs';
+import { checkCliProcess, cliControlDiagnostic, cliProcessDiagnostic, networkGuardSpecifier, parseCliEnvelope } from './fixtures/cli-observability-process.mjs';
+import { observabilityFixtureSnapshot, powerShellStartupCache } from './fixtures/cli-observability-files.mjs';
 
 const exec = promisify(execFile);
 const moduleUrl = new URL('../dist/cli/observability.js', import.meta.url).href;
@@ -19,6 +20,7 @@ const authorityUrl = new URL('../dist/adapters/authority/terminal.js', import.me
 const localAuthorityUrl = new URL('../dist/adapters/authority/local-authority.js', import.meta.url).href;
 const driver = path.resolve('tests/fixtures/terminal-driver.py');
 const networkGuard = networkGuardSpecifier();
+const nativeDiagnostics = new URL('./fixtures/cli-observability-native-diagnostics.mjs', import.meta.url).href;
 const cli = path.resolve('dist/cli/main.js');
 const commandSource = `
   const { runObservabilityCommand } = await import(${JSON.stringify(moduleUrl)});
@@ -37,7 +39,7 @@ test('CLI preload specifiers stay file URLs and the real guard blocks caught HTT
   const env = { ...process.env };
   for (const key of Object.keys(env)) if (key.toUpperCase() === 'NODE_OPTIONS') delete env[key];
   const launch = (specifier, source) => spawnSync(process.execPath,
-    ['--import', specifier, '--input-type=module', '-e', source],
+    ['--import', specifier, '--import', nativeDiagnostics, '--input-type=module', '-e', source],
     { env, encoding: 'utf8', shell: false, timeout: 15_000, maxBuffer: 65_536 });
   const ready = launch(networkGuard, 'console.log(JSON.stringify({ contractVersion: 1, status: "ok", value: "guard-loaded" }))');
   assert.equal(parseCliEnvelope(ready).value, 'guard-loaded');
@@ -79,6 +81,44 @@ test('CLI startup diagnostics precede envelope parsing and console assertions wi
     code: 2, challenges: 1, output: `Exact console review\n${serialized.slice(0, 45)}\r\n${serialized.slice(45)}\r\n`,
   }, true), envelope);
   assert.throws(() => parseCliEnvelope({ code: 0, stdout: serialized }), /invalid-envelope/u);
+  const failure = cliControlDiagnostic({
+    code: 2, stdout: '', stderr: `CLI_NATIVE_FAILURE:${JSON.stringify({
+      native: `create; phase=creation; boundary=ancestor; line=331; unrelated=${sentinel}`,
+    })}\n`,
+    value: { status: 'blocked', value: { state: 'unavailable', reason: 'io', persistence: 'unchanged', cleanup: 'complete', secret: sentinel } },
+  });
+  assert.match(failure, /state=unavailable; reason=io; persistence=unchanged; cleanup=complete/u);
+  assert.match(failure, /native=create; phase=creation; boundary=ancestor; line=331/u);
+  assert.doesNotMatch(failure, new RegExp(sentinel, 'u'));
+});
+
+test('isolated profile snapshots exempt only the exact bounded OS cache, never user files or other metadata', async (t) => {
+  const f = await fixture(t);
+  const profile = path.join(f.root, 'os-profile');
+  const cache = powerShellStartupCache(profile);
+  await mkdir(path.dirname(cache), { recursive: true, mode: 0o700 });
+  await writeFile(cache, Buffer.alloc(64, 1), { mode: 0o600 });
+  const foreign = path.join(profile, 'foreign-settings.json');
+  await writeFile(foreign, '{"keep":true}', { mode: 0o600 });
+  const snapshot = () => observabilityFixtureSnapshot(f.root, { profile });
+  const before = snapshot();
+  await writeFile(cache, Buffer.alloc(64, 2));
+  await utimes(cache, new Date('2020-01-01T00:00:00Z'), new Date('2020-01-01T00:00:00Z'));
+  assert.deepEqual(snapshot(), before);
+  await writeFile(foreign, '{"keep":false}');
+  assert.notDeepEqual(snapshot(), before);
+  const changed = snapshot();
+  await chmod(foreign, 0o444);
+  assert.notDeepEqual(snapshot(), changed);
+  await chmod(foreign, 0o600);
+  const withMode = snapshot();
+  await writeFile(path.join(path.dirname(cache), 'unexpected-state'), 'must be detected');
+  assert.notDeepEqual(snapshot(), withMode);
+  await writeFile(cache, Buffer.alloc(65));
+  assert.throws(snapshot, /Unexpected PowerShell startup-cache type, links or size/u);
+  await rm(cache);
+  await link(foreign, cache);
+  assert.throws(snapshot, /Unexpected PowerShell startup-cache type, links or size/u);
 });
 
 async function fixture(t, extraEnv = {}) {

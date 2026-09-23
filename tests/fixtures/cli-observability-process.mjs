@@ -1,3 +1,5 @@
+import { windowsFailureDiagnostic } from '../../dist/adapters/platform/windows-private-state.js';
+
 export function networkGuardSpecifier(moduleUrl = import.meta.url) {
   return new URL('./cli-observability-network-guard.mjs', moduleUrl).href;
 }
@@ -21,6 +23,33 @@ export function cliProcessDiagnostic(result) {
   if (result.signal != null) parts.push(`signal=${signals.includes(result.signal) ? result.signal : 'other'}`);
   if (uint(result.challenges) && result.challenges <= 64) parts.push(`challenges=${result.challenges}`);
   if (typeof result.stdout === 'string') parts.push(`stdout=${result.stdout.trim() === '' ? 'empty' : 'present'}`);
+  return parts.join('; ');
+}
+
+export function cliControlDiagnostic(result) {
+  const envelope = result.value;
+  const control = envelope?.value;
+  const parts = [cliProcessDiagnostic(result)];
+  for (const [label, value, allowed] of [
+    ['status', envelope?.status, ['ok', 'blocked', 'failed', 'outcome-unknown']],
+    ['state', control?.state, ['ready', 'saved', 'unavailable', 'absent', 'pruned']],
+    ['reason', control?.reason, ['invalid', 'io', 'conflict', 'busy', 'unrecognized-store', 'cleanup-failed',
+      'preference-read-failed', 'authorization-rejected', 'authorization-unavailable', 'stale-preview']],
+    ['persistence', control?.persistence, ['unchanged', 'committed', 'unknown']],
+    ['cleanup', control?.cleanup, ['complete', 'incomplete']],
+  ]) if (allowed.includes(value)) parts.push(`${label}=${value}`);
+  for (const line of (typeof result.stderr === 'string' ? result.stderr.slice(0, 16_384) : '').split(/\r?\n/u)) {
+    if (!line.startsWith('CLI_NATIVE_FAILURE:')) continue;
+    try {
+      const { native } = JSON.parse(line.slice('CLI_NATIVE_FAILURE:'.length));
+      if (typeof native !== 'string' || native.length > 512) continue;
+      const [reason, ...details] = native.split('; ');
+      const fields = Object.fromEntries(details.map((detail) => detail.split('=')));
+      for (const name of ['line', 'nativeStatus']) if (fields[name] !== undefined) fields[name] = Number(fields[name]);
+      parts.push(`native=${windowsFailureDiagnostic({ ...fields, reason })}`);
+      break;
+    } catch { /* Diagnostics accept only the native formatter's closed fields. */ }
+  }
   return parts.join('; ');
 }
 

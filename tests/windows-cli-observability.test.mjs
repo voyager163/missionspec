@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { linkSync, lstatSync, readFileSync, readdirSync, readlinkSync, symlinkSync, writeFileSync } from 'node:fs';
+import { linkSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
@@ -11,42 +11,67 @@ import { createAuthorizedJsonlSink } from '../dist/adapters/logging/jsonl.js';
 import { serializeDiagnosticEvent } from '../dist/adapters/logging/diagnostics.js';
 import { createUserTelemetryPreferenceStore } from '../dist/adapters/telemetry/preferences.js';
 import { windowsExecutionAsset, windowsPowerShell } from '../dist/adapters/platform/windows-execution.js';
+import { windowsPrivateEntries } from '../dist/adapters/platform/windows-private-state.js';
 import { digestContent } from '../dist/kernel/revisions.js';
 import { conptyDiagnostic, parseConptyChild, parseConptyDriver } from './fixtures/windows-conpty-protocol.mjs';
 import { createPrivateFixtureRoot, powershell, privateEntry, removeFixtureRoot } from './fixtures/windows-private-state.mjs';
-import { checkCliProcess, cliProcessDiagnostic, networkGuardSpecifier, parseCliEnvelope } from './fixtures/cli-observability-process.mjs';
+import { checkCliProcess, cliControlDiagnostic, cliProcessDiagnostic, networkGuardSpecifier, parseCliEnvelope } from './fixtures/cli-observability-process.mjs';
+import { observabilityFixtureSnapshot as tree } from './fixtures/cli-observability-files.mjs';
 
 const windows = { skip: process.platform !== 'win32', timeout: 720_000 };
 const cli = fileURLToPath(new URL('../dist/cli/main.js', import.meta.url));
 const guard = networkGuardSpecifier();
+const nativeDiagnostics = new URL('./fixtures/cli-observability-native-diagnostics.mjs', import.meta.url).href;
 const consoleDriver = fileURLToPath(new URL('./fixtures/windows-conpty.ps1', import.meta.url));
 const terminalUrl = new URL('../dist/adapters/authority/terminal.js', import.meta.url).href;
+const privateStateUrl = new URL('../dist/adapters/platform/windows-private-state.js', import.meta.url).href;
 const optOuts = ['NODE_TEST_CONTEXT', 'NODE_ENV', 'CI', 'DO_NOT_TRACK', 'MISSIONSPEC_TELEMETRY'];
 const configVariables = ['MISSIONSPEC_CONFIG_HOME', 'XDG_CONFIG_HOME', 'HOME', 'USERPROFILE', 'HOMEDRIVE',
   'HOMEPATH', 'APPDATA', 'LOCALAPPDATA', 'NODE_OPTIONS'];
 const reservedPaths = [
-  'AppData/Local/MissionSpec/telemetry.sqlite-journal',
-  '.missionspec/approvals/APR-00000000-0000-0000-0000-000000000000.revoked.json',
+  'os-profile/AppData/Local/MissionSpec/telemetry.sqlite-journal',
+  'os-profile/AppData/Local/Microsoft/Windows/PowerShell/StartupProfileData-NonInteractive',
+  'project/.missionspec/approvals/APR-00000000-0000-0000-0000-000000000000.revoked.json',
 ];
 
-function childEnvironment(root, preferences) {
+function childEnvironment(profile, user, preferences) {
   const env = { ...process.env };
   for (const key of Object.keys(env)) {
     if (configVariables.includes(key.toUpperCase()) || preferences && optOuts.includes(key.toUpperCase())) delete env[key];
   }
   return Object.assign(env, {
-    HOME: root, USERPROFILE: root, HOMEDRIVE: path.parse(root).root.slice(0, 2), HOMEPATH: root.slice(2),
-    APPDATA: path.join(root, 'Roaming'), LOCALAPPDATA: path.join(root, 'Local'),
-    MISSIONSPEC_CONFIG_HOME: path.join(root, 'preferences'),
+    HOME: profile, USERPROFILE: profile, HOMEDRIVE: path.parse(profile).root.slice(0, 2), HOMEPATH: profile.slice(2),
+    APPDATA: path.join(profile, 'AppData', 'Roaming'), LOCALAPPDATA: path.join(profile, 'AppData', 'Local'),
+    MISSIONSPEC_CONFIG_HOME: path.join(user, 'preferences'),
   });
 }
 
 function fixture(t, preferences = false) {
-  const { root, identity } = createPrivateFixtureRoot(reservedPaths);
-  t.after(() => removeFixtureRoot(root, identity));
-  const env = childEnvironment(root, preferences);
+  const sandbox = createPrivateFixtureRoot(reservedPaths);
+  const root = path.join(sandbox.root, 'project');
+  const user = path.join(sandbox.root, 'user');
+  const profile = path.join(sandbox.root, 'os-profile');
+  const foreign = new Map();
+  t.after(() => {
+    try { for (const [filename, before] of foreign) assert.deepEqual(tree(filename), before); }
+    finally { removeFixtureRoot(sandbox.root, sandbox.identity); }
+  });
+  const directories = ['project', 'user', 'os-profile', 'os-profile/AppData', 'os-profile/AppData/Local',
+    'os-profile/AppData/Roaming', 'os-profile/AppData/Local/Microsoft', 'os-profile/AppData/Local/Microsoft/Windows',
+    'os-profile/AppData/Local/Microsoft/Windows/PowerShell'];
+  for (let index = 0; index < directories.length; index += 8) {
+    windowsPrivateEntries(directories.slice(index, index + 8).map((relative) => ({
+      path: path.join(sandbox.root, relative), directory: true, writable: true, create: true,
+    })));
+  }
+  for (const container of [user, profile]) {
+    const filename = path.join(container, 'foreign-settings.json');
+    privateFile(filename, '{"unrelated":"retain-exactly"}\n');
+    foreign.set(filename, tree(filename));
+  }
+  const env = childEnvironment(profile, user, preferences);
   const spawn = (argv) => {
-    const result = spawnSync(process.execPath, ['--import', guard, ...argv], {
+    const result = spawnSync(process.execPath, ['--import', guard, '--import', nativeDiagnostics, ...argv], {
       cwd: root, env, encoding: 'utf8', shell: false, windowsHide: true, timeout: 150_000, maxBuffer: 1_048_576,
     });
     checkCliProcess(result);
@@ -55,8 +80,25 @@ function fixture(t, preferences = false) {
     }
     return { code: result.status, stdout: result.stdout, stderr: result.stderr };
   };
+  const home = spawn(['--input-type=module', '-e', `
+    import { homedir } from 'node:os';
+    console.log(homedir() === process.env.USERPROFILE ? 'ISOLATED_PROFILE' : 'PROFILE_MISMATCH');
+  `]);
+  if (home.code !== 0 || home.stdout.trim() !== 'ISOLATED_PROFILE') throw new Error('Node did not select the isolated OS profile');
+  const warmup = spawn(['--input-type=module', '-e', `
+    const { windowsPrivateEntries } = await import(${JSON.stringify(privateStateUrl)});
+    windowsPrivateEntries([{ path: process.env.USERPROFILE, directory: true, writable: true }]);
+    console.log('OS_RUNTIME_READY');
+  `]);
+  if (warmup.code !== 0 || warmup.stdout.trim() !== 'OS_RUNTIME_READY') {
+    throw new Error(`Isolated OS runtime warmup failed; ${cliControlDiagnostic(warmup)}`);
+  }
+  const snapshot = () => tree(sandbox.root, { profile });
+  snapshot();
+  t.diagnostic('Isolated project/user state and warmed disposable OS profile; only the exact 64-byte PowerShell startup-cache content/mtime may change.');
   return {
-    root, env, spawn, preferencePath: path.join(root, 'preferences', 'telemetry.sqlite'),
+    root, user, profile, env, spawn, snapshot, preferencePath: path.join(user, 'preferences', 'telemetry.sqlite'),
+    fallbackPreferencePath: path.join(profile, 'AppData', 'Local', 'MissionSpec', 'telemetry.sqlite'),
     cli(args) {
       const result = spawn([cli, ...args, '--json']);
       return { ...result, value: parseCliEnvelope(result) };
@@ -65,7 +107,7 @@ function fixture(t, preferences = false) {
       windowsExecutionAsset('windows-console.ps1');
       const result = spawnSync(windowsPowerShell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', consoleDriver], {
         input: JSON.stringify({
-          program: process.execPath, argv: ['--import', guard, ...argv], cwd: root, responses, timeoutMs: 200_000,
+          program: process.execPath, argv: ['--import', guard, '--import', nativeDiagnostics, ...argv], cwd: root, responses, timeoutMs: 200_000,
         }),
         cwd: root, env, encoding: 'utf8', shell: false, windowsHide: true, timeout: 220_000, maxBuffer: 12_000_000,
       });
@@ -82,27 +124,20 @@ function fixture(t, preferences = false) {
   };
 }
 
-function tree(root) {
-  const info = lstatSync(root, { bigint: true });
-  if (info.isSymbolicLink()) return { link: readlinkSync(root), mtime: String(info.mtimeNs) };
-  if (!info.isDirectory()) return { bytes: readFileSync(root).toString('base64'), mtime: String(info.mtimeNs) };
-  return { mtime: String(info.mtimeNs), entries: Object.fromEntries(
-    readdirSync(root).sort().map((name) => [name, tree(path.join(root, name))]),
-  ) };
-}
-
-function saved(result) {
-  assert.equal(result.code, 0);
-  assert.equal(result.value.status, 'ok');
-  assert.deepEqual(result.value.value, { state: 'saved' });
+function saved(result, location = 'explicit-preference') {
+  const diagnostic = `${location}: ${cliControlDiagnostic(result)}`;
+  assert.equal(result.code, 0, diagnostic);
+  assert.equal(result.value.status, 'ok', diagnostic);
+  assert.deepEqual(result.value.value, { state: 'saved' }, diagnostic);
 }
 
 function unavailable(result, reason) {
-  assert.equal(result.code, 2);
-  assert.equal(result.value.status, 'blocked');
-  assert.equal(result.value.error.code, 'capability-unavailable');
-  assert.equal(result.value.value.state, 'unavailable');
-  if (reason) assert.equal(result.value.value.reason, reason);
+  const diagnostic = cliControlDiagnostic(result);
+  assert.equal(result.code, 2, diagnostic);
+  assert.equal(result.value.status, 'blocked', diagnostic);
+  assert.equal(result.value.error.code, 'capability-unavailable', diagnostic);
+  assert.equal(result.value.value.state, 'unavailable', diagnostic);
+  if (reason) assert.equal(result.value.value.reason, reason, diagnostic);
 }
 
 function privateFile(filename, content) {
@@ -134,7 +169,7 @@ $sddl = [IO.Directory]::GetAccessControl($v.path, $sections).GetSecurityDescript
 
 test('Windows native CLI read-only controls, help and capabilities create no preferences, project state or notice', windows, (t) => {
   const f = fixture(t, true);
-  const before = tree(f.root);
+  const before = f.snapshot();
   const status = f.cli(['telemetry', 'status']);
   assert.equal(status.code, 0);
   assert.equal(status.value.value.preference, 'default');
@@ -151,11 +186,12 @@ test('Windows native CLI read-only controls, help and capabilities create no pre
   assert.equal(f.cli(['capabilities']).code, 0);
   assert.equal(f.spawn([cli, '--help']).code, 0);
   assert.equal(f.spawn([cli, '--version']).code, 0);
-  assert.deepEqual(tree(f.root), before);
+  assert.deepEqual(f.snapshot(), before);
 });
 
 test('Windows native CLI on/off reopen the dedicated SQLite, preserve disclosure and never migrate mixed settings', windows, async (t) => {
   const f = fixture(t, true);
+  const profileBefore = tree(f.profile, { profile: f.profile });
   privateFile(path.join(f.root, 'settings.json'), '{"telemetry":false,"unrelated":"keep"}');
   const settings = tree(path.join(f.root, 'settings.json'));
   f.env.XDG_CONFIG_HOME = 'invalid-lower-precedence';
@@ -169,45 +205,61 @@ test('Windows native CLI on/off reopen the dedicated SQLite, preserve disclosure
   assert.deepEqual(await reopen().save({ disclosureVersion: 1 }), { state: 'saved' });
   saved(f.cli(['telemetry', 'on', '--no-telemetry']));
   assert.deepEqual(await reopen().read(), { state: 'ready', value: { preference: 'enabled', disclosureVersion: 1 } });
-  const before = tree(f.root);
+  const before = f.snapshot();
   const status = f.cli(['telemetry', 'status']).value.value;
   assert.equal(status.preference, 'enabled');
   assert.equal(status.disclosureVersion, 1);
   assert.equal(status.configured, false);
   assert.equal(status.eligibleAfterNotice, false);
   assert.equal(f.cli(['telemetry', 'preview']).value.value.delivery, 'not-attempted');
-  assert.deepEqual(tree(f.root), before);
+  assert.deepEqual(f.snapshot(), before);
   saved(f.cli(['telemetry', 'off']));
   assert.deepEqual(await reopen().read(), { state: 'ready', value: { preference: 'disabled', disclosureVersion: 1 } });
   assert.equal(f.cli(['telemetry', 'status']).value.value.reason, 'opted-out');
   assert.deepEqual(tree(path.join(f.root, 'settings.json')), settings);
-  assert.deepEqual(readdirSync(f.root).sort(), ['preferences', 'settings.json']);
+  assert.deepEqual(readdirSync(f.root), ['settings.json']);
+  assert.deepEqual(readdirSync(f.user).sort(), ['foreign-settings.json', 'preferences']);
   assert.deepEqual(readdirSync(path.dirname(f.preferencePath)), ['telemetry.sqlite']);
+  assert.deepEqual(tree(f.profile, { profile: f.profile }), profileBefore);
 });
 
 test('Windows native CLI uses LOCALAPPDATA, isolated profile fallback and explicit XDG without re-ACLing containers', windows, (t) => {
   const f = fixture(t, true);
+  const profileBefore = tree(f.profile, { profile: f.profile });
   delete f.env.MISSIONSPEC_CONFIG_HOME;
-  const container = f.env.LOCALAPPDATA;
+  const container = path.join(f.user, 'Local');
   const originalAcl = directoryAcl(container, 'ReadAndExecute');
-  saved(f.cli(['telemetry', 'off']));
+  f.env.LOCALAPPDATA = container;
+  saved(f.cli(['telemetry', 'off']), 'local-app-data');
   const local = path.join(container, 'MissionSpec', 'telemetry.sqlite');
   privateEntry(local);
   assert.equal(directoryAcl(container), originalAcl);
   assert.deepEqual(readdirSync(container), ['MissionSpec']);
-  f.env.XDG_CONFIG_HOME = path.join(f.root, 'xdg');
-  saved(f.cli(['telemetry', 'off']));
+  f.env.XDG_CONFIG_HOME = path.join(f.user, 'xdg');
+  saved(f.cli(['telemetry', 'off']), 'xdg');
   privateEntry(path.join(f.env.XDG_CONFIG_HOME, 'missionspec', 'telemetry.sqlite'));
+  assert.deepEqual(tree(f.profile, { profile: f.profile }), profileBefore);
   delete f.env.XDG_CONFIG_HOME;
   delete f.env.LOCALAPPDATA;
-  saved(f.cli(['telemetry', 'off']));
-  privateEntry(path.join(f.root, 'AppData', 'Local', 'MissionSpec', 'telemetry.sqlite'));
-  assert.deepEqual(readdirSync(f.root).sort(), ['AppData', 'Local', 'xdg']);
+  privateEntry(path.join(f.profile, 'AppData', 'Local'), true);
+  const before = f.snapshot();
+  const absent = f.cli(['telemetry', 'status']);
+  assert.equal(absent.code, 0, cliControlDiagnostic(absent));
+  assert.equal(absent.value.value.preference, 'default');
+  assert.deepEqual(f.snapshot(), before);
+  saved(f.cli(['telemetry', 'off']), 'profile-fallback');
+  privateEntry(f.fallbackPreferencePath);
+  const savedFallback = f.snapshot();
+  assert.equal(f.cli(['telemetry', 'status']).value.value.preference, 'disabled');
+  assert.deepEqual(f.snapshot(), savedFallback);
+  assert.deepEqual(readdirSync(path.dirname(f.fallbackPreferencePath)), ['telemetry.sqlite']);
+  assert.deepEqual(readdirSync(f.root), []);
+  assert.deepEqual(readdirSync(f.user).sort(), ['Local', 'foreign-settings.json', 'xdg']);
 });
 
 test('Windows native CLI rejects explicit aliases, junctions and unsafe ACLs without fallback, repair or preference writes', windows, (t) => {
   const f = fixture(t, true);
-  const before = tree(f.root);
+  const before = f.snapshot();
   for (const value of ['', 'relative', 'C:relative', '\\\\server\\share\\preferences', `\\\\?\\${f.root}`,
     `${f.root}\\parent\\..\\preferences`, `${f.root}\\preferences.`, `${f.root}\\preferences `,
     `${f.root}\\preferences:stream`, `${f.root[0].toLowerCase()}${f.root.slice(1)}\\preferences`]) {
@@ -220,7 +272,7 @@ test('Windows native CLI rejects explicit aliases, junctions and unsafe ACLs wit
   delete f.env.XDG_CONFIG_HOME;
   f.env.LOCALAPPDATA = '';
   unavailable(f.cli(['telemetry', 'off']), 'io');
-  assert.deepEqual(tree(f.root), before);
+  assert.deepEqual(f.snapshot(), before);
   const target = path.join(f.root, 'target');
   privateEntry(target, true, true);
   const junction = path.join(f.root, 'junction');
@@ -231,12 +283,12 @@ test('Windows native CLI rejects explicit aliases, junctions and unsafe ACLs wit
   for (const [name, rights, child] of [['public-leaf', 'ReadAndExecute', false], ['unsafe-parent', 'Modify', true]]) {
     const directory = path.join(f.root, name);
     const acl = directoryAcl(directory, rights);
-    const original = tree(f.root);
+    const original = f.snapshot();
     f.env.MISSIONSPEC_CONFIG_HOME = child ? path.join(directory, 'MissionSpec') : directory;
     unavailable(f.cli(['telemetry', 'on']), 'io');
     if (!child) unavailable(f.cli(['telemetry', 'status']), 'preference-read-failed');
     assert.equal(directoryAcl(directory), acl);
-    assert.deepEqual(tree(f.root), original);
+    assert.deepEqual(f.snapshot(), original);
   }
 });
 
@@ -247,11 +299,11 @@ test('Windows native CLI preserves foreign databases and hard-linked bytes; hard
   const database = new DatabaseSync(f.preferencePath);
   try { database.exec("CREATE TABLE unrelated (keep TEXT); INSERT INTO unrelated VALUES ('unchanged')"); }
   finally { database.close(); }
-  let before = tree(f.root);
+  let before = f.snapshot();
   unavailable(f.cli(['telemetry', 'on']), 'unrecognized-store');
-  assert.deepEqual(tree(f.root), before);
+  assert.deepEqual(f.snapshot(), before);
   writeFileSync(f.preferencePath, '{"preference":"disabled","keep":"unrecognized"}');
-  before = tree(f.root);
+  before = f.snapshot();
   unavailable(f.cli(['telemetry', 'off']), 'unrecognized-store');
   unavailable(f.cli(['telemetry', 'status']), 'preference-read-failed');
   for (const [variable, value] of [['MISSIONSPEC_TELEMETRY', '0'], ['DO_NOT_TRACK', '1'], ['CI', 'true'],
@@ -264,11 +316,11 @@ test('Windows native CLI preserves foreign databases and hard-linked bytes; hard
     delete f.env[variable];
   }
   assert.equal(f.cli(['telemetry', 'status', '--no-telemetry']).value.value.preference, 'not-read');
-  assert.deepEqual(tree(f.root), before);
+  assert.deepEqual(f.snapshot(), before);
   linkSync(f.preferencePath, path.join(f.root, 'linked.sqlite'));
-  before = tree(f.root);
+  before = f.snapshot();
   unavailable(f.cli(['telemetry', 'on']), 'io');
-  assert.deepEqual(tree(f.root), before);
+  assert.deepEqual(f.snapshot(), before);
 });
 
 async function diagnosticFixture(f) {
@@ -297,7 +349,7 @@ function cliConsole(response) {
 test('Windows native CLI diagnostic preview and rejected non-TTY pruning preserve every file and mtime', windows, async (t) => {
   const f = fixture(t);
   const { file } = await diagnosticFixture(f);
-  const before = tree(f.root);
+  const before = f.snapshot();
   const preview = f.cli(['logs', 'prune', '--preview']);
   assert.equal(preview.code, 0);
   assert.equal(preview.value.value.path, file);
@@ -309,23 +361,23 @@ test('Windows native CLI diagnostic preview and rejected non-TTY pruning preserv
   assert.equal(unapproved.value.error.code, 'authority-required');
   unavailable(f.cli(['logs', 'prune', '--approval', 'APR-client-claim']), 'authorization-rejected');
   assert.notEqual(f.cli(['logs', 'prune', '--approved']).code, 0);
-  assert.deepEqual(tree(f.root), before);
+  assert.deepEqual(f.snapshot(), before);
   writeFileSync(file, '{"rawEvidence":"never-prune"}\n');
-  const noncanonical = tree(f.root);
+  const noncanonical = f.snapshot();
   unavailable(f.cli(['logs', 'prune', '--preview']), 'io');
   unavailable(f.cli(['logs', 'prune']), 'io');
-  assert.deepEqual(tree(f.root), noncanonical);
+  assert.deepEqual(f.snapshot(), noncanonical);
 });
 
 test('Windows native CLI ConPTY pruning binds the exact terminal review and accepts only its current persisted reference', windows, async (t) => {
   const f = fixture(t);
   const { runtime, file, sink, line } = await diagnosticFixture(f);
-  const before = tree(f.root);
+  const before = f.snapshot();
   const declined = f.conpty([cli, 'logs', 'prune', '--json'], ['decline']);
   assert.equal(declined.challenges, 1);
   assert.notEqual(declined.code, 0);
   assert.equal(cliConsole(declined).error.code, 'authority-required');
-  assert.deepEqual(tree(f.root), before);
+  assert.deepEqual(f.snapshot(), before);
   const preview = f.cli(['logs', 'prune', '--preview']).value.value;
   const accepted = f.conpty([cli, 'logs', 'prune', '--json'], ['accept']);
   assert.equal(accepted.code, 0, conptyDiagnostic(accepted));
@@ -345,9 +397,9 @@ test('Windows native CLI ConPTY pruning binds the exact terminal review and acce
     expected: digestContent(line), proposed: digestContent(''),
   }]);
   await sink.write(line);
-  const changed = tree(f.root);
+  const changed = f.snapshot();
   unavailable(f.cli(['logs', 'prune', '--approval', receipt.approval.reference.id]), 'authorization-rejected');
-  assert.deepEqual(tree(f.root), changed);
+  assert.deepEqual(f.snapshot(), changed);
   const current = f.cli(['logs', 'prune', '--preview']).value.value;
   const request = {
     ...receipt.approval.request,
@@ -376,8 +428,11 @@ test('Windows native CLI ConPTY pruning binds the exact terminal review and acce
   assert.deepEqual(persisted.value.value, { state: 'pruned' });
   assert.equal(readFileSync(file).length, 0);
   for (const name of ['workspace.json', 'ledger.sqlite', 'evidence.jsonl', 'grants.json']) {
-    assert.deepEqual(tree(path.join(runtime, name)), before.entries['.missionspec'].entries[name]);
+    assert.deepEqual(tree(path.join(runtime, name)), before.entries.project.entries['.missionspec'].entries[name]);
   }
   assert.deepEqual(readdirSync(f.root), ['.missionspec']);
   assert.deepEqual(readdirSync(path.dirname(file)), ['diagnostics.jsonl']);
+  const after = f.snapshot();
+  assert.deepEqual(Object.keys(after.entries), Object.keys(before.entries));
+  for (const name of ['user', 'os-profile']) assert.deepEqual(after.entries[name], before.entries[name]);
 });

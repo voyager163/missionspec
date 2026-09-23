@@ -294,7 +294,14 @@ on Windows. Its actual CLI subprocesses isolate all user/configuration paths
 under private OS-profile UUID fixtures and guard HTTP/HTTPS/fetch against any
 network attempt. Coverage includes SQLite reopen/on/off, disclosure preservation,
 path precedence, unchanged inspection mtimes, hard opt-outs, foreign-database
-preservation and unsafe path/ACL refusal. POSIX tests or a non-Windows skip do
+preservation and unsafe path/ACL refusal. The no-write guarantee concerns
+MissionSpec preferences, notices, logs and project/foreign user state, not all
+OS-runtime activity: Windows PowerShell's `-NoProfile` does not disable its
+startup cache. Native fixtures keep a separate warmed disposable OS profile,
+track every entry, and permit content/mtime updates only to its exact bounded
+`StartupProfileData-NonInteractive` cache; see [logging.md](logging.md).
+They do not repair existing ACLs or write MissionSpec state into the real user
+profile. POSIX tests or a non-Windows skip do
 not qualify this Windows CLI glue; a passing native run is required.
 
 Existing JSON—valid or malformed—and unrelated SQLite databases are rejected

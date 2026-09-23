@@ -276,6 +276,14 @@ OS-reported user profile, and reuses the existing ConPTY driver for genuine
 OS-console challenges, declined reviews, exact persisted references and
 diagnostic-only pruning. It also asserts no-write previews, non-TTY refusal,
 unchanged retained ledger/evidence/grant fixtures, and no network attempt.
+The fixture separates the project and MissionSpec preference destinations from
+a disposable OS profile, precreates its standard application-data containers,
+and warms the real native helper before inspection snapshots. Windows PowerShell
+can update `AppData/Local/Microsoft/Windows/PowerShell/StartupProfileData-NonInteractive`
+even with `-NoProfile`. Only that exact 64-byte runtime cache's content and mtime
+may vary; its identity, mode, type and link count, every other profile entry,
+and all project/preference/foreign-file bytes and mtimes remain checked.
+This is not telemetry or permission to ignore arbitrary profile writes.
 Synthetic ConPTY does not attest human presence. A non-Windows skip or syntax
 check is not native qualification; this CLI glue requires a passing Windows
 run before its release qualification is claimed.
