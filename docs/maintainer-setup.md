@@ -40,7 +40,7 @@ read back these hosted controls:
 
 The effective branch-rules API confirms both branches inherit these rules.
 The implementation has been committed and published through a pull request.
-After observing successful hosted runs, twenty required check contexts were bound
+After observing successful hosted runs, twenty-one required check contexts were bound
 to their actual GitHub Apps, with strict up-to-date-branch enforcement:
 
 | Required context | GitHub App ID |
@@ -61,6 +61,7 @@ to their actual GitHub Apps, with strict up-to-date-branch enforcement:
 | Windows execution (console-authority) | 15368 (`github-actions`) |
 | Windows execution (registered-checks-success) | 15368 (`github-actions`) |
 | Windows execution (registered-checks-timeout) | 15368 (`github-actions`) |
+| Windows CLI observability qualification | 15368 (`github-actions`) |
 | Dependency review | 15368 (`github-actions`) |
 | CodeQL (javascript-typescript) | 15368 (`github-actions`) |
 | CodeQL (actions) | 15368 (`github-actions`) |
@@ -116,6 +117,13 @@ successful reports and App IDs. Effective readback confirms twenty strict
 contexts on both protected branches. Console transport is not human-presence
 attestation, trusted checks are not a sandbox, and native AI-host execution
 remains separately unqualified.
+
+The seven Windows CLI observability cases passed at `4ab78c2` in
+[run 35860157060](https://github.com/voyager163/missionspec/actions/runs/35860157060).
+That observed context was then added with its actual App ID. Effective readback
+confirms twenty-one strict contexts on both protected branches. This adds
+private preference controls and reviewed diagnostic pruning, not an activated
+production telemetry endpoint.
 
 ## 1. Validate locally
 

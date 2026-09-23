@@ -288,7 +288,7 @@ with private SID ACLs, with private parent and single-link checks before SQLite
 access. No platform falls back to a JSON mirror or another user's settings.
 
 `tests/windows-cli-observability.test.mjs` is the separate native CLI
-qualification candidate. Run
+qualification suite. Run
 `npm run build && node --test --test-concurrency=1 tests/windows-cli-observability.test.mjs`
 on Windows. Its actual CLI subprocesses isolate all user/configuration paths
 under private OS-profile UUID fixtures and guard HTTP/HTTPS/fetch against any
@@ -301,8 +301,11 @@ startup cache. Native fixtures keep a separate warmed disposable OS profile,
 track every entry, and permit content/mtime updates only to its exact bounded
 `StartupProfileData-NonInteractive` cache; see [logging.md](logging.md).
 They do not repair existing ACLs or write MissionSpec state into the real user
-profile. POSIX tests or a non-Windows skip do
-not qualify this Windows CLI glue; a passing native run is required.
+profile. All seven native cases passed at `4ab78c2` in
+[run 35860157060](https://github.com/voyager163/missionspec/actions/runs/35860157060),
+including genuine ConPTY and persisted-reference log pruning. This qualifies
+the controls, not production telemetry delivery; POSIX tests or a non-Windows
+skip cannot substitute for native evidence.
 
 Existing JSON—valid or malformed—and unrelated SQLite databases are rejected
 **without conversion, replacement, or clearing**. Unrelated general settings

@@ -269,7 +269,7 @@ typed stderr diagnostics and real controlled pseudo-terminal confirmation,
 persisted-reference validation and diagnostic-only pruning. These tests do not
 substitute for the main entry point's routing tests.
 
-The Windows CLI candidate has a separate native suite:
+The Windows CLI controls have a separate native suite:
 `npm run build && node --test --test-concurrency=1 tests/windows-cli-observability.test.mjs`.
 It runs the actual CLI child process, uses private UUID fixtures beneath the
 OS-reported user profile, and reuses the existing ConPTY driver for genuine
@@ -287,6 +287,8 @@ The observed console-runtime `AppData/Local/Microsoft/Windows/Caches` directory
 is also securely precreated in the disposable profile. It is **not** excluded:
 it must remain empty, with unchanged type, identity, mode and modification time.
 This is not telemetry or permission to ignore arbitrary profile writes.
-Synthetic ConPTY does not attest human presence. A non-Windows skip or syntax
-check is not native qualification; this CLI glue requires a passing Windows
-run before its release qualification is claimed.
+All seven native cases passed at `4ab78c2` in
+[run 35860157060](https://github.com/voyager163/missionspec/actions/runs/35860157060).
+The observed `Windows CLI observability qualification` context is now required
+on both protected branches. Synthetic ConPTY does not attest human presence;
+a non-Windows skip or syntax check is not a substitute for this native evidence.
