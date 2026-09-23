@@ -9,11 +9,12 @@ import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual, types } from 'node:util';
 import { PHASES, buildPhase, deploymentName, validateConfig, ids, digest, json, fail, sameId, storageContract, firstReleaseCost, assertOwned, RECEIVER_COMMAND,
   closed, budgetConfiguration, projectBudgetFilter, verifyFoundationBudgets, reconciliationBinding, assignmentRoleTargets,
-  TOGGLE_PHASES, SYNTHETIC_LIMITS, SYNTHETIC_FIXTURES, requireAccess } from './definition.mjs';
+  TOGGLE_PHASES, SYNTHETIC_LIMITS, SYNTHETIC_FIXTURES, requireAccess, validateWindowInstance } from './definition.mjs';
 import { assertBudget, verifyWhatIf, verifyResource, verifyApproval, verifyFreshReview, sourceContractsSummary, permitFirstPush,
   executionIdentity, verifyExecutionOrigins, verifyReconciliation, verifyDeploymentIdentity, roleDefinitionSignature, verifyPublicationReadback,
   resourceContext, admissionFlag, descriptorWithFlag, canonicalAppWrite, syntheticTransitionHash, verifySyntheticWindow,
-  verifyWindowApproval, verifyWindowState, canonicalInstant, verifySyntheticRows } from './policy.mjs';
+  verifyWindowApproval, verifyWindowState, canonicalInstant, verifySyntheticRows,
+  verifyWindowPredecessor, verifyWindowInstancePredecessor, predecessorInstanceIds } from './policy.mjs';
 
 const execute = promisify(execFile), here = dirname(fileURLToPath(import.meta.url));
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -258,8 +259,9 @@ async function azureCliPython() {
 }
 export function whatIfRequestContext(c, phase) {
   const r = ids(c), scope = ['project-budget', 'upload-role'].includes(phase.phase) ? 'subscription' : 'group';
+  if (TOGGLE_PHASES.includes(phase.phase)) validateWindowInstance(c, phase.windowInstance);
   if (phase.scope !== (scope === 'subscription' ? r.sub : r.group) ||
-      phase.deploymentId !== `${phase.scope}/providers/Microsoft.Resources/deployments/${deploymentName(c, phase.phase)}`) fail('FIXED_WHAT_IF_PHASE_REQUIRED');
+      phase.deploymentId !== `${phase.scope}/providers/Microsoft.Resources/deployments/${deploymentName(c, phase.phase, phase.windowInstance)}`) fail('FIXED_WHAT_IF_PHASE_REQUIRED');
   const inspect = value => {
     if (typeof value === 'string' && /^\s*\[/u.test(value)) fail('STATIC_WHAT_IF_TEMPLATE_REQUIRED');
     if (Array.isArray(value)) value.forEach(inspect);
@@ -272,7 +274,8 @@ export function whatIfRequestContext(c, phase) {
   const body = JSON.stringify({ ...(scope === 'subscription' ? { location: c.location } : {}), properties: {
     mode: 'Incremental', parameters: {}, template: phase.template, whatIfSettings: { resultFormat: 'FullResourcePayloads' } } });
   const fields = { subscriptionId: c.subscriptionId, tenantId: c.tenantId, location: c.location,
-    namePrefix: c.namePrefix, runId: c.runId, phase: phase.phase, scope, phaseSha256: digest(json(phase)), bodySha256: digest(body) };
+    namePrefix: c.namePrefix, runId: c.runId, phase: phase.phase, scope, phaseSha256: digest(json(phase)), bodySha256: digest(body),
+    windowInstanceId: phase.windowInstance?.id ?? null, predecessorSha256: phase.windowInstance?.predecessorSha256 ?? null };
   return { ...fields, contextSha256: digest(Object.values(fields).join('\n')), body };
 }
 export async function authenticatedWhatIfRequest(context, directory, operation, run = execute, locate = azureCliPython) {
@@ -283,7 +286,7 @@ export async function authenticatedWhatIfRequest(context, directory, operation, 
   else if (pollUrl !== null || initialResponseFile !== null) fail('WHAT_IF_START_HANDLE_FORBIDDEN');
   const id = randomUUID(), requestFile = `whatif-request-${id}.json`, responseFile = `whatif-response-${id}.json`;
   const { body, ...fields } = context;
-  await saveImmutable(directory, requestFile, { version: 1, ...fields, action, body: action === 'start' ? body : null,
+  await saveImmutable(directory, requestFile, { version: 2, ...fields, action, body: action === 'start' ? body : null,
     pollUrl, initialResponseFile, timeoutMs, deadlineMs });
   const started = performance.now();
   try {
@@ -525,7 +528,7 @@ export async function readPrivacy(c, phase, arm) {
     diagnostics[descriptor.id] = value;
   }
   let exports = null;
-  if (['core', 'workspace-access', 'data', 'assignments', 'disabled-app', 'synthetic-admission'].includes(phase.phase)) {
+  if (['core', 'workspace-access', 'data', 'assignments', 'disabled-app', ...TOGGLE_PHASES].includes(phase.phase)) {
     exports = await arm('GET', ids(c).workspace + '/dataExports', '2020-08-01');
     if (!Array.isArray(exports?.value) || exports.nextLink || exports.value.length) fail('WORKSPACE_EXPORT_DRIFT');
   }
@@ -647,9 +650,14 @@ export async function reviewedReconciliationReceipts(c, foundation, evidence, so
 export async function verifyFreshReconciliation(c, directory, evidence, invoke = az, transition) {
   const arm = transport(c, evidence.origins.records[0].phase, directory, invoke);
   const context = await reconciliationContext(c, evidence.origins, arm, invoke);
+  let currentApp;
   for (const record of evidence.origins.records) {
     const current = await readReconciledPhase(c, record, arm, { ...context, publication: evidence.origins.imagePublication?.receipt, transition });
     if (!isDeepStrictEqual(current.identityPins, evidence.proposal.results[record.phase.phase].identityPins)) fail('RESOURCE_IDENTITY_CHANGED');
+    if (record.phase.phase === 'disabled-app') currentApp = {
+      app: current.resources[ids(c).app], identities: context.identities,
+      privacy: { diagnostics: current.diagnostics, exports: current.exports },
+    };
   }
   assertBudget(await arm('GET', ids(c).stateBudget, '2024-08-01'), c, 50);
   if (await arm('GET', ids(c).managedGroup, '2024-03-01')) fail('RECONCILIATION_INVENTORY_CHANGED');
@@ -658,6 +666,58 @@ export async function verifyFreshReconciliation(c, directory, evidence, invoke =
     const current = inventory.value.filter(v => sameId(v.id, previous.id));
     return current.length !== 1 || current[0].createdTime !== previous.createdTime;
   })) fail('RESOURCE_CREATION_IDENTITY_CHANGED');
+  return currentApp;
+}
+export async function verifyPublishedWindowPredecessor(c, predecessor, lookup = publishedSourceDigest) {
+  const summary = verifyWindowPredecessor(c, predecessor);
+  if (await lookup(predecessor.publication.commitSha) !== predecessor.publication.sourceSha256) fail('PREDECESSOR_PUBLISHED_SOURCE_MISMATCH');
+  const context = resourceContext(c, predecessor.prerequisiteReceipts);
+  for (const name of TOGGLE_PHASES) {
+    const receipt = predecessor.receipts[name];
+    if (!latestRevisionReady(c, predecessor.phases[name], predecessor.window,
+      { app: receipt.resources[ids(c).app], revisions: receipt.revisionReadback, context })) fail('PREDECESSOR_ROLLOUT_NOT_QUALIFIED');
+  }
+  if (!latestRevisionReady(c, predecessor.phases['synthetic-disable'], predecessor.window,
+    { app: predecessor.readback.app, revisions: predecessor.readback.revisions,
+      context: { ...context, identities: predecessor.readback.identities } })) fail('PREDECESSOR_CURRENT_DISABLED_NOT_READY');
+  return summary;
+}
+export async function readWindowPredecessor(c, predecessor, directory, invoke = az, transition, verifiedApp) {
+  const arm = transport(c, predecessor.phases['synthetic-disable'], directory, invoke), r = ids(c);
+  const deployments = {};
+  for (const name of TOGGLE_PHASES) {
+    deployments[name] = await arm('GET', predecessor.phases[name].deploymentId, '2022-09-01');
+    verifyDeploymentIdentity(predecessor.receipts[name].deployment, deployments[name]);
+  }
+  const identities = verifiedApp?.identities ?? { [r.ingestIdentity]: await arm('GET', r.ingestIdentity, '2023-01-31'),
+    [r.pullIdentity]: await arm('GET', r.pullIdentity, '2023-01-31') };
+  const app = verifiedApp?.app ?? await arm('GET', r.app, '2025-07-01');
+  const context = { ...resourceContext(c, predecessor.prerequisiteReceipts), identities };
+  if (transition?.journals['synthetic-admission']) {
+    verifyWindowState(c, transition.phases, transition.window, transition.approvals, transition.journals, app, context, transition.source);
+  } else {
+    verifyResource(c, predecessor.phases['synthetic-disable'], predecessor.phases['synthetic-disable'].resources[0], app, context);
+    if (app.properties.latestRevisionName !== predecessor.receipts['synthetic-disable'].resources[r.app].properties.latestRevisionName) fail('UNREVIEWED_PREDECESSOR_REVISION');
+  }
+  if (!isDeepStrictEqual(executionIdentity(app, 'Microsoft.App/containerApps'), predecessor.window.appIdentity)) fail('PREDECESSOR_CURRENT_IDENTITY_CHANGED');
+  const revisions = await arm('GET', `${r.app}/revisions`, '2025-07-01');
+  if (!transition?.journals['synthetic-admission'] && !latestRevisionReady(c, predecessor.phases['synthetic-disable'], predecessor.window,
+    { app, revisions, context })) fail('PREDECESSOR_CURRENT_DISABLED_NOT_READY');
+  const privacy = verifiedApp?.privacy ?? await readPrivacy(c, predecessor.phases['synthetic-disable'], arm);
+  return { checkedAt: new Date().toISOString(), sourceSha256: await sourceDigest(), deployments, app, identities, revisions, privacy };
+}
+async function checkWindowLineage(c, phase, predecessor, directory, invoke, lookup, transition, verifiedApp) {
+  const instance = validateWindowInstance(c, phase.windowInstance);
+  verifyWindowInstancePredecessor(c, instance, predecessor);
+  await verifyPublishedWindowPredecessor(c, predecessor, lookup);
+  const fresh = await readWindowPredecessor(c, predecessor, directory, invoke, transition, verifiedApp);
+  const arm = transport(c, phase, directory, invoke);
+  for (const name of TOGGLE_PHASES) {
+    const id = `${ids(c).group}/providers/Microsoft.Resources/deployments/${deploymentName(c, name, instance)}`;
+    const existing = await arm('GET', id, '2022-09-01');
+    if (existing && !transition?.journals[name]) fail('WINDOW_INSTANCE_DEPLOYMENT_ALREADY_EXISTS');
+  }
+  await save(directory, `${phase.phase}-predecessor-readback.json`, fresh);
 }
 export function verifyProjectBudgetReceipt(c, receipt, foundation, sourceSha256, reconciled = {}) {
   const phase = buildPhase(c, 'project-budget', null, {}, foundation), r = ids(c);
@@ -674,7 +734,7 @@ export async function validateReadOnly(c, phase, receipts, directory, invoke = a
   const deadline = Math.min(options.deadline ?? invokeDeadlines.get(invoke) ?? maximumDeadline, maximumDeadline);
   invoke = boundedInvoke(deadline, invoke);
   const r = ids(c), known = Object.values(receipts).flatMap(v => Object.keys(v.resources ?? {}));
-  const executionName = deploymentName(c, phase.phase);
+  const executionName = deploymentName(c, phase.phase, phase.windowInstance);
   if (phase.deploymentId !== `${phase.scope}/providers/Microsoft.Resources/deployments/${executionName}`) fail('DEPLOYMENT_NAME_INVALID');
   const name = `${phase.phase}-template.json`; await save(directory, name, phase.template);
   const level = phase.scope === r.sub ? 'sub' : 'group';
@@ -718,7 +778,9 @@ export async function checkReadOnly(c, phase, origin, receipts, directory, evide
   const account = await invoke(['account', 'show', '--subscription', c.subscriptionId, '--only-show-errors', '--output', 'json']);
   if (account?.id !== c.subscriptionId || account?.tenantId !== c.tenantId || account?.state !== 'Enabled' || account?.environmentName !== 'AzureCloud') fail('EXPLICIT_ACCOUNT_MISMATCH');
   await verifyOrigin(origin, arm, c, evidenceFiles.scannerAdoption);
-  if (evidenceFiles.reconciliation?.origins) await verifyFreshReconciliation(c, directory, evidenceFiles.reconciliation, invoke, transition);
+  const verifiedApp = evidenceFiles.reconciliation?.origins
+    ? await verifyFreshReconciliation(c, directory, evidenceFiles.reconciliation, invoke, transition) : undefined;
+  if (TOGGLE_PHASES.includes(phase.phase)) await checkWindowLineage(c, phase, evidenceFiles.windowPredecessor, directory, invoke, lookup, transition, verifiedApp);
   if (phase.phase !== 'project-budget') {
     verifyProjectBudgetReceipt(c, receipts['project-budget'], foundation, source, reconciled);
   }
@@ -912,29 +974,64 @@ export async function syntheticHttp(host, method, path, event, beforeDispatch, d
   if (body && body.length > 1024) fail('SYNTHETIC_BODY_BOUND');
   const started = performance.now();
   return new Promise(resolve => {
-    let timer, done = false, size = 0, tlsVerified = false;
+    let timer, request, responseStream, done = false, size = 0, tlsVerified = false, headersObserved = false, monotonicDeadline;
+    const timings = { dnsCompleteMs: null, tcpConnectMs: null, tlsVerifiedMs: null, requestFinishMs: null,
+      firstByteMs: null, responseEndMs: null, timeoutMs: null };
+    const stamp = key => {
+      if (!done && timings[key] === null) timings[key] = Math.max(0, performance.now() - started);
+    };
+    const phase = () => timings.responseEndMs !== null ? 'response-end' : headersObserved ? 'response-body' : timings.firstByteMs !== null ? 'response-headers' :
+      timings.requestFinishMs !== null ? 'waiting-for-response' : timings.tlsVerifiedMs !== null ? 'request-write' :
+      timings.tcpConnectMs !== null ? 'tls-handshake' : timings.dnsCompleteMs !== null ? 'tcp-connect' : 'socket-or-dns';
     const finish = result => {
-      if (done) return; done = true; clearTimeout(timer);
-      resolve({ ...result, bodyBytes: size, tlsVerified, durationMs: performance.now() - started });
+      if (done) return;
+      const observedAt = performance.now(), elapsed = observedAt - started;
+      const late = observedAt >= monotonicDeadline || Date.now() >= deadline;
+      if (late || result.errorCode === 'TOTAL_TIMEOUT_1000MS') {
+        if (timings.timeoutMs === null) timings.timeoutMs = Math.max(0, elapsed);
+        result = { ...result, errorCode: 'TOTAL_TIMEOUT_1000MS', failureCategory: 'deadline', failurePhase: phase() };
+      }
+      done = true; clearTimeout(timer);
+      resolve({ ...result, bodyBytes: size, tlsVerified, durationMs: elapsed, timingsMs: { ...timings } });
+      if (result.errorCode) { responseStream?.destroy(); request?.destroy(); }
     };
     if (beforeDispatch() !== undefined) fail('SYNTHETIC_DISPATCH_GUARD_REQUIRED');
-    const remaining = Math.min(SYNTHETIC_LIMITS.httpTimeoutMs, deadline - Date.now());
+    monotonicDeadline = started + SYNTHETIC_LIMITS.httpTimeoutMs;
+    const remaining = Math.min(monotonicDeadline - performance.now(), deadline - Date.now());
     if (remaining <= 0) fail('SYNTHETIC_REQUEST_DEADLINE');
-    const request = https.request({ protocol: 'https:', hostname: host, servername: host, port: 443, method, path,
-      agent: false, rejectUnauthorized: true, maxHeaderSize: 8192,
-      headers: { Connection: 'close', ...(body ? { 'Content-Type': 'application/json', 'Content-Length': String(body.length) } : {}) } }, response => {
-      const safeHeaders = Object.fromEntries(['cache-control', 'content-length', 'content-type', 'connection']
-        .filter(k => response.headers[k] !== undefined).map(k => [k, response.headers[k]]));
-      response.on('data', chunk => {
-        size += chunk.length;
-        if (size > 1024) { finish({ status: response.statusCode, safeHeaders, errorCode: 'BODY_LIMIT' }); response.destroy(); request.destroy(); }
+    const requestError = error => {
+      const tlsErrors = ['DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+        'UNABLE_TO_GET_ISSUER_CERT', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'CERT_HAS_EXPIRED', 'CERT_NOT_YET_VALID',
+        'ERR_TLS_CERT_ALTNAME_INVALID', 'ERR_TLS_CERT_SIGNATURE_ALGORITHM_UNSUPPORTED'];
+      const category = tlsErrors.includes(error?.code) ? 'tls-validation' : ['ENOTFOUND', 'EAI_AGAIN'].includes(error?.code) ? 'dns' : 'transport';
+      finish({ status: null, errorCode: 'HTTPS_REQUEST_FAILED', failureCategory: category, failurePhase: phase() });
+    };
+    try {
+      request = https.request({ protocol: 'https:', hostname: host, servername: host, port: 443, method, path,
+        agent: false, rejectUnauthorized: true, maxHeaderSize: 8192,
+        headers: { Connection: 'close', ...(body ? { 'Content-Type': 'application/json', 'Content-Length': String(body.length) } : {}) } }, response => {
+        if (done) { response.destroy(); return; }
+        responseStream = response; stamp('firstByteMs'); headersObserved = true;
+        const headerPolicy = { noStore: response.headers['cache-control'] === 'no-store',
+          zeroContentLength: response.headers['content-length'] === '0', connectionClose: response.headers.connection === 'close' };
+        response.on('data', chunk => {
+          if (done) return;
+          size += chunk.length;
+          if (size > 1024) finish({ status: response.statusCode, headerPolicy, errorCode: 'BODY_LIMIT', failureCategory: 'body-limit', failurePhase: phase() });
+        });
+        response.once('end', () => { stamp('responseEndMs'); finish({ status: response.statusCode, headerPolicy, errorCode: null, failureCategory: null, failurePhase: null }); });
+        response.once('error', () => finish({ status: response.statusCode, headerPolicy, errorCode: 'RESPONSE_ERROR', failureCategory: 'response-stream', failurePhase: phase() }));
       });
-      response.once('end', () => finish({ status: response.statusCode, safeHeaders, errorCode: null }));
-      response.once('error', () => finish({ status: response.statusCode, safeHeaders, errorCode: 'RESPONSE_ERROR' }));
+    } catch (error) { requestError(error); return; }
+    request.once('socket', socket => {
+      socket.once('lookup', error => { if (!error) stamp('dnsCompleteMs'); });
+      socket.once('connect', () => stamp('tcpConnectMs'));
+      socket.once('secureConnect', () => { if (!done && socket.authorized === true) { tlsVerified = true; stamp('tlsVerifiedMs'); } });
+      socket.once('data', () => stamp('firstByteMs'));
     });
-    request.once('socket', socket => socket.once('secureConnect', () => { tlsVerified = socket.authorized === true; }));
-    request.once('error', () => finish({ status: null, errorCode: 'HTTPS_REQUEST_FAILED' }));
-    timer = setTimeout(() => { finish({ status: null, errorCode: 'TOTAL_TIMEOUT_1000MS' }); request.destroy(); }, remaining);
+    request.once('finish', () => stamp('requestFinishMs'));
+    request.once('error', requestError);
+    timer = setTimeout(() => { stamp('timeoutMs'); finish({ status: null, errorCode: 'TOTAL_TIMEOUT_1000MS' }); }, remaining);
     request.end(body);
   });
 }
@@ -958,6 +1055,8 @@ export class SyntheticDeadlines {
     if (journal.phase !== 'synthetic-admission' || journal.windowSha256 !== digest(json(this.window)) ||
         journal.phaseSha256 !== this.window.phases['synthetic-admission'].phaseSha256 ||
         journal.approvalSha256 !== digest(json(this.approvals['synthetic-admission'])) ||
+        journal.windowInstanceId !== this.window.windowInstance.id ||
+        journal.predecessorSha256 !== this.window.windowInstance.predecessorSha256 ||
         (this.enabledAt !== null && this.enabledAt !== enabledAt)) fail('WINDOW_INTENT_BINDING_CHANGED');
     if (this.enabledAt === null) {
       this.enabledAt = enabledAt;
@@ -1058,7 +1157,7 @@ export class SyntheticWindowDriver {
       const expected = method === 'POST' && disabled ? 503 : 204;
       return response.status === expected && response.bodyBytes === 0 && response.tlsVerified === true &&
         response.errorCode === null && response.durationMs <= SYNTHETIC_LIMITS.httpTimeoutMs &&
-        response.safeHeaders?.['cache-control'] === 'no-store';
+        response.headerPolicy?.noStore === true;
     };
     const health = async (attempts, disabled = false) => {
       for (const path of ['/health/live', '/health/ready']) {
@@ -1232,6 +1331,7 @@ export class SyntheticToggleController {
     if (!noWrite && await this.io.deployment(name, remainingDeadline())) fail('DEPLOYMENT_NAME_EXISTS');
     if (!noWrite) guard();
     const journal = { phase: name, phaseSha256: digest(json(phase)), windowSha256: digest(json(this.window)),
+      windowInstanceId: this.window.windowInstance.id, predecessorSha256: this.window.windowInstance.predecessorSha256,
       approvalSha256: digest(json(approval)), intentAt: new Date(this.io.now()).toISOString(),
       outcome: noWrite ? 'read-only-observation' : 'submission-possible', transportDispatchAttempted: noWrite ? false : null };
     if (name === 'synthetic-admission') this.deadlines.bind(journal);
@@ -1279,6 +1379,7 @@ export class SyntheticToggleController {
       const receipt = { qualified: true, qualificationKind: noWrite ? 'read-only-terminal-disable' : 'ready-toggle-deployment',
         phase: name, configSha256: digest(json(c)), phaseSha256: digest(json(phase)), sourceSha256: source,
         windowSha256: digest(json(this.window)), approvalSha256: digest(json(approval)), deployment,
+        windowInstanceId: this.window.windowInstance.id, predecessorSha256: this.window.windowInstance.predecessorSha256,
         resources: { [ids(c).app]: ready.app }, revisionReadback: ready.revisions, noCloudWrite: noWrite,
         operationDeadline: remainingDeadline(), preparationDeadline: operationDeadline, rolloutDeadline, deadlines: this.deadlines.snapshot(), lateRecovery,
         withinEnabledWindow: !lateRecovery,
@@ -1298,6 +1399,8 @@ export class SyntheticToggleController {
   }
 }
 export function buildSyntheticWindow(c, phases, receipts, origin, source, whatifs) {
+  const instance = validateWindowInstance(c, phases['synthetic-admission']?.windowInstance);
+  if (!isDeepStrictEqual(phases['synthetic-disable']?.windowInstance, instance)) fail('PAIRED_WINDOW_INSTANCE_MISMATCH');
   const anchorApp = receipts['disabled-app']?.resources?.[ids(c).app];
   if (!anchorApp || admissionFlag(anchorApp) !== 'false') fail('QUALIFIED_DISABLED_ANCHOR_REQUIRED');
   const context = { config: c, ...resourceContext(c, receipts), app: anchorApp };
@@ -1309,10 +1412,24 @@ export function buildSyntheticWindow(c, phases, receipts, origin, source, whatif
     entries[name] = { phaseSha256: digest(json(phase)), transitionSha256: syntheticTransitionHash(phase),
       reviewedWhatIfSha256: digest(json(whatif)), reviewedWhatIf: whatif };
   }
-  return { version: 1, kind: 'bounded-two-event-window', configSha256: digest(json(c)), sourceSha256: source,
+  return { version: 2, kind: 'bounded-two-event-window', windowInstance: structuredClone(instance),
+    configSha256: digest(json(c)), sourceSha256: source,
     originSha256: digest(json(origin)), receiptsSha256: digest(json(receipts)), baselineSha256: origin.policyBaselineSha256,
     appIdentity: executionIdentity(anchorApp, 'Microsoft.App/containerApps'), anchorApp,
     phases: entries, limits: SYNTHETIC_LIMITS, fixtures: SYNTHETIC_FIXTURES };
+}
+export async function reserveWindowInstance(c, directory, window) {
+  const instance = validateWindowInstance(c, window.windowInstance);
+  try {
+    await saveImmutable(directory, `window-instance-${instance.id}.json`, {
+      version: 1, instanceId: instance.id, windowSha256: digest(json(window)),
+      predecessorSha256: instance.predecessorSha256, sourceSha256: window.sourceSha256,
+      reservedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    if (error.code === 'EEXIST') fail('WINDOW_INSTANCE_REPLAY_FORBIDDEN');
+    throw error;
+  }
 }
 function boundedInvoke(deadline, invoke = az, now = Date.now) {
   const call = (args, timeout = 60000) => {
@@ -1372,6 +1489,7 @@ export function syntheticWindowIO(c, phases, window, approvals, receipts, rawRec
     loadJournal: name => load(directory, `${name}-journal.json`, true),
     saveJournal: (name, value) => save(directory, `${name}-journal.json`, value),
     saveReceipt: async (name, value) => {
+      if (Object.hasOwn(rawReceipts, name)) fail('PRESERVE_PRIOR_TOGGLE_RECEIPT');
       await saveImmutable(directory, `${name}-receipt.json`, value);
       rawReceipts[name] = value; await save(directory, 'receipts.json', rawReceipts);
     },
@@ -1402,6 +1520,8 @@ async function main() {
   const origin = await load(directory, 'origin.json'), rawReceipts = await load(directory, 'receipts.json');
   const evidenceFiles = { scannerAdoption: await load(directory, 'scanner-adoption.json'),
     foundationBudgets: await load(directory, 'foundation-budgets.json'),
+    windowInstance: await load(directory, 'window-instance.json', true),
+    windowPredecessor: await load(directory, 'window-predecessor.json', true),
     reconciliation: { origins: await load(directory, 'execution-origins-v3.json', true),
       proposal: await load(directory, 'reconciliation-proposal.json', true),
       review: await load(directory, 'reconciliation-review.json', true) } };
@@ -1441,9 +1561,18 @@ async function main() {
   if (['prepare-window', 'run-window', 'execute-disable'].includes(operation)) {
     if ((operation === 'execute-disable' ? phaseName !== 'synthetic-disable' : phaseName !== 'synthetic-admission')) fail('FIXED_WINDOW_COMMAND_REQUIRED');
     if (operation === 'prepare-window') {
+      if (!evidenceFiles.windowPredecessor) fail('TERMINAL_WINDOW_PREDECESSOR_REQUIRED');
+      await verifyPublishedWindowPredecessor(c, evidenceFiles.windowPredecessor);
+      if (!evidenceFiles.windowInstance) {
+        evidenceFiles.windowInstance = { version: 1, id: randomUUID(), predecessorSha256: digest(json(evidenceFiles.windowPredecessor)),
+          previousInstanceIds: predecessorInstanceIds(evidenceFiles.windowPredecessor) };
+        await saveImmutable(directory, 'window-instance.json', evidenceFiles.windowInstance);
+      }
+      verifyWindowInstancePredecessor(c, evidenceFiles.windowInstance, evidenceFiles.windowPredecessor);
+      if (TOGGLE_PHASES.some(name => Object.hasOwn(rawReceipts, name))) fail('NEW_WINDOW_LEDGER_REQUIRED_PRIOR_HISTORY_PRESERVED');
       for (const name of TOGGLE_PHASES) if (await load(directory, `${name}-journal.json`, true) || await load(directory, `${name}-approval.json`, true)) fail('PRESERVE_WINDOW_HISTORY');
       if (await load(directory, 'synthetic-window-plan.json', true)) fail('PRESERVE_WINDOW_HISTORY');
-      const phases = Object.fromEntries(TOGGLE_PHASES.map(name => [name, buildPhase(c, name, null, receipts, evidenceFiles.foundationBudgets, evidenceFiles.reconciliation)]));
+      const phases = Object.fromEntries(TOGGLE_PHASES.map(name => [name, buildPhase(c, name, null, receipts, evidenceFiles.foundationBudgets, evidenceFiles.reconciliation, evidenceFiles.windowInstance)]));
       const source = await sourceDigest(), whatifs = {};
       for (const name of TOGGLE_PHASES) {
         const phase = phases[name];
@@ -1458,11 +1587,13 @@ async function main() {
       console.log('PAIRED_WINDOW_PREPARED_READONLY_NO_AUTHORITY'); return;
     }
     const window = await load(directory, 'synthetic-window-plan.json');
+    if (window.version !== 2 || !evidenceFiles.windowPredecessor || !isDeepStrictEqual(window.windowInstance, evidenceFiles.windowInstance)) fail('NEW_WINDOW_INSTANCE_REQUIRED');
+    verifyWindowInstancePredecessor(c, window.windowInstance, evidenceFiles.windowPredecessor);
     const base = await load(directory, 'synthetic-window-prerequisite-receipts.json');
     const current = Object.fromEntries(Object.entries(receipts).filter(([name]) => !TOGGLE_PHASES.includes(name)));
     if (!isDeepStrictEqual(base, current) || digest(json(base)) !== window.receiptsSha256 ||
         digest(json(origin)) !== window.originSha256) fail('WINDOW_PREREQUISITE_DRIFT');
-    const phases = Object.fromEntries(TOGGLE_PHASES.map(name => [name, buildPhase(c, name, null, base, evidenceFiles.foundationBudgets, evidenceFiles.reconciliation)]));
+    const phases = Object.fromEntries(TOGGLE_PHASES.map(name => [name, buildPhase(c, name, null, base, evidenceFiles.foundationBudgets, evidenceFiles.reconciliation, evidenceFiles.windowInstance)]));
     const approvals = Object.fromEntries(await Promise.all(TOGGLE_PHASES.map(async name => [name, await load(directory, `${name}-approval.json`)])));
     const lockPath = resolve(here, '../../opentofu/telemetry/.operator-private/controller.lock');
     const lock = await open(lockPath, 'wx', 0o600);
@@ -1476,6 +1607,8 @@ async function main() {
         const receipt = await toggle.execute('synthetic-disable');
         console.log(receipt.lateRecovery ? 'SYNTHETIC_LATE_RECOVERY_DISABLED_NO_CLIENT_ACTIVATION' : 'SYNTHETIC_DISABLED_READY_NO_CLIENT_ACTIVATION');
       } else {
+        verifySyntheticWindow(c, phases, window, approvals, await sourceDigest(), Date.now(), true);
+        await reserveWindowInstance(c, resolve(here, '.operator-private'), window);
         const result = await new SyntheticWindowDriver(c, phases, window, approvals, toggle, io).run();
         console.log(result.outcome === 'qualified-and-disabled' ? 'SYNTHETIC_WINDOW_QUALIFIED_AND_DISABLED' :
           result.outcome === 'stopped-disabled' ? 'SYNTHETIC_WINDOW_STOPPED_DISABLED' :
@@ -1491,7 +1624,12 @@ async function main() {
     return;
   }
   if (operation === 'execute' && TOGGLE_PHASES.includes(phaseName)) fail('PAIRED_SYNTHETIC_WINDOW_REQUIRED');
-  const phase = buildPhase(c, phaseName, await storageContract(), receipts, evidenceFiles.foundationBudgets, evidenceFiles.reconciliation);
+  if (TOGGLE_PHASES.includes(phaseName)) {
+    if (!evidenceFiles.windowInstance || !evidenceFiles.windowPredecessor) fail('TERMINAL_WINDOW_PREDECESSOR_REQUIRED');
+    verifyWindowInstancePredecessor(c, evidenceFiles.windowInstance, evidenceFiles.windowPredecessor);
+  }
+  const phase = buildPhase(c, phaseName, await storageContract(), receipts, evidenceFiles.foundationBudgets, evidenceFiles.reconciliation,
+    TOGGLE_PHASES.includes(phaseName) ? evidenceFiles.windowInstance : undefined);
   if (operation === 'prepare') {
     if (await load(directory, `${phaseName}-journal.json`, true) || await load(directory, `${phaseName}-approval.json`, true)) fail('PRESERVE_PHASE_HISTORY');
     await save(directory, `${phaseName}-plan.json`, { ...phase, sourceSha256: await sourceDigest(), config: c,

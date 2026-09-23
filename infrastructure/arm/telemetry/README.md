@@ -27,7 +27,10 @@ Assignment grants additionally require fresh scoped role-definition checks
 bound to the approval and repeated after request-body preparation.
 
 `prepare-window synthetic-admission` performs read-only preparation of paired
-enable/disable transitions. Separate exact approvals are required before
+enable/disable transitions with a new cryptographic instance UUID and a closed,
+settled predecessor record. Collector IDs/tags and old deployments never change.
+The Python what-if bridge derives the same new instance names as execution.
+Separate exact version-2 approvals are required before
 `run-window synthetic-admission`; direct toggle `execute` is forbidden.
 The fixed `execute-disable synthetic-disable` recovery path never replays an
 uncertain submission. New-revision readiness and terminal disabled proof are

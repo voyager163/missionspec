@@ -48,10 +48,24 @@ export function validateConfig(c) {
       new Set(c.queryPrincipalIds).size !== c.queryPrincipalIds.length) fail('COLLECTOR_SCOPE_INVALID');
   return c;
 }
-export function deploymentName(c, phase) {
+export function validateWindowInstance(c, instance) {
+  closed(instance, ['version', 'id', 'predecessorSha256', 'previousInstanceIds']);
+  const v4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+  if (instance.version !== 1 || typeof instance.id !== 'string' || !v4.test(instance.id) || instance.id === c.runId ||
+      typeof instance.predecessorSha256 !== 'string' || !/^[0-9a-f]{64}$/u.test(instance.predecessorSha256) || !Array.isArray(instance.previousInstanceIds) ||
+      instance.previousInstanceIds.length > 64 || instance.previousInstanceIds.some(v => typeof v !== 'string' || !v4.test(v) || v === instance.id || v === c.runId) ||
+      new Set(instance.previousInstanceIds).size !== instance.previousInstanceIds.length) fail('WINDOW_INSTANCE_INVALID_OR_REUSED');
+  return instance;
+}
+export function deploymentName(c, phase, instance) {
   validateConfig(c);
   if (!Object.hasOwn(PHASE_CODES, phase)) fail('PHASE_NOT_SUPPORTED');
-  const name = `${c.namePrefix}-${c.runId.replaceAll('-', '')}-${PHASE_CODES[phase]}`;
+  if (instance !== undefined) {
+    if (!TOGGLE_PHASES.includes(phase)) fail('WINDOW_INSTANCE_TOGGLE_ONLY');
+    validateWindowInstance(c, instance);
+  }
+  const identity = instance ? 'w' + instance.id.replaceAll('-', '') : c.runId.replaceAll('-', '');
+  const name = `${c.namePrefix}-${identity}-${PHASE_CODES[phase]}`;
   if (!/^[a-z0-9-]{1,64}$/u.test(name)) fail('DEPLOYMENT_NAME_INVALID');
   return name;
 }
@@ -219,7 +233,7 @@ export function reconciliationBinding(lineage) {
   return lineage?.proposal ? { proposalSha256: digest(json(lineage.proposal)),
     reviewSha256: lineage.review ? digest(json(lineage.review)) : null } : null;
 }
-export function buildPhase(c, phase, contract, receipts = {}, foundation, sourceLineage) {
+export function buildPhase(c, phase, contract, receipts = {}, foundation, sourceLineage, windowInstance) {
   validateConfig(c); if (!PHASES.includes(phase)) fail('PHASE_NOT_SUPPORTED');
   const r = ids(c), regional = { location: c.location, tags: ownerTags(c) };
   let resources, scope = r.group;
@@ -290,7 +304,8 @@ export function buildPhase(c, phase, contract, receipts = {}, foundation, source
       apiVersion: value.apiVersion, type: value.type, expected: value };
   });
   return { version: 1, phase, configSha256: digest(json(c)), scope,
-    deploymentId: `${scope}/providers/Microsoft.Resources/deployments/${deploymentName(c, phase)}`,
+    deploymentId: `${scope}/providers/Microsoft.Resources/deployments/${deploymentName(c, phase, windowInstance)}`,
+    ...(windowInstance ? { windowInstance: structuredClone(validateWindowInstance(c, windowInstance)) } : {}),
     template: template(resources, scope === r.sub), resources: descriptors,
     ...(sourceLineage?.proposal ? { reconciliation: reconciliationBinding(sourceLineage) } : {}),
     ...(TOGGLE_PHASES.includes(phase) ? { transition: {

@@ -226,7 +226,9 @@ test('read-only validate and full what-if use the actual execution name for ever
   const config = { ...c, namePrefix: 'missionspec-0123456789', registryName: 'missionspec0123456789' };
   const f = fixtureFoundation(config), receipts = fixtureReceipts(config);
   for (const phaseName of PHASES) {
-    const p = buildPhase(config, phaseName, contract, receipts, f), calls = [];
+    const instance = ['synthetic-admission', 'synthetic-disable'].includes(phaseName)
+      ? { version: 1, id: '00000000-0000-4000-8000-000000000099', predecessorSha256: digest('prior window'), previousInstanceIds: [] } : undefined;
+    const p = buildPhase(config, phaseName, contract, receipts, f, undefined, instance), calls = [];
     const invoke = async args => {
       calls.push(args);
       assert.equal(args[0], 'deployment');

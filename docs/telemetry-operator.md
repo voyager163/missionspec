@@ -295,8 +295,11 @@ Only explicitly listed workspace-access fields or the exact synthetic flag
 change can be modified; image, command, quota or role changes are not hidden
 inside that allowance.
 
-Deployment names keep the full 32-hex-character run ID and explicit unique
+Original collector deployment names keep the full 32-hex-character run ID and explicit unique
 two-letter phase codes (`pb`, `co`, `wa`, `da`, `ur`, `ra`, `di`, `sy`, `sd` in table order).
+New synthetic windows use `w` plus the full 32-hex-character **window-instance
+UUID** instead of reusing the original `sy`/`sd` names. This is a new bounded
+test instance, not a new collector/run ID or a resource retag.
 Every allowed prefix/phase fits ARM's 64-character limit; characters and length
 are checked locally. Nonmutating validate/what-if uses that exact execution
 name, not a separate shorter preview name.
@@ -315,7 +318,7 @@ query event rows. The following preparation is **read-only** and requires the
 current source's accepted reconciliation and real prerequisite receipts:
 
 ```sh
-node infrastructure/arm/telemetry/controller.mjs prepare-window synthetic-admission infrastructure/arm/telemetry/.operator-private/revision-20260923-synthetic-deadlines
+node infrastructure/arm/telemetry/controller.mjs prepare-window synthetic-admission infrastructure/arm/telemetry/.operator-private/revision-20260923-instrumented-window
 ```
 
 It writes two fixed templates/full ARM what-ifs, an immutable
@@ -324,6 +327,36 @@ The disable template depends on the already-qualified app and real identities,
 not a fabricated future enable receipt. Both templates preserve the reviewed
 writable defaults (`exposedPort: 0`, cooldown 300, polling 30) and unique probe
 ordering to make the actual delta easier to review.
+
+Before preparing a successor, `window-predecessor.json` must bind the original
+window, both actual toggle phases/deployments, paired approvals, intent journals,
+qualified readbacks, pre-window receipts and full run outcome. It also contains
+a new read-only observation of the exact false/latest-ready app, UAMI identities,
+privacy routes and both settled deployment identities. Published source hashes
+are checked against immutable Git blobs. A stopped window with an unknown
+first POST remains **stopped-disabled**, not a retroactively successful test.
+The terminal disabled 503 must already have been recorded under that old run;
+preparation does not repeat HTTP requests or reset any old allowance.
+
+`window-instance.json` is a closed object: `version: 1`, a cryptographically
+random v4 `id`, `predecessorSha256`, and `previousInstanceIds`. The new UUID
+must differ from the collector run ID and every prior instance ID; the prior-ID
+list must exactly extend the predecessor's bound list. The same instance is
+embedded in both phase hashes and the version-2 window. Both Node and the
+Python async what-if bridge derive the actual names from that UUID; neither
+falls back to the collector run ID for new toggle requests. Name checks and
+live absence reads reject already-created instance deployments.
+
+The first `run-window` also reserves the UUID once in the canonical private
+operator directory before any receiver request. This durable reservation blocks
+same-ID reuse even if local window files are copied elsewhere. It never replaces
+the existing controller lock, old run journal or cloud no-replay checks.
+An unreviewed enabled app, unresolved prior deployment, missing terminal proof
+or changed latest revision blocks a successor. The old seven ARM phases,
+publication, `f89` failure and `4da` stopped run remain byte-preserved history.
+Only a newly approved instance starts new counters. Copying historical active
+toggle receipts into the new writable ledger is forbidden; their original
+bytes live in the predecessor/history records instead.
 
 Toggle what-if comparison validates **both full app configurations** before
 normalizing only the previously reviewed representations: exact `Http`/`http`,
@@ -342,10 +375,11 @@ location-name folding is accepted.
 
 There must be two separate parent-authored approvals:
 `synthetic-admission-approval.json` and `synthetic-disable-approval.json`. Their
-closed shape is `version: 1`, `action` (`synthetic-window-synthetic-admission` or
+closed shape is `version: 2`, `action` (`synthetic-window-synthetic-admission` or
 `synthetic-window-synthetic-disable`), `windowSha256`, `phaseSha256`,
 `configSha256`, `sourceSha256`, `originSha256`, `receiptsSha256`, `baselineSha256`,
-`reviewedWhatIfSha256`, `transitionSha256`, `approvedAt`, and `expiresAt`.
+`reviewedWhatIfSha256`, `transitionSha256`, `windowInstanceId`,
+`predecessorSha256`, `approvedAt`, and `expiresAt`.
 Both approvals bind the same immutable window, fixtures, request limits and
 pre-window receipt set. They retain the original full what-if in the window.
 The reviewed disable what-if can correctly be **NoChange while currently
@@ -353,6 +387,8 @@ disabled**; it is not represented as a future true-state observation. Its
 explicit transition contract authorizes only true→false or read-only
 already-false completion. A fresh runtime what-if must still pass the full
 semantic gate; no raw-hash equality is falsely claimed for that future state.
+Legacy version-1 windows/approvals are accepted only as closed predecessor
+evidence, never as current execution authority.
 
 Only after both approvals and the parent source/native CodeQL gates may the
 operator use `run-window synthetic-admission`. Direct `execute` of either
@@ -412,6 +448,33 @@ redirects are not followed, response bodies are capped at 1 KiB, and each HTTP
 request has an unchanged **1,000 ms total wall timeout**. The server limits remain
 150/150/650 ms and 128/32/8 work bounds, 3,000 requests/minute and 100,000 events/day.
 There are no event POST retries, including on ambiguous timeouts.
+The private HTTP result includes `timingsMs` with numeric monotonic offsets
+from the start of that request: `dnsCompleteMs`, `tcpConnectMs`,
+`tlsVerifiedMs`, `requestFinishMs`, `firstByteMs`, `responseEndMs` and
+`timeoutMs`. An unobserved event stays **null**, not zero or an inferred
+duration. DNS/socket callbacks do not retain addresses or hostnames, and TLS
+errors are mapped to static categories without messages, certificate details,
+SNI or token data. Response headers are represented only by
+`headerPolicy.noStore`, `zeroContentLength` and `connectionClose` booleans;
+no raw response-header or response-body values are retained in the new result.
+Historical results are not rewritten.
+
+These offsets are observations of Node's event callbacks, not kernel packet
+timestamps. `requestFinishMs` means the request was flushed to its local
+transport, not that the service accepted it. `firstByteMs` is the first observed
+decrypted response-data notification (or the parsed-response callback if
+observed first), without reading or retaining that data. A response observed
+after either the absolute deadline or the monotonic 1,000 ms maximum is
+classified as a timeout even if the timeout callback was delayed; it cannot
+become a passing 204. Finished records are not changed by later socket events.
+Cancellation before dispatch still rejects without opening a connection.
+
+The timings may separate connection setup from waiting for a response, but
+cannot distinguish managed-identity token latency from upload/ingestion latency
+inside the receiver. They do not justify changing the 650 ms storage limit,
+prewarming credentials, retrying POSTs or rebuilding an image without additional
+evidence and a separate parent release. A partial or timed-out first POST still
+stops the standard window before any second enabled POST.
 Every request/query first reserves its durable intent and count. Cancellation,
 source and absolute admission deadlines are checked synchronously again after
 the final awaited persistence/source operation and immediately before transport.

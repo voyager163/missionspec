@@ -65,6 +65,26 @@ def static_template(value):
             static_template(child)
 
 
+def fixed_deployment_name(request):
+    require(request.get("phase") in PHASE_CODES and isinstance(request.get("namePrefix"), str)
+            and re.fullmatch(r"missionspec-[a-z0-9]{2,10}", request["namePrefix"])
+            and isinstance(request.get("runId"), str) and GUID.fullmatch(request["runId"]), "FIXED_WHATIF_NAME_REQUIRED")
+    if request["phase"] in ("synthetic-admission", "synthetic-disable"):
+        instance = request.get("windowInstanceId")
+        require(isinstance(instance, str)
+                and re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", instance)
+                and instance != request["runId"]
+                and isinstance(request.get("predecessorSha256"), str)
+                and re.fullmatch(r"[0-9a-f]{64}", request["predecessorSha256"]), "BOUND_WINDOW_INSTANCE_REQUIRED")
+        identity = "w" + instance.replace("-", "")
+    else:
+        require(request.get("windowInstanceId") is None and request.get("predecessorSha256") is None, "WINDOW_INSTANCE_TOGGLE_ONLY")
+        identity = request["runId"].replace("-", "")
+    name = request["namePrefix"] + "-" + identity + "-" + PHASE_CODES[request["phase"]]
+    require(len(name) <= 64, "DEPLOYMENT_NAME_INVALID")
+    return name
+
+
 def poll_url(value, subscription, location):
     require(isinstance(value, str) and not any(c in value for c in ("%", "\\", "#", "\r", "\n")), "WHATIF_LOCATION_INVALID")
     absolute = HOST + value if value.startswith("/subscriptions/") else value
@@ -118,8 +138,8 @@ def main():
     request = private_read(request_path)
     require(set(request) == {"version", "action", "subscriptionId", "tenantId", "location", "namePrefix", "runId",
                             "phase", "scope", "phaseSha256", "body", "bodySha256", "pollUrl", "initialResponseFile",
-                            "contextSha256", "timeoutMs", "deadlineMs"}, "CLOSED_WHATIF_INPUT_REQUIRED")
-    require(request["version"] == 1 and request["action"] in ("start", "poll")
+                            "contextSha256", "timeoutMs", "deadlineMs", "windowInstanceId", "predecessorSha256"}, "CLOSED_WHATIF_INPUT_REQUIRED")
+    require(request["version"] == 2 and request["action"] in ("start", "poll")
             and all(isinstance(request[key], str) and GUID.fullmatch(request[key])
                     for key in ("subscriptionId", "tenantId", "runId"))
             and request["location"] == "australiaeast"
@@ -127,17 +147,17 @@ def main():
             and request["phase"] in PHASE_CODES, "FIXED_WHATIF_SCOPE_REQUIRED")
     expected_scope = "subscription" if request["phase"] in ("upload-role", "project-budget") else "group"
     require(request["scope"] == expected_scope, "FIXED_WHATIF_SCOPE_REQUIRED")
+    name = fixed_deployment_name(request)
     require(all(isinstance(request[key], str) and re.fullmatch(r"[0-9a-f]{64}", request[key])
                 for key in ("phaseSha256", "bodySha256", "contextSha256")), "WHATIF_CONTEXT_INVALID")
-    fingerprint = "\n".join(str(request[key]) for key in
-                           ("subscriptionId", "tenantId", "location", "namePrefix", "runId", "phase", "scope", "phaseSha256", "bodySha256"))
+    fingerprint = "\n".join("" if request[key] is None else str(request[key]) for key in
+                           ("subscriptionId", "tenantId", "location", "namePrefix", "runId", "phase", "scope", "phaseSha256", "bodySha256",
+                            "windowInstanceId", "predecessorSha256"))
     require(hashlib.sha256(fingerprint.encode()).hexdigest() == request["contextSha256"], "WHATIF_CONTEXT_INVALID")
     require(type(request["timeoutMs"]) is int and 0 < request["timeoutMs"] <= 15000
             and type(request["deadlineMs"]) is int, "BOUNDED_WHATIF_DEADLINE_REQUIRED")
     end = min(request["deadlineMs"], int(time.time() * 1000) + request["timeoutMs"])
     subscription = request["subscriptionId"]
-    name = request["namePrefix"] + "-" + request["runId"].replace("-", "") + "-" + PHASE_CODES[request["phase"]]
-    require(len(name) <= 64, "DEPLOYMENT_NAME_INVALID")
     scope = "/subscriptions/" + subscription
     if expected_scope == "group":
         scope += "/resourceGroups/" + request["namePrefix"] + "-telemetry"

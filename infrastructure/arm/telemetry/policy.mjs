@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
-import { assertOwned, assertBudget, BUDGET, buildPhase, budgetConfiguration, closed, digest, fail, ids, json, LIMITS, PHASES, RECEIVER_COMMAND, requireAccess, sameId, projectBudgetFilter, uploadRoleProperties, assignmentRoleTargets, TOGGLE_PHASES, SYNTHETIC_LIMITS, SYNTHETIC_FIXTURES } from './definition.mjs';
+import { assertOwned, assertBudget, BUDGET, buildPhase, budgetConfiguration, closed, digest, fail, ids, json, LIMITS, PHASES, RECEIVER_COMMAND, requireAccess, sameId, projectBudgetFilter, uploadRoleProperties, assignmentRoleTargets, TOGGLE_PHASES, SYNTHETIC_LIMITS, SYNTHETIC_FIXTURES, validateWindowInstance, deploymentName } from './definition.mjs';
 export { assertBudget, notificationKeys } from './definition.mjs';
 
 const REVIEW_HASH_FIELDS = ['configSha256', 'phaseSha256', 'sourceSha256', 'originSha256', 'receiptsSha256', 'baselineSha256', 'whatIfSha256'];
@@ -499,36 +499,145 @@ export function syntheticTransitionHash(phase) {
 }
 export function verifyWindowApproval(c, phase, window, approval, source, now) {
   closed(approval, ['version', 'action', 'windowSha256', 'phaseSha256', 'configSha256', 'sourceSha256',
-    'originSha256', 'receiptsSha256', 'baselineSha256', 'reviewedWhatIfSha256', 'transitionSha256', 'approvedAt', 'expiresAt']);
+    'originSha256', 'receiptsSha256', 'baselineSha256', 'reviewedWhatIfSha256', 'transitionSha256', 'approvedAt', 'expiresAt',
+    ...(window.version === 2 ? ['windowInstanceId', 'predecessorSha256'] : [])]);
   const entry = window.phases?.[phase.phase];
-  if (approval.version !== 1 || approval.action !== `synthetic-window-${phase.phase}` ||
+  if (approval.version !== window.version || approval.action !== `synthetic-window-${phase.phase}` ||
       approval.windowSha256 !== digest(json(window)) || approval.phaseSha256 !== digest(json(phase)) ||
       approval.configSha256 !== digest(json(c)) || approval.sourceSha256 !== source ||
       approval.originSha256 !== window.originSha256 || approval.receiptsSha256 !== window.receiptsSha256 ||
       approval.baselineSha256 !== window.baselineSha256 || approval.reviewedWhatIfSha256 !== entry?.reviewedWhatIfSha256 ||
       approval.transitionSha256 !== syntheticTransitionHash(phase)) fail('EXACT_WINDOW_APPROVAL_REQUIRED');
+  if (window.version === 2 && (approval.windowInstanceId !== window.windowInstance.id ||
+      approval.predecessorSha256 !== window.windowInstance.predecessorSha256)) fail('WINDOW_INSTANCE_APPROVAL_MISMATCH');
   approvalTimes(approval, now, 'WINDOW_APPROVAL_EXPIRED_OR_INVALID');
 }
-export function verifySyntheticWindow(c, phases, window, approvals, source, now, starting = false) {
+function verifyWindowDefinition(c, phases, window, source) {
   closed(phases, TOGGLE_PHASES);
   closed(window, ['version', 'kind', 'configSha256', 'sourceSha256', 'originSha256', 'receiptsSha256', 'baselineSha256', 'appIdentity',
-    'anchorApp', 'phases', 'limits', 'fixtures']);
-  if (window.version !== 1 || window.kind !== 'bounded-two-event-window' || window.configSha256 !== digest(json(c)) ||
+    'anchorApp', 'phases', 'limits', 'fixtures', ...(window.version === 2 ? ['windowInstance'] : [])]);
+  if (![1, 2].includes(window.version) || window.kind !== 'bounded-two-event-window' || window.configSha256 !== digest(json(c)) ||
       window.sourceSha256 !== source || !isDeepStrictEqual(window.limits, SYNTHETIC_LIMITS) ||
       !isDeepStrictEqual(window.fixtures, SYNTHETIC_FIXTURES) ||
       !['originSha256', 'receiptsSha256', 'baselineSha256'].every(k => /^[0-9a-f]{64}$/u.test(window[k] ?? '')) ||
       admissionFlag(window.anchorApp) !== 'false' || !isDeepStrictEqual(window.appIdentity, executionIdentity(window.anchorApp, 'Microsoft.App/containerApps'))) fail('SYNTHETIC_WINDOW_INVALID');
+  if (window.version === 2) validateWindowInstance(c, window.windowInstance);
   closed(window.phases, TOGGLE_PHASES);
-  closed(approvals, TOGGLE_PHASES);
   for (const name of TOGGLE_PHASES) {
     const phase = phases[name], entry = window.phases[name];
     closed(entry, ['phaseSha256', 'transitionSha256', 'reviewedWhatIfSha256', 'reviewedWhatIf']);
     if (entry.phaseSha256 !== digest(json(phase)) || entry.transitionSha256 !== syntheticTransitionHash(phase) ||
         entry.reviewedWhatIfSha256 !== digest(json(entry.reviewedWhatIf)) ||
         phase.transition.anchorAppSha256 !== digest(json(window.anchorApp))) fail('SYNTHETIC_WINDOW_INVALID');
+    if (window.version === 2 && (!isDeepStrictEqual(phase.windowInstance, window.windowInstance) ||
+        phase.deploymentId !== `${ids(c).group}/providers/Microsoft.Resources/deployments/${deploymentName(c, name, window.windowInstance)}`)) fail('WINDOW_INSTANCE_PHASE_MISMATCH');
+    if (window.version === 1 && (phase.windowInstance !== undefined ||
+        phase.deploymentId !== `${ids(c).group}/providers/Microsoft.Resources/deployments/${deploymentName(c, name)}`)) fail('LEGACY_WINDOW_PHASE_CHANGED');
+  }
+}
+export function verifySyntheticWindow(c, phases, window, approvals, source, now, starting = false) {
+  if (window?.version !== 2) fail('NEW_WINDOW_INSTANCE_REQUIRED');
+  verifyWindowDefinition(c, phases, window, source);
+  closed(approvals, TOGGLE_PHASES);
+  for (const name of TOGGLE_PHASES) {
+    const phase = phases[name];
     verifyWindowApproval(c, phase, window, approvals[name], source, starting ? now : canonicalInstant(approvals[name].approvedAt));
   }
   if (starting && canonicalInstant(approvals['synthetic-disable'].expiresAt) < now + SYNTHETIC_LIMITS.enabledWindowMs + SYNTHETIC_LIMITS.rollbackReserveMs) fail('DISABLE_AUTHORITY_WINDOW_TOO_SHORT');
+}
+export function predecessorInstanceIds(predecessor) {
+  return predecessor.window.version === 2
+    ? [...predecessor.window.windowInstance.previousInstanceIds, predecessor.window.windowInstance.id] : [];
+}
+export function verifyWindowPredecessor(c, predecessor) {
+  closed(predecessor, ['version', 'kind', 'publication', 'window', 'phases', 'approvals', 'journals', 'receipts', 'prerequisiteReceipts', 'run', 'readback']);
+  closed(predecessor.publication, ['commitSha', 'sourceSha256']);
+  closed(predecessor.readback, ['checkedAt', 'sourceSha256', 'deployments', 'app', 'identities', 'revisions', 'privacy']);
+  const { window, phases, approvals, journals, receipts, prerequisiteReceipts, run, readback } = predecessor, r = ids(c);
+  if (predecessor.version !== 1 || predecessor.kind !== 'terminal-disabled-window' ||
+      !/^[0-9a-f]{40}$/u.test(predecessor.publication.commitSha) || !/^[0-9a-f]{64}$/u.test(predecessor.publication.sourceSha256) ||
+      !/^[0-9a-f]{64}$/u.test(readback.sourceSha256 ?? '') ||
+      window.receiptsSha256 !== digest(json(prerequisiteReceipts)) || window.originSha256 !== c.originSha256) fail('WINDOW_PREDECESSOR_INVALID');
+  verifyWindowDefinition(c, phases, window, predecessor.publication.sourceSha256);
+  for (const value of [approvals, journals, receipts, readback.deployments]) closed(value, TOGGLE_PHASES);
+  const context = resourceContext(c, prerequisiteReceipts);
+  for (const name of TOGGLE_PHASES) {
+    const p = phases[name], journal = journals[name], receipt = receipts[name];
+    const expected = buildPhase(c, name, null, prerequisiteReceipts, undefined, undefined, window.version === 2 ? window.windowInstance : undefined);
+    if (p.reconciliation !== undefined) {
+      closed(p.reconciliation, ['proposalSha256', 'reviewSha256']);
+      if (!Object.values(p.reconciliation).every(v => /^[0-9a-f]{64}$/u.test(v))) fail('PREDECESSOR_RECONCILIATION_BINDING_INVALID');
+      expected.reconciliation = p.reconciliation;
+    }
+    if (!isDeepStrictEqual(p, expected)) fail('PREDECESSOR_PHASE_CHANGED');
+    verifyWindowApproval(c, p, window, approvals[name], predecessor.publication.sourceSha256, canonicalInstant(journal.intentAt));
+    if (journal.phase !== name || journal.phaseSha256 !== digest(json(p)) || journal.windowSha256 !== digest(json(window)) ||
+        journal.approvalSha256 !== digest(json(approvals[name])) || journal.outcome !== 'readback-qualified' ||
+        journal.transportDispatchAttempted !== true || journal.receiptSha256 !== digest(json(receipt)) ||
+        receipt.qualified !== true || receipt.noCloudWrite !== false || receipt.qualificationKind !== 'ready-toggle-deployment' ||
+        receipt.phase !== name || receipt.sourceSha256 !== predecessor.publication.sourceSha256 ||
+        receipt.configSha256 !== digest(json(c)) || receipt.phaseSha256 !== digest(json(p)) ||
+        receipt.windowSha256 !== digest(json(window)) || receipt.approvalSha256 !== digest(json(approvals[name])) ||
+        !isDeepStrictEqual(Object.keys(receipt.resources ?? {}), [r.app]) ||
+        canonicalInstant(receipt.completedAt) < canonicalInstant(journal.intentAt)) fail('PREDECESSOR_EXECUTION_CHANGED_OR_PENDING');
+    if (!sameId(receipt.deployment?.id, p.deploymentId)) fail('PREDECESSOR_DEPLOYMENT_CHANGED');
+    verifyDeploymentIdentity(receipt.deployment, readback.deployments[name]);
+    verifyResource(c, p, p.resources[0], receipt.resources[r.app], context);
+    if (!isDeepStrictEqual(executionIdentity(receipt.resources[r.app], 'Microsoft.App/containerApps'), window.appIdentity)) fail('PREDECESSOR_APP_IDENTITY_CHANGED');
+  }
+  if (!['stopped-disabled', 'qualified-and-disabled'].includes(run.outcome) || run.stage !== 'finished' ||
+      run.windowSha256 !== digest(json(window)) || run.terminalFalseVerified !== true || run.terminalDisabled503Verified !== true ||
+      run.disableFailureCode !== null || run.disableReceiptSha256 !== digest(json(receipts['synthetic-disable'])) ||
+      canonicalInstant(run.completedAt) < canonicalInstant(receipts['synthetic-disable'].completedAt) ||
+      canonicalInstant(readback.checkedAt) < canonicalInstant(run.completedAt) ||
+      !Number.isSafeInteger(run.deadlines?.terminalFalseAt) ||
+      run.deadlines.terminalFalseAt < canonicalInstant(journals['synthetic-disable'].intentAt) ||
+      run.deadlines.terminalFalseAt > canonicalInstant(run.completedAt) ||
+      !Array.isArray(run.requests) || run.requests.length > SYNTHETIC_LIMITS.maximumHttpRequests ||
+      !Array.isArray(run.queries) || run.queries.length > SYNTHETIC_LIMITS.maximumQueries) fail('PREDECESSOR_NOT_TERMINAL_DISABLED');
+  const posts = run.requests.filter(v => v.stage === 'two-fixed-events' && v.method === 'POST');
+  const terminalPosts = run.requests.filter(v => v.stage === 'terminal-disabled-http' && v.method === 'POST');
+  if (run.enabledPosts !== posts.length || posts.length > SYNTHETIC_LIMITS.maximumEnabledPosts ||
+      run.disabledPosts !== terminalPosts.length || terminalPosts.length !== 1 ||
+      run.healthGets !== run.requests.filter(v => v.method === 'GET').length || run.healthGets > SYNTHETIC_LIMITS.maximumHealthGets ||
+      run.requests.some(v => v.method === 'GET' ? !['/health/live', '/health/ready'].includes(v.path) :
+        v.method !== 'POST' || v.path !== '/v1/events' || !['two-fixed-events', 'terminal-disabled-http'].includes(v.stage)) ||
+      posts.some((v, i) => !isDeepStrictEqual(v.fixture, SYNTHETIC_FIXTURES[i]))) fail('PREDECESSOR_REQUEST_HISTORY_CHANGED');
+  const accepted = response => response?.status === 204 && response.errorCode === null && response.bodyBytes === 0 &&
+    response.tlsVerified === true && response.durationMs <= 1000;
+  const failure = posts.findIndex(v => !accepted(v.response));
+  if (failure >= 0 && failure !== posts.length - 1) fail('PREDECESSOR_RETRIED_FAILED_POST');
+  if (run.outcome === 'qualified-and-disabled' && (failure >= 0 || posts.length !== 2 || run.failureCode !== null)) fail('PREDECESSOR_FAILURE_PROMOTED');
+  if (run.outcome === 'stopped-disabled' && (typeof run.failureCode !== 'string' || !/^[A-Z_]+$/u.test(run.failureCode))) fail('PREDECESSOR_FAILURE_ERASED');
+  const terminal = run.requests.at(-1);
+  const noStore = terminal?.response?.headerPolicy?.noStore === true || terminal?.response?.safeHeaders?.['cache-control'] === 'no-store';
+  if (terminal?.stage !== 'terminal-disabled-http' || terminal.method !== 'POST' || terminal.path !== '/v1/events' ||
+      terminal.response?.status !== 503 || terminal.response.errorCode !== null || terminal.response.bodyBytes !== 0 ||
+      terminal.response.tlsVerified !== true || terminal.response.durationMs > 1000 || !noStore) fail('PREDECESSOR_DISABLED503_REQUIRED');
+  const originalFalse = receipts['synthetic-disable'].resources[r.app];
+  const freshContext = { ...context, identities: readback.identities };
+  verifyResource(c, phases['synthetic-disable'], phases['synthetic-disable'].resources[0], readback.app, freshContext);
+  if (!isDeepStrictEqual(executionIdentity(readback.app, 'Microsoft.App/containerApps'), window.appIdentity) ||
+      readback.app.properties.latestRevisionName !== originalFalse.properties.latestRevisionName ||
+      readback.app.properties.latestReadyRevisionName !== readback.app.properties.latestRevisionName) fail('PREDECESSOR_CURRENT_REVISION_CHANGED');
+  closed(readback.identities, [r.ingestIdentity, r.pullIdentity]);
+  for (const id of [r.ingestIdentity, r.pullIdentity]) {
+    if (!isDeepStrictEqual(executionIdentity(readback.identities[id]), executionIdentity(context.identities[id]))) fail('PREDECESSOR_IDENTITY_CHANGED');
+  }
+  closed(readback.privacy, ['diagnostics', 'exports']);
+  closed(readback.privacy.diagnostics, [r.app]);
+  for (const value of [readback.privacy.diagnostics[r.app], readback.privacy.exports]) {
+    if (!Array.isArray(value?.value) || value.nextLink || value.value.length) fail('PREDECESSOR_PRIVACY_DRIFT');
+  }
+  return { outcome: run.outcome, appIdentity: window.appIdentity, usedInstanceIds: predecessorInstanceIds(predecessor),
+    unknownFirstPost: posts[0]?.response?.status === null };
+}
+export function verifyWindowInstancePredecessor(c, instance, predecessor) {
+  validateWindowInstance(c, instance);
+  const summary = verifyWindowPredecessor(c, predecessor);
+  if (instance.predecessorSha256 !== digest(json(predecessor)) ||
+      !isDeepStrictEqual(instance.previousInstanceIds, summary.usedInstanceIds)) fail('WINDOW_PREDECESSOR_BINDING_CHANGED');
+  return summary;
 }
 export function verifyWindowState(c, phases, window, approvals, journals, actual, context, source) {
   verifySyntheticWindow(c, phases, window, approvals, source, Date.now());
@@ -537,7 +646,8 @@ export function verifyWindowState(c, phases, window, approvals, journals, actual
   for (const name of TOGGLE_PHASES) {
     const journal = journals[name];
     if (journal && (journal.phase !== name || journal.windowSha256 !== digest(json(window)) ||
-        journal.phaseSha256 !== digest(json(phases[name])) || journal.approvalSha256 !== digest(json(approvals[name])))) fail('WINDOW_INTENT_BINDING_CHANGED');
+        journal.phaseSha256 !== digest(json(phases[name])) || journal.approvalSha256 !== digest(json(approvals[name])) ||
+        journal.windowInstanceId !== window.windowInstance.id || journal.predecessorSha256 !== window.windowInstance.predecessorSha256)) fail('WINDOW_INTENT_BINDING_CHANGED');
   }
   if (flag === 'true') {
     if (!enable || enable.windowSha256 !== digest(json(window)) || enable.phaseSha256 !== digest(json(phases['synthetic-admission'])) ||

@@ -4,9 +4,10 @@ import https from 'node:https';
 import { EventEmitter } from 'node:events';
 import { mkdir, readdir, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { buildPhase, digest, json, ids, ownerTags, RECEIVER_DIGEST, RECEIVER_COMMAND, SYNTHETIC_FIXTURES, SYNTHETIC_LIMITS } from '../definition.mjs';
-import { admissionFlag, verifyWhatIf, resourceContext, verifySyntheticWindow, verifyWindowState, verifySyntheticRows } from '../policy.mjs';
-import { buildSyntheticWindow, SyntheticToggleController, SyntheticWindowDriver, latestRevisionReady, syntheticHttp, syntheticQuery, readSyntheticQuery, syntheticWindowIO, transport } from '../controller.mjs';
+import { buildPhase, digest, json, ids, ownerTags, RECEIVER_DIGEST, RECEIVER_COMMAND, SYNTHETIC_FIXTURES, SYNTHETIC_LIMITS, deploymentName, validateWindowInstance } from '../definition.mjs';
+import { admissionFlag, verifyWhatIf, resourceContext, verifySyntheticWindow, verifyWindowState, verifySyntheticRows, verifyWindowPredecessor, verifyWindowInstancePredecessor } from '../policy.mjs';
+import { buildSyntheticWindow, SyntheticToggleController, SyntheticWindowDriver, latestRevisionReady, syntheticHttp, syntheticQuery, readSyntheticQuery, syntheticWindowIO, transport,
+  verifyPublishedWindowPredecessor, whatIfRequestContext, reserveWindowInstance } from '../controller.mjs';
 
 function fixture() {
   const origin = { policyBaselineSha256: digest('baseline') };
@@ -41,7 +42,8 @@ function fixture() {
     app.identity.userAssignedIdentities[id] = { clientId, principalId };
   }
   receipts['disabled-app'] = { qualified: true, configSha256, resources: { [r.app]: structuredClone(app) } };
-  const phases = Object.fromEntries(['synthetic-admission', 'synthetic-disable'].map(name => [name, buildPhase(c, name, null, receipts)]));
+  const instance = { version: 1, id: '00000000-0000-4000-8000-000000000099', predecessorSha256: digest('predecessor'), previousInstanceIds: [] };
+  const phases = Object.fromEntries(['synthetic-admission', 'synthetic-disable'].map(name => [name, buildPhase(c, name, null, receipts, undefined, undefined, instance)]));
   const whatifs = {
     'synthetic-admission': { status: 'Succeeded', changes: [{ resourceId: r.app, changeType: 'Modify',
       before: structuredClone(app), after: { ...structuredClone(phases['synthetic-admission'].resources[0].expected), id: r.app } }] },
@@ -50,7 +52,8 @@ function fixture() {
   const source = digest('test source'), window = buildSyntheticWindow(c, phases, receipts, origin, source, whatifs);
   let now = Date.parse('2026-09-23T09:00:00.000Z');
   const approvals = Object.fromEntries(Object.entries(phases).map(([name, phase]) => [name, {
-    version: 1, action: `synthetic-window-${name}`, windowSha256: digest(json(window)), phaseSha256: digest(json(phase)),
+    version: 2, windowInstanceId: instance.id, predecessorSha256: instance.predecessorSha256,
+    action: `synthetic-window-${name}`, windowSha256: digest(json(window)), phaseSha256: digest(json(phase)),
     configSha256, sourceSha256: source, originSha256: window.originSha256, receiptsSha256: window.receiptsSha256,
     baselineSha256: window.baselineSha256, reviewedWhatIfSha256: window.phases[name].reviewedWhatIfSha256,
     transitionSha256: window.phases[name].transitionSha256, approvedAt: new Date(now - 60000).toISOString(),
@@ -94,7 +97,8 @@ function fixture() {
       app.properties.configuration.ingress.fqdn = window.anchorApp.properties.configuration.ingress.fqdn;
       app.properties.latestRevisionName = 'missionspec-test-ingest--' + (phase.transition.to === 'true' ? 'enabled' : 'disabled');
       app.properties.latestReadyRevisionName = oldReady && phase.transition.to === 'true' ? previous : app.properties.latestRevisionName;
-      deployments[phase.phase] = { id, properties: { provisioningState: 'Succeeded' } };
+      deployments[phase.phase] = { id, properties: { provisioningState: 'Succeeded', mode: 'Incremental', correlationId: phase.phase,
+        timestamp: new Date(now).toISOString(), templateHash: digest(json(phase.template)) } };
       if (unknownEnable && phase.phase === 'synthetic-admission') throw new Error('UNKNOWN_TRANSPORT_RESULT');
       return {};
     },
@@ -114,7 +118,7 @@ function fixture() {
       guard?.();
       advance(20); http.push({ method, path, fixture, flag: admissionFlag(app) });
       return { status: method === 'POST' && admissionFlag(app) === 'false' ? 503 : 204,
-        bodyBytes: 0, tlsVerified: true, errorCode: null, durationMs: 20, safeHeaders: { 'cache-control': 'no-store' } };
+        bodyBytes: 0, tlsVerified: true, errorCode: null, durationMs: 20, headerPolicy: { noStore: true } };
     },
     query: async (start, end, guard, deadline, onDispatch) => {
       guard?.();
@@ -124,7 +128,7 @@ function fixture() {
     },
   };
   const toggle = new SyntheticToggleController(c, phases, window, approvals, io);
-  return { c, r, receipts, phases, window, approvals, source, context, whatifs, io, toggle, journals, savedReceipts, deployments, writes, http, queries, incidents, timers,
+  return { c, r, receipts, phases, window, approvals, source, context, whatifs, instance, io, toggle, journals, savedReceipts, deployments, writes, http, queries, incidents, timers,
     get app() { return app; }, get run() { return run; }, get now() { return now; }, advance,
     set oldReady(v) { oldReady = v; }, set badRevisionTemplate(v) { badRevisionTemplate = v; },
     set unknownEnable(v) { unknownEnable = v; }, set mutateBody(v) { mutateBody = v; },
@@ -277,6 +281,7 @@ test('enabled state without a matching original approval and intent is not an ad
   assert.throws(() => verifyWindowState(f.c, f.phases, f.window, f.approvals, {}, f.app, f.context, f.source), /UNREVIEWED_ENABLED_APP_STATE/);
   const fake = { 'synthetic-admission': { phase: 'synthetic-admission', outcome: 'submission-possible',
     phaseSha256: digest(json(f.phases['synthetic-admission'])), approvalSha256: digest(json(f.approvals['synthetic-admission'])),
+    windowInstanceId: f.instance.id, predecessorSha256: f.instance.predecessorSha256,
     windowSha256: digest(json(f.window)), intentAt: f.approvals['synthetic-admission'].expiresAt } };
   assert.throws(() => verifyWindowState(f.c, f.phases, f.window, f.approvals, fake, f.app, f.context, f.source), /WINDOW_APPROVAL_EXPIRED/);
   fake['synthetic-admission'].intentAt = f.approvals['synthetic-admission'].approvedAt;
@@ -408,7 +413,7 @@ test('bounded HTTPS uses verified TLS and never follows redirects or retains una
   });
   const response = await syntheticHttp('fixture.azurecontainerapps.io', 'GET', '/health/live', undefined, () => {});
   assert.equal(calls, 1); assert.equal(response.status, 302); assert.equal(response.tlsVerified, true);
-  assert.deepEqual(response.safeHeaders, { 'content-length': '0' });
+  assert.deepEqual(response.headerPolicy, { noStore: false, zeroContentLength: true, connectionClose: false });
   assert(!JSON.stringify(response).includes('private-value'));
 });
 test('cancel or cutoff during source hashing or intent persistence never dispatches the reserved enabled POST', async () => {
@@ -692,4 +697,103 @@ test('cancellation while persisting a completed query cannot turn a stopped wind
   assert.equal(result.outcome, 'stopped-disabled');
   assert.equal(result.terminalFalseVerified, true);
   assert.equal(result.terminalDisabled503Verified, true);
+});
+
+async function completedPredecessor() {
+  const f = fixture(), http = f.io.http;
+  f.io.http = async (...args) => {
+    const result = await http(...args);
+    return args[0] === 'POST' && admissionFlag(f.app) === 'true'
+      ? { ...result, status: null, errorCode: 'TOTAL_TIMEOUT_1000MS', durationMs: 1003.3 } : result;
+  };
+  const run = await new SyntheticWindowDriver(f.c, f.phases, f.window, f.approvals, f.toggle, f.io).run();
+  const observation = await f.io.rollout();
+  const predecessor = { version: 1, kind: 'terminal-disabled-window', publication: { commitSha: 'a'.repeat(40), sourceSha256: f.source },
+    window: f.window, phases: f.phases, approvals: f.approvals, journals: f.journals, receipts: f.savedReceipts,
+    prerequisiteReceipts: f.receipts, run,
+    readback: { checkedAt: new Date(f.now).toISOString(), sourceSha256: f.source,
+      deployments: f.deployments, app: f.app, identities: f.context.identities, revisions: observation.revisions,
+      privacy: { diagnostics: { [f.r.app]: { value: [] } }, exports: { value: [] } } } };
+  return { f, predecessor };
+}
+test('window UUIDs preserve full entropy and collector ownership while deriving unique bounded toggle names', () => {
+  const f = fixture(), originalConfig = json(f.c), idsBefore = json(ids(f.c));
+  const instances = Array.from({ length: 24 }, () => ({ ...f.instance, id: randomUUID() }));
+  const names = new Set();
+  for (const length of [2, 10]) {
+    const c = { ...f.c, namePrefix: 'missionspec-' + 'a'.repeat(length), registryName: 'missionspec' + 'a'.repeat(length) };
+    for (const instance of instances) for (const name of ['synthetic-admission', 'synthetic-disable']) {
+      const value = deploymentName(c, name, instance);
+      assert(value.length <= 64); assert(value.includes('w' + instance.id.replaceAll('-', '')));
+      assert.notEqual(value, deploymentName(c, name)); assert(!names.has(value)); names.add(value);
+    }
+  }
+  assert.equal(json(f.c), originalConfig); assert.equal(json(ids(f.c)), idsBefore);
+  for (const mutate of [
+    x => { x.id = f.c.runId; }, x => { x.previousInstanceIds = [x.id]; }, x => { x.previousInstanceIds = [f.c.runId]; },
+    x => { x.id = 'aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa'; }, x => { x.id = 'bad'; }, x => { x.force = true; },
+    x => { x.id = [x.id]; }, x => { x.previousInstanceIds = [[randomUUID()]]; },
+  ]) { const value = structuredClone(f.instance); mutate(value); assert.throws(() => validateWindowInstance(f.c, value)); }
+  assert.throws(() => deploymentName(f.c, 'core', f.instance), /TOGGLE_ONLY/);
+});
+test('a new instance requires a settled predecessor and retains its unknown first POST as a failure', async () => {
+  const { f, predecessor } = await completedPredecessor();
+  const summary = verifyWindowPredecessor(f.c, predecessor);
+  assert.equal(summary.outcome, 'stopped-disabled'); assert.equal(summary.unknownFirstPost, true);
+  await verifyPublishedWindowPredecessor(f.c, predecessor, async () => f.source);
+  const instance = { version: 1, id: randomUUID(), predecessorSha256: digest(json(predecessor)), previousInstanceIds: [f.instance.id] };
+  verifyWindowInstancePredecessor(f.c, instance, predecessor);
+  const next = buildPhase(f.c, 'synthetic-admission', null, f.receipts, undefined, undefined, instance);
+  assert.notEqual(next.deploymentId, f.phases['synthetic-admission'].deploymentId);
+  assert.deepEqual(next.template, f.phases['synthetic-admission'].template);
+  assert.deepEqual(next.template.resources[0].tags, ownerTags(f.c));
+  for (const change of [
+    p => { p.run.outcome = 'qualified-and-disabled'; p.run.failureCode = null; },
+    p => { p.run.outcome = 'held-terminal-state-or-http-unproven'; },
+    p => { p.journals['synthetic-admission'].outcome = 'submission-possible'; },
+    p => { p.readback.deployments['synthetic-admission'].properties.provisioningState = 'Running'; },
+    p => { p.readback.deployments['synthetic-disable'].properties.templateHash = 'other'; },
+    p => { p.receipts['synthetic-disable'].qualified = false; },
+    p => { p.run.terminalFalseVerified = false; },
+    p => { p.run.requests.at(-1).response.status = 204; },
+    p => { p.run.requests.at(-1).response.durationMs = 1001; },
+    p => { p.approvals['synthetic-disable'].expiresAt = p.journals['synthetic-disable'].intentAt; },
+    p => { p.readback.app.properties.template.containers[0].env.find(v => v.name === 'MSR_INGESTION_ENABLED').value = 'true'; },
+    p => { p.readback.app.properties.latestRevisionName = 'unexpected'; },
+    p => { p.readback.identities[f.r.ingestIdentity].properties.principalId = f.c.operatorPrincipalId; },
+    p => { p.readback.privacy.exports.value.push({ name: 'unexpected' }); },
+  ]) {
+    const value = structuredClone(predecessor); change(value);
+    assert.throws(() => verifyWindowPredecessor(f.c, value));
+  }
+  await assert.rejects(verifyPublishedWindowPredecessor(f.c, predecessor, async () => digest('unknown source')), /PUBLISHED_SOURCE_MISMATCH/);
+  assert.throws(() => verifyWindowInstancePredecessor(f.c, { ...instance, id: f.instance.id }, predecessor), /REUSED/);
+  assert.throws(() => verifyWindowInstancePredecessor(f.c, { ...instance, previousInstanceIds: [] }, predecessor), /BINDING_CHANGED/);
+});
+test('window, phase and approvals all bind the same new instance and reject legacy execution authority', () => {
+  const f = fixture();
+  for (const mutate of [
+    a => { a['synthetic-admission'].windowInstanceId = randomUUID(); },
+    a => { a['synthetic-disable'].predecessorSha256 = digest('other predecessor'); },
+    a => { delete a['synthetic-admission'].windowInstanceId; },
+    a => { a['synthetic-disable'].version = 1; },
+  ]) { const approvals = structuredClone(f.approvals); mutate(approvals); assert.throws(() => verifySyntheticWindow(f.c, f.phases, f.window, approvals, f.source, f.now, true)); }
+  const legacy = structuredClone(f.window); legacy.version = 1; delete legacy.windowInstance;
+  assert.throws(() => verifySyntheticWindow(f.c, f.phases, legacy, f.approvals, f.source, f.now, true), /NEW_WINDOW_INSTANCE_REQUIRED/);
+  const altered = structuredClone(f.phases); altered['synthetic-disable'].windowInstance.id = randomUUID();
+  assert.throws(() => verifySyntheticWindow(f.c, altered, f.window, f.approvals, f.source, f.now, true));
+  assert.throws(() => whatIfRequestContext(f.c, { ...f.phases['synthetic-admission'], deploymentId: `${f.r.group}/providers/Microsoft.Resources/deployments/${deploymentName(f.c, 'synthetic-admission')}` }), /FIXED_WHAT_IF_PHASE_REQUIRED/);
+  const request = whatIfRequestContext(f.c, f.phases['synthetic-admission']);
+  assert.equal(request.windowInstanceId, f.instance.id);
+  assert.equal(request.predecessorSha256, f.instance.predecessorSha256);
+});
+
+test('a durable instance reservation rejects the same UUID even if a caller copies or changes local window files', async t => {
+  const f = fixture(), directory = `infrastructure/arm/telemetry/tests/.scratch-${randomUUID()}`;
+  await mkdir(directory, { mode: 0o700 }); t.after(() => rm(directory, { recursive: true }));
+  await reserveWindowInstance(f.c, directory, f.window);
+  await assert.rejects(reserveWindowInstance(f.c, directory, f.window), /WINDOW_INSTANCE_REPLAY_FORBIDDEN/);
+  const altered = structuredClone(f.window); altered.sourceSha256 = digest('changed source');
+  await assert.rejects(reserveWindowInstance(f.c, directory, altered), /WINDOW_INSTANCE_REPLAY_FORBIDDEN/);
+  assert.equal((await readdir(directory)).length, 1);
 });

@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { dirname, basename } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { buildPhase, ids, digest, json, BUDGET, RECEIVER_DIGEST } from '../definition.mjs';
+import { buildPhase, ids, digest, json, BUDGET, RECEIVER_DIGEST, deploymentName } from '../definition.mjs';
 import { verifyWhatIf } from '../policy.mjs';
 import { asyncWhatIf, whatIfOperationUrl, whatIfRequestContext, authenticatedWhatIfRequest,
   load, saveImmutable, processFailureMetadata, safeOperationFailure, WHAT_IF_API, WHAT_IF_MAX_POLLS } from '../controller.mjs';
@@ -194,4 +194,32 @@ test('Python bridge rejects unsafe URLs and credential-bearing/static-expression
   ].join('\n');
   const result = await promisify(execFile)('python3', ['-I', '-B', '-c', program], { timeout: 10000 });
   assert.equal(result.stdout.trim(), 'BRIDGE_VALIDATORS_PASSED_NO_AUTH_OR_NETWORK');
+});
+
+test('Python and Node derive the actual toggle execution name from the bound UUID, never the collector runId', async () => {
+  const instance = { version: 1, id: '00000000-0000-4000-8000-000000000099', predecessorSha256: digest('prior'), previousInstanceIds: [] };
+  const requests = ['synthetic-admission', 'synthetic-disable'].map(name => {
+    const p = { ...phase, phase: name, windowInstance: instance,
+      deploymentId: `${r.group}/providers/Microsoft.Resources/deployments/${deploymentName(c, name, instance)}` };
+    const request = whatIfRequestContext(c, p);
+    return { request, expectedName: deploymentName(c, name, instance) };
+  });
+  const program = [
+    'import importlib.util,json,hashlib',
+    's=importlib.util.spec_from_file_location("bridge","infrastructure/arm/telemetry/arm-whatif.py")',
+    'm=importlib.util.module_from_spec(s);s.loader.exec_module(m)',
+    `values=json.loads(${JSON.stringify(JSON.stringify(requests))})`,
+    'for value in values:',
+    ' request=value["request"]',
+    ' assert m.fixed_deployment_name(request)==value["expectedName"]',
+    ' fields=("subscriptionId","tenantId","location","namePrefix","runId","phase","scope","phaseSha256","bodySha256","windowInstanceId","predecessorSha256")',
+    ' assert hashlib.sha256("\\n".join("" if request[k] is None else str(request[k]) for k in fields).encode()).hexdigest()==request["contextSha256"]',
+    ' for key,new in [("windowInstanceId",None),("windowInstanceId",request["runId"]),("predecessorSha256","bad")]:',
+    '  changed=dict(request);changed[key]=new',
+    '  try:m.fixed_deployment_name(changed);raise AssertionError("accepted invalid instance")',
+    '  except m.Stop:pass',
+    'print("BOUND_WINDOW_NAMES_MATCH_NO_AUTH_OR_NETWORK")',
+  ].join('\n');
+  const result = await promisify(execFile)('python3', ['-I', '-B', '-c', program], { timeout: 10000 });
+  assert.equal(result.stdout.trim(), 'BOUND_WINDOW_NAMES_MATCH_NO_AUTH_OR_NETWORK');
 });
