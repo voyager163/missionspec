@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
-import { assertOwned, assertBudget, BUDGET, buildPhase, budgetConfiguration, closed, digest, fail, ids, json, LIMITS, PHASES, RECEIVER_COMMAND, requireAccess, sameId, projectBudgetFilter, uploadRoleProperties, assignmentRoleTargets } from './definition.mjs';
+import { assertOwned, assertBudget, BUDGET, buildPhase, budgetConfiguration, closed, digest, fail, ids, json, LIMITS, PHASES, RECEIVER_COMMAND, requireAccess, sameId, projectBudgetFilter, uploadRoleProperties, assignmentRoleTargets, TOGGLE_PHASES, SYNTHETIC_LIMITS, SYNTHETIC_FIXTURES } from './definition.mjs';
 export { assertBudget, notificationKeys } from './definition.mjs';
 
 const REVIEW_HASH_FIELDS = ['configSha256', 'phaseSha256', 'sourceSha256', 'originSha256', 'receiptsSha256', 'baselineSha256', 'whatIfSha256'];
@@ -101,7 +101,7 @@ export const RECONCILABLE_PHASES = Object.freeze(PHASES.slice(0, 7));
 function prerequisiteWorkspace(c, receipts) {
   return receipts['workspace-access']?.resources?.[ids(c).workspace] ?? receipts.core?.resources?.[ids(c).workspace] ?? null;
 }
-function resourceContext(c, receipts) {
+export function resourceContext(c, receipts) {
   const r = ids(c);
   return { workspace: prerequisiteWorkspace(c, receipts), identities: {
     [r.ingestIdentity]: receipts.core?.resources?.[r.ingestIdentity],
@@ -374,7 +374,7 @@ function budgetWhatIfConfiguration(value) {
   }
   return configuration;
 }
-export function verifyWhatIf(phase, result, preservedIds = []) {
+export function verifyWhatIf(phase, result, preservedIds = [], context) {
   if (result?.status !== 'Succeeded' || !Array.isArray(result.changes)) fail('WHAT_IF_INCOMPLETE');
   const target = new Map(phase.resources.map(v => [v.id.toLowerCase(), v]));
   const preserved = new Set(preservedIds.map(v => v.toLowerCase()));
@@ -388,6 +388,10 @@ export function verifyWhatIf(phase, result, preservedIds = []) {
       fail('UNREVIEWED_RESOURCE_CHANGE');
     }
     const allowed = Object.entries(phase.allowedModify).find(([key]) => key.toLowerCase() === id)?.[1];
+    if (TOGGLE_PHASES.includes(phase.phase)) {
+      verifyToggleWhatIf(phase, change, context);
+      target.delete(id); continue;
+    }
     if (phase.phase === 'project-budget') {
       if (change.changeType !== 'Modify' || !change.before || !change.after) fail('BUDGET_AMOUNT_ONLY_REQUIRED');
       for (const value of [change.before, change.after]) {
@@ -408,20 +412,167 @@ export function verifyWhatIf(phase, result, preservedIds = []) {
       if (!change.before || !change.after) fail('FULL_WHAT_IF_READBACK_REQUIRED');
       const delta = diffLeaves(change.before, change.after);
       if (delta.length === 0 || delta.some(path => !allowed.includes(path))) fail('UNREVIEWED_MODIFY');
-      if (phase.phase === 'synthetic-admission') {
-        const before = structuredClone(change.before.properties.template.containers);
-        const after = change.after.properties.template.containers;
-        if (before.length !== 1) fail('SYNTHETIC_DELTA_INVALID');
-        const flag = before[0].env?.filter(v => v.name === 'MSR_INGESTION_ENABLED');
-        if (flag?.length !== 1 || flag[0].value !== 'false') fail('SYNTHETIC_DELTA_INVALID');
-        flag[0].value = 'true';
-        if (!isDeepStrictEqual(before, after)) fail('SYNTHETIC_DELTA_INVALID');
-      }
     } else if (change.changeType !== 'NoChange') fail('OWNED_UPDATE_ONLY');
     target.delete(id);
   }
   if (target.size) fail('WHAT_IF_INCOMPLETE');
   return digest(json(result));
+}
+export function admissionFlag(app) {
+  const flags = app?.properties?.template?.containers?.[0]?.env?.filter(v => v.name === 'MSR_INGESTION_ENABLED');
+  if (flags?.length !== 1 || !['false', 'true'].includes(flags[0].value)) fail('APP_ADMISSION_FLAG_INVALID');
+  return flags[0].value;
+}
+export function descriptorWithFlag(descriptor, flag) {
+  if (!['false', 'true'].includes(flag)) fail('APP_ADMISSION_FLAG_INVALID');
+  const copy = structuredClone(descriptor);
+  const rows = copy.expected.properties.template.containers[0].env.filter(v => v.name === 'MSR_INGESTION_ENABLED');
+  if (rows.length !== 1) fail('APP_ADMISSION_FLAG_INVALID');
+  rows[0].value = flag;
+  return copy;
+}
+export function canonicalAppWrite(c, descriptor, actual, context, whatIf = false) {
+  const value = structuredClone(actual);
+  if (!onlyKeys(value, ['apiVersion', 'id', 'identity', 'location', 'name', 'properties', 'resourceGroup', 'systemData', 'tags', 'type']) ||
+      !sameId(value.id, descriptor.id) || value.name !== descriptor.expected.name ||
+      !sameId(value.type, descriptor.type) || c.location !== 'australiaeast' || !['australiaeast', 'Australia East'].includes(value.location) ||
+      (value.apiVersion !== undefined && value.apiVersion !== descriptor.apiVersion)) fail('TOGGLE_RESOURCE_SHAPE_INVALID');
+  if (whatIf) {
+    if (!context?.app || !sameId(context.app.id, descriptor.id)) fail('TOGGLE_READBACK_CONTEXT_REQUIRED');
+    assertOwned(context.app, descriptor.id, c);
+    verifyApp(c, descriptorWithFlag(descriptor, admissionFlag(context.app)).expected, context.app, context);
+    for (const [id, metadata] of Object.entries(value.identity?.userAssignedIdentities ?? {})) {
+      if (onlyKeys(metadata, []) && Object.keys(metadata).length === 0) {
+        const match = Object.entries(context.identities ?? {}).find(([key]) => sameId(id, key))?.[1];
+        if (!match) fail('TOGGLE_IDENTITY_CONTEXT_REQUIRED');
+        value.identity.userAssignedIdentities[id] = { clientId: match.properties.clientId, principalId: match.properties.principalId };
+      }
+    }
+    if (!Object.hasOwn(value.properties?.configuration?.ingress ?? {}, 'fqdn')) value.properties.configuration.ingress.fqdn = context.app.properties.configuration.ingress.fqdn;
+  }
+  assertOwned(value, descriptor.id, c);
+  verifyApp(c, descriptor.expected, value, context);
+  const p = value.properties, configuration = p.configuration, template = p.template, ingress = configuration.ingress;
+  for (const key of ['customDomainVerificationId', 'delegatedIdentities', 'eventStreamEndpoint', 'latestReadyRevisionName',
+    'latestRevisionFqdn', 'latestRevisionName', 'outboundIpAddresses', 'provisioningState', 'runningStatus']) delete p[key];
+  p.managedEnvironmentId = (p.managedEnvironmentId ?? p.environmentId).toLowerCase(); delete p.environmentId;
+  for (const key of ['dapr', 'runtime', 'secrets', 'service']) delete configuration[key];
+  for (const key of ['fqdn', 'additionalPortMappings', 'clientCertificateMode', 'corsPolicy', 'customDomains', 'ipSecurityRestrictions', 'stickySessions']) delete ingress[key];
+  ingress.transport = 'http'; ingress.exposedPort = 0;
+  for (const key of ['initContainers', 'revisionSuffix', 'serviceBinds', 'volumes']) delete template[key];
+  template.scale.cooldownPeriod = 300; template.scale.pollingInterval = 30;
+  for (const container of template.containers) {
+    for (const key of ['command', 'args', 'volumeMounts']) delete container[key];
+    delete container.resources.ephemeralStorage;
+    container.probes.sort((a, b) => a.type.localeCompare(b.type));
+    container.env = envMap(container.env);
+  }
+  configuration.registries = configuration.registries.map(({ server, identity }) => ({ server, identity: identity.toLowerCase() }));
+  configuration.identitySettings = configuration.identitySettings.map(v => ({ ...v, identity: v.identity.toLowerCase() })).sort((a, b) => a.identity.localeCompare(b.identity));
+  return { id: value.id.toLowerCase(), type: value.type.toLowerCase(), name: value.name, location: c.location,
+    tags: value.tags, identity: { type: value.identity.type, userAssignedIdentities: Object.keys(value.identity.userAssignedIdentities).map(v => v.toLowerCase()).sort() }, properties: p };
+}
+export function verifyToggleWhatIf(phase, change, context) {
+  if (!context?.config || !TOGGLE_PHASES.includes(phase.phase) || phase.resources.length !== 1) fail('TOGGLE_CONTEXT_REQUIRED');
+  const descriptor = phase.resources[0], to = phase.transition.to;
+  if (change.changeType === 'NoChange' && phase.phase === 'synthetic-disable') {
+    const current = canonicalAppWrite(context.config, descriptorWithFlag(descriptor, 'false'), context.app, context);
+    for (const side of ['before', 'after']) if (change[side]) {
+      if (!isDeepStrictEqual(current, canonicalAppWrite(context.config, descriptorWithFlag(descriptor, 'false'), change[side], context, true))) fail('TOGGLE_UNREVIEWED_CHANGE');
+    }
+    return;
+  }
+  if (change.changeType !== 'Modify' || !change.before || !change.after) fail('TOGGLE_FULL_MODIFY_REQUIRED');
+  const from = admissionFlag(change.before);
+  if (!phase.transition.from.includes(from) || admissionFlag(change.after) !== to) fail('TOGGLE_DIRECTION_INVALID');
+  const before = canonicalAppWrite(context.config, descriptorWithFlag(descriptor, from), change.before, context, true);
+  const after = canonicalAppWrite(context.config, descriptorWithFlag(descriptor, to), change.after, context, true);
+  const observed = canonicalAppWrite(context.config, descriptorWithFlag(descriptor, admissionFlag(context.app)), context.app, context);
+  observed.properties.template.containers[0].env.MSR_INGESTION_ENABLED = from;
+  if (!isDeepStrictEqual(before, observed)) fail('TOGGLE_BEFORE_READBACK_MISMATCH');
+  before.properties.template.containers[0].env.MSR_INGESTION_ENABLED = to;
+  if (!isDeepStrictEqual(before, after)) fail('TOGGLE_UNREVIEWED_CHANGE');
+}
+export function syntheticTransitionHash(phase) {
+  if (!TOGGLE_PHASES.includes(phase.phase)) fail('FIXED_TOGGLE_PHASE_REQUIRED');
+  return digest(json({ phaseSha256: digest(json(phase)), transition: phase.transition }));
+}
+export function verifyWindowApproval(c, phase, window, approval, source, now) {
+  closed(approval, ['version', 'action', 'windowSha256', 'phaseSha256', 'configSha256', 'sourceSha256',
+    'originSha256', 'receiptsSha256', 'baselineSha256', 'reviewedWhatIfSha256', 'transitionSha256', 'approvedAt', 'expiresAt']);
+  const entry = window.phases?.[phase.phase];
+  if (approval.version !== 1 || approval.action !== `synthetic-window-${phase.phase}` ||
+      approval.windowSha256 !== digest(json(window)) || approval.phaseSha256 !== digest(json(phase)) ||
+      approval.configSha256 !== digest(json(c)) || approval.sourceSha256 !== source ||
+      approval.originSha256 !== window.originSha256 || approval.receiptsSha256 !== window.receiptsSha256 ||
+      approval.baselineSha256 !== window.baselineSha256 || approval.reviewedWhatIfSha256 !== entry?.reviewedWhatIfSha256 ||
+      approval.transitionSha256 !== syntheticTransitionHash(phase)) fail('EXACT_WINDOW_APPROVAL_REQUIRED');
+  approvalTimes(approval, now, 'WINDOW_APPROVAL_EXPIRED_OR_INVALID');
+}
+export function verifySyntheticWindow(c, phases, window, approvals, source, now, starting = false) {
+  closed(phases, TOGGLE_PHASES);
+  closed(window, ['version', 'kind', 'configSha256', 'sourceSha256', 'originSha256', 'receiptsSha256', 'baselineSha256', 'appIdentity',
+    'anchorApp', 'phases', 'limits', 'fixtures']);
+  if (window.version !== 1 || window.kind !== 'bounded-two-event-window' || window.configSha256 !== digest(json(c)) ||
+      window.sourceSha256 !== source || !isDeepStrictEqual(window.limits, SYNTHETIC_LIMITS) ||
+      !isDeepStrictEqual(window.fixtures, SYNTHETIC_FIXTURES) ||
+      !['originSha256', 'receiptsSha256', 'baselineSha256'].every(k => /^[0-9a-f]{64}$/u.test(window[k] ?? '')) ||
+      admissionFlag(window.anchorApp) !== 'false' || !isDeepStrictEqual(window.appIdentity, executionIdentity(window.anchorApp, 'Microsoft.App/containerApps'))) fail('SYNTHETIC_WINDOW_INVALID');
+  closed(window.phases, TOGGLE_PHASES);
+  closed(approvals, TOGGLE_PHASES);
+  for (const name of TOGGLE_PHASES) {
+    const phase = phases[name], entry = window.phases[name];
+    closed(entry, ['phaseSha256', 'transitionSha256', 'reviewedWhatIfSha256', 'reviewedWhatIf']);
+    if (entry.phaseSha256 !== digest(json(phase)) || entry.transitionSha256 !== syntheticTransitionHash(phase) ||
+        entry.reviewedWhatIfSha256 !== digest(json(entry.reviewedWhatIf)) ||
+        phase.transition.anchorAppSha256 !== digest(json(window.anchorApp))) fail('SYNTHETIC_WINDOW_INVALID');
+    verifyWindowApproval(c, phase, window, approvals[name], source, starting ? now : canonicalInstant(approvals[name].approvedAt));
+  }
+  if (starting && canonicalInstant(approvals['synthetic-disable'].expiresAt) < now + SYNTHETIC_LIMITS.enabledWindowMs + SYNTHETIC_LIMITS.rollbackReserveMs) fail('DISABLE_AUTHORITY_WINDOW_TOO_SHORT');
+}
+export function verifyWindowState(c, phases, window, approvals, journals, actual, context, source) {
+  verifySyntheticWindow(c, phases, window, approvals, source, Date.now());
+  const flag = admissionFlag(actual), enable = journals['synthetic-admission'], disable = journals['synthetic-disable'];
+  if (!isDeepStrictEqual(executionIdentity(actual, 'Microsoft.App/containerApps'), window.appIdentity)) fail('TOGGLE_APP_IDENTITY_CHANGED');
+  for (const name of TOGGLE_PHASES) {
+    const journal = journals[name];
+    if (journal && (journal.phase !== name || journal.windowSha256 !== digest(json(window)) ||
+        journal.phaseSha256 !== digest(json(phases[name])) || journal.approvalSha256 !== digest(json(approvals[name])))) fail('WINDOW_INTENT_BINDING_CHANGED');
+  }
+  if (flag === 'true') {
+    if (!enable || enable.windowSha256 !== digest(json(window)) || enable.phaseSha256 !== digest(json(phases['synthetic-admission'])) ||
+        enable.transportDispatchAttempted === false ||
+        !['submission-possible', 'readback-qualified', 'reconciliation-required'].includes(enable.outcome) ||
+        ['readback-qualified', 'readback-qualified-late-recovery', 'read-only-already-disabled'].includes(disable?.outcome)) fail('UNREVIEWED_ENABLED_APP_STATE');
+    verifyWindowApproval(c, phases['synthetic-admission'], window, approvals['synthetic-admission'], source, canonicalInstant(enable.intentAt));
+  }
+  const descriptor = descriptorWithFlag(phases['synthetic-disable'].resources[0], flag);
+  const current = canonicalAppWrite(c, descriptor, actual, context);
+  current.properties.template.containers[0].env.MSR_INGESTION_ENABLED = 'false';
+  const anchor = canonicalAppWrite(c, descriptorWithFlag(descriptor, 'false'), window.anchorApp, context);
+  if (!isDeepStrictEqual(current, anchor)) fail('TOGGLE_IMMUTABLE_APP_DRIFT');
+  return flag;
+}
+export function verifySyntheticRows(result, start, end) {
+  const from = canonicalInstant(start), until = canonicalInstant(end);
+  if (until < from || until - from > SYNTHETIC_LIMITS.enabledWindowMs) fail('SYNTHETIC_QUERY_WINDOW_INVALID');
+  const names = ['TimeGenerated', 'schemaVersion', 'event', 'operation', 'cliVersion', 'outcome', 'host', 'os', 'durationBucket'];
+  const types = ['datetime', 'long', 'string', 'string', 'string', 'string', 'string', 'string', 'string'];
+  if (!Array.isArray(result?.tables) || result.tables.length !== 1 || result.error ||
+      !isDeepStrictEqual(result.tables[0].columns?.map(v => v.name), names) ||
+      !isDeepStrictEqual(result.tables[0].columns?.map(v => v.type), types) || !Array.isArray(result.tables[0].rows)) fail('SYNTHETIC_QUERY_RESPONSE_INVALID');
+  const rows = result.tables[0].rows, seen = new Set();
+  if (rows.length > SYNTHETIC_FIXTURES.length) fail('SYNTHETIC_QUERY_AMBIGUOUS');
+  for (const row of rows) {
+    if (!Array.isArray(row) || row.length !== names.length || typeof row[0] !== 'string' || !Number.isFinite(Date.parse(row[0])) ||
+        Date.parse(row[0]) < from || Date.parse(row[0]) > until) fail('SYNTHETIC_QUERY_ROW_INVALID');
+    const event = Object.fromEntries(names.slice(1).map((name, i) => [name, row[i + 1]]));
+    const fixture = SYNTHETIC_FIXTURES.findIndex(v => isDeepStrictEqual(v, event));
+    if (fixture < 0 || seen.has(fixture)) fail('SYNTHETIC_QUERY_AMBIGUOUS');
+    seen.add(fixture);
+  }
+  return { complete: seen.size === SYNTHETIC_FIXTURES.length, matchingRows: rows.length,
+    attribution: 'Bounded time/value match, not a unique identity or human/model attribution.' };
 }
 export function verifyPublication(c, repositories, manifests, config) {
   if (!isDeepStrictEqual(repositories, ['missionspec/telemetry-ingest']) || manifests.length !== 1 ||

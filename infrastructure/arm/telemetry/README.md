@@ -21,3 +21,13 @@ parent review and repeats live reads before issuing new read-only receipts.
 Neither command deploys resources or rewrites original execution history.
 Assignment grants additionally require fresh scoped role-definition checks
 bound to the approval and repeated after request-body preparation.
+
+`prepare-window synthetic-admission` performs read-only preparation of paired
+enable/disable transitions. Separate exact approvals are required before
+`run-window synthetic-admission`; direct toggle `execute` is forbidden.
+The fixed `execute-disable synthetic-disable` recovery path never replays an
+uncertain submission. New-revision readiness and terminal disabled proof are
+required; no preparation operation sends HTTP fixtures or enables ingestion.
+Final HTTP/query dispatch guards run after the last awaited operation. One
+120-second submission-to-ready deadline and intent-anchored work/window/recovery
+deadlines distinguish safe late disable recovery from successful qualification.

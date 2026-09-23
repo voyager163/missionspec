@@ -220,7 +220,8 @@ last read, so concurrent role administration must remain controlled.
 | `upload-role` | Create a custom role definition with only `Microsoft.Insights/Telemetry/Write`, assignable only in the telemetry group. No subscription-wide assignment or management rights. |
 | `assignments` | After literal generated-ID readback, assign upload at the exact DCR, AcrPull at the exact registry, and Log Analytics Reader at the workspace for the explicit operator. No guessed future principal IDs. |
 | `disabled-app` | After separately authorized publication and inventory/config binding, create one disabled HTTPS receiver from the exact immutable digest. Preserve the qualified image command/user, 0.25 vCPU/0.5 GiB, warm min=max=1, fixed limits and explicit runtime/pull identities. |
-| `synthetic-admission` | A separate approval may change only `MSR_INGESTION_ENABLED` from false to true for controlled synthetic qualification. It does not activate any CLI endpoint/client collection. |
+| `synthetic-admission` | Only the paired, bounded window controller may change `MSR_INGESTION_ENABLED` from false to true. A separately reviewed valid disable release must already exist. No CLI endpoint/client activation. |
+| `synthetic-disable` | The fixed inverse changes only true to false under its own valid release. An already-false, latest-ready app can receive an explicitly read-only completion; this is not a deployment or permission to replay a previous submission. |
 
 Later phases cannot be prepared by pretending server-generated values are
 known. Their fixed templates are generated only after the relevant private
@@ -231,7 +232,7 @@ change can be modified; image, command, quota or role changes are not hidden
 inside that allowance.
 
 Deployment names keep the full 32-hex-character run ID and explicit unique
-two-letter phase codes (`pb`, `co`, `wa`, `da`, `ur`, `ra`, `di`, `sy` in table order).
+two-letter phase codes (`pb`, `co`, `wa`, `da`, `ur`, `ra`, `di`, `sy`, `sd` in table order).
 Every allowed prefix/phase fits ARM's 64-character limit; characters and length
 are checked locally. Nonmutating validate/what-if uses that exact execution
 name, not a separate shorter preview name.
@@ -241,6 +242,172 @@ config must remain nonroot `65532:65532` with
 `--no-turbofan --no-maglev --disable-sigusr1`. Its three native V8 uncertainties
 remain conditional disabled/synthetic-stage findings, not patched-CVE or blanket
 native clearance claims. The quarantined operator image is never used.
+
+### Paired synthetic window and fixed disable
+
+The completed disabled-state HTTP check is historical evidence, not reusable
+HTTP authority. Preparation and reconciliation never send receiver requests or
+query event rows. The following preparation is **read-only** and requires the
+current source's accepted reconciliation and real prerequisite receipts:
+
+```sh
+node infrastructure/arm/telemetry/controller.mjs prepare-window synthetic-admission infrastructure/arm/telemetry/.operator-private/revision-20260923-synthetic-deadlines
+```
+
+It writes two fixed templates/full ARM what-ifs, an immutable
+`synthetic-window-plan.json`, and the exact pre-window receipt snapshot.
+The disable template depends on the already-qualified app and real identities,
+not a fabricated future enable receipt. Both templates preserve the reviewed
+writable defaults (`exposedPort: 0`, cooldown 300, polling 30) and unique probe
+ordering to make the actual delta easier to review.
+
+Toggle what-if comparison validates **both full app configurations** before
+normalizing only the previously reviewed representations: exact `Http`/`http`,
+unique-type probe order, case-insensitive ARM IDs without collisions,
+credential-free optional registry strings, known empty optional collections,
+the specified KEDA/ingress defaults and read-only ephemeral storage. What-if's
+omitted generated UAMI client/principal IDs and FQDN are checked against
+independent real readbacks; raw evidence is not rewritten as a fabricated GET.
+The canonical before side must also match the current validated observation.
+The sole effective writable difference is the one admission flag. Unknown
+properties, altered images, environments, identities, credentials, volumes,
+ports, probes, limits or security contexts still fail. The region check retains
+the existing exact `australiaeast` / `Australia East` mapping used by provider
+qualification; no other region, arbitrary whitespace removal or generic
+location-name folding is accepted.
+
+There must be two separate parent-authored approvals:
+`synthetic-admission-approval.json` and `synthetic-disable-approval.json`. Their
+closed shape is `version: 1`, `action` (`synthetic-window-synthetic-admission` or
+`synthetic-window-synthetic-disable`), `windowSha256`, `phaseSha256`,
+`configSha256`, `sourceSha256`, `originSha256`, `receiptsSha256`, `baselineSha256`,
+`reviewedWhatIfSha256`, `transitionSha256`, `approvedAt`, and `expiresAt`.
+Both approvals bind the same immutable window, fixtures, request limits and
+pre-window receipt set. They retain the original full what-if in the window.
+The reviewed disable what-if can correctly be **NoChange while currently
+disabled**; it is not represented as a future true-state observation. Its
+explicit transition contract authorizes only true→false or read-only
+already-false completion. A fresh runtime what-if must still pass the full
+semantic gate; no raw-hash equality is falsely claimed for that future state.
+
+Only after both approvals and the parent source/native CodeQL gates may the
+operator use `run-window synthetic-admission`. Direct `execute` of either
+toggle is rejected. `execute-disable synthetic-disable` is the same fixed
+disable path for an interrupted window, not a force command. It loads the
+recorded window/approvals/intents and cannot invent new source authority.
+Enable is refused unless disable authority remains valid for at least the
+10-minute window plus a 3-minute recovery reserve. Every write rechecks its own
+expiry and five-minute preflight freshness after body preparation and the last
+awaited exact-app read, immediately before transport dispatch.
+
+Each phase records its intent before its sole possible PUT. Unknown enable
+submission is never retried: disable first waits, within a bounded read-only
+poll, for that specific deployment to settle. An absent/in-flight deployment
+after possible submission is unresolved—not proof that a currently false app
+will remain false. Once settled, an exactly owned true app can be disabled only
+under the independent, unexpired disable release. If it is already false,
+readiness/identity/privacy verification can produce a **read-only**
+`read-only-already-disabled` journal even after expiry; no expired grant
+authorizes a PUT. Existing intent journals are never reset or resubmitted.
+
+The original disabled-app receipt always remains false historically. During an
+authorized window, only the matching source/window/enable-approval/intent can
+explain a live true flag. Full immutable app configuration and identity still
+match the original anchor. A later terminal disable forbids adopting a new true
+flag. This transition-aware preflight avoids treating legitimate rollback as
+unowned drift while preserving the original history.
+
+### Readiness, bounded requests and failure outcomes
+
+`Succeeded` alone is insufficient. Each mutating toggle has **one absolute
+120-second rollout deadline starting at its recorded submission intent**. It
+includes body preparation, PUT/submission, deployment settling, latest-ready
+observation and privacy checks; deployment polling does not start a second
+readiness budget. At most 40 combined deployment/readiness polls at 3-second
+intervals require:
+
+- `latestReadyRevisionName === latestRevisionName`;
+- exactly one active latest revision, 100% traffic, one replica, `Provisioned`
+  and `Healthy`, with the exact wanted template and admission flag;
+- unchanged identity/image/runtime/privacy policy and empty diagnostic/export
+  routes.
+
+An old healthy revision, a not-yet-ready revision or a different template never
+permits test POSTs. Backend readiness remains distinct from storage proof.
+The immutable revision GET returns the unset revision suffix and KEDA defaults
+as null even when the live app returns the reviewed values. Only those three
+null optional fields are treated as absent in the revision-template comparison,
+after the independent live-app check; changed numeric defaults still fail.
+A response received after the absolute deadline cannot qualify, even if it
+reports a healthy revision. The possible-submission journal is retained.
+
+The deterministic driver preserves the reviewed ceilings: **11 receiver HTTP
+requests**, at most **8 health GETs**, **2 enabled event POSTs**, **1 final
+disabled POST**, and **3 owned-table read queries**. TLS verification is required,
+redirects are not followed, response bodies are capped at 1 KiB, and each HTTP
+request has an unchanged **1,000 ms total wall timeout**. The server limits remain
+150/150/650 ms and 128/32/8 work bounds, 3,000 requests/minute and 100,000 events/day.
+There are no event POST retries, including on ambiguous timeouts.
+Every request/query first reserves its durable intent and count. Cancellation,
+source and absolute admission deadlines are checked synchronously again after
+the final awaited persistence/source operation and immediately before transport.
+Query IO repeats that check **after** the independent workspace GET and source
+read, before the query request itself. Refused dispatches retain their reserved
+attempt; they are neither refunded nor retried. Returned results are also checked
+before they can establish success. Terminal-disabled health/503 checks and
+disable recovery ignore synthetic cancellation, but retain their own remaining
+deadline, exact scope/source and request-count bounds.
+
+The two content-free fixtures use `cliVersion: 0.0.0`, `host: none`, `os: linux`,
+`outcome: completed`; they differ only in operation/duration labels
+(`draft`/`under-1s` and `verify`/`1s-to-10s`). These are synthetic labels, not
+observed user activity. Each accepted response must be empty/no-store 204. The
+fixed query projects exactly the nine intended columns, within a finite
+absolute time window, and takes at most three rows. It rejects extra/duplicate
+rows, changed values/types and out-of-window timestamps; it never uploads using
+operator credentials, exports data or crosses workspaces. Time/value matching
+is not a unique event identifier and cannot prove causation in indistinguishable
+concurrent traffic.
+
+Three absolute boundaries derive from the **same enable intent**: synthetic
+work stops at 7 minutes (or enable-authority expiry, if earlier); the enabled
+window objective expires at 10 minutes; permitted late recovery ends at the
+earlier of the disable approval's expiry and enable intent + 13 minutes.
+None is restarted by a workspace read, deployment response, query, preflight or
+new polling stage. All IO receives the remaining deadline; 15/30-second call
+caps can only shorten it. Enable's pre-submission preparation is independently
+bounded before there is an enable intent.
+
+The driver refuses waits and final dispatches that consume the 3-minute disable
+reserve. A disable that no longer has a full rollout allowance before the
+objective is explicitly marked as recovery work. At window expiry, an owned
+local timer records `synthetic-window-expiry.json` immediately (or at the first
+observable opportunity if the process cannot run), instead of discovering it
+only after cleanup finishes. Timer/incident state is tied to the original
+intent/window hash and is not reset by later reads.
+
+Failures and catchable cancellation trigger only the preauthorized disable
+attempt. Crossing the work or window boundary does **not** waive disable scope
+or stop an otherwise permitted safe disable within its fixed recovery bound.
+A late disable readback is marked `lateRecovery`, the window reports
+`stopped-disabled-late-recovery`, and the expiry/reserve incident remains;
+it cannot become `qualified-and-disabled`. An expired write grant or exhausted
+recovery bound cannot authorize a new PUT. A separately bounded already-false
+read-only completion remains distinguishable from any write.
+
+Successful in-window completion requires actual terminal false, latest
+readiness, empty/no-store 204 health and one empty/no-store disabled 503.
+An unavailable/expired disable grant, ownership drift, unresolved deployment,
+provider delay or process/host loss can prevent that proof: the result is a
+**hold**, not a manufactured safe state. Exceeding the 10-minute objective is a
+failure even if recovery later succeeds. The one rollout deadline is never
+renewed for late recovery, and an unknown PUT is never replayed. Azure does not provide an atomic
+server-side expiry/rollback guarantee; retained intents and locks require
+explicit operator reconciliation after process death.
+
+Runtime counters reset, inherited operator privileges are not receiver identity
+proof, and neither counters nor synthetic rows establish human/model activity,
+retention enforcement over 180 days, production readiness or client activation.
 
 ## Privacy and readback
 

@@ -3,8 +3,19 @@ import { readFile } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
 
 const PHASE_CODES = Object.freeze({ 'project-budget': 'pb', core: 'co', 'workspace-access': 'wa', data: 'da', 'upload-role': 'ur',
-  assignments: 'ra', 'disabled-app': 'di', 'synthetic-admission': 'sy' });
+  assignments: 'ra', 'disabled-app': 'di', 'synthetic-admission': 'sy', 'synthetic-disable': 'sd' });
 export const PHASES = Object.freeze(Object.keys(PHASE_CODES));
+export const TOGGLE_PHASES = Object.freeze(['synthetic-admission', 'synthetic-disable']);
+export const SYNTHETIC_LIMITS = Object.freeze({ enabledWindowMs: 600000, rollbackReserveMs: 180000,
+  rolloutTimeoutMs: 120000, rolloutPollMs: 3000, maxRolloutPolls: 40, httpTimeoutMs: 1000,
+  maximumHttpRequests: 11, maximumHealthGets: 8, maximumEnabledPosts: 2, maximumDisabledPosts: 1,
+  maximumQueries: 3 });
+export const SYNTHETIC_FIXTURES = Object.freeze([
+  Object.freeze({ schemaVersion: 1, event: 'operation-completed', operation: 'draft', cliVersion: '0.0.0',
+    outcome: 'completed', host: 'none', os: 'linux', durationBucket: 'under-1s' }),
+  Object.freeze({ schemaVersion: 1, event: 'operation-completed', operation: 'verify', cliVersion: '0.0.0',
+    outcome: 'completed', host: 'none', os: 'linux', durationBucket: '1s-to-10s' }),
+]);
 export const BUDGET = Object.freeze({ currency: 'USD', previousProjectAmount: 250, projectAmount: 350, stateAmount: 50, telemetryAmount: 300 });
 export const RECEIVER_DIGEST = 'sha256:91c72962bdb2586e179e46659ab2140a5e88e0bb6905d0aa6a89225047ac9f8a';
 export const RECEIVER_COMMAND = ['/usr/local/bin/node', '--no-turbofan', '--no-maglev', '--disable-sigusr1', 'dist/main.js'];
@@ -264,9 +275,14 @@ export function buildPhase(c, phase, contract, receipts = {}, foundation, source
     ];
   }
   if (phase === 'disabled-app') resources = [appResource(c, receipts, false)];
-  if (phase === 'synthetic-admission') {
-    if (!receipts['disabled-app']?.qualified || receipts['disabled-app'].configSha256 !== digest(json(c))) fail('DISABLED_APP_NOT_QUALIFIED');
-    resources = [appResource(c, receipts, true)];
+  if (TOGGLE_PHASES.includes(phase)) {
+    if (!receipts['disabled-app']?.qualified || receipts['disabled-app'].configSha256 !== digest(json(c)) ||
+        !receipts['disabled-app'].resources?.[r.app]) fail('DISABLED_APP_NOT_QUALIFIED');
+    resources = [appResource(c, receipts, phase === 'synthetic-admission')];
+    resources[0].properties.configuration.ingress.exposedPort = 0;
+    resources[0].properties.template.scale.cooldownPeriod = 300;
+    resources[0].properties.template.scale.pollingInterval = 30;
+    resources[0].properties.template.containers[0].probes.sort((a, b) => a.type.localeCompare(b.type));
   }
   const descriptors = resources.map(value => {
     const parts = value.type.split('/'), names = value.name.split('/');
@@ -277,11 +293,17 @@ export function buildPhase(c, phase, contract, receipts = {}, foundation, source
     deploymentId: `${scope}/providers/Microsoft.Resources/deployments/${deploymentName(c, phase)}`,
     template: template(resources, scope === r.sub), resources: descriptors,
     ...(sourceLineage?.proposal ? { reconciliation: reconciliationBinding(sourceLineage) } : {}),
+    ...(TOGGLE_PHASES.includes(phase) ? { transition: {
+      version: 1, anchorAppSha256: digest(json(receipts['disabled-app'].resources[r.app])),
+      from: phase === 'synthetic-admission' ? ['false'] : ['true', 'false'],
+      to: phase === 'synthetic-admission' ? 'true' : 'false',
+      maximumWrites: 1, limits: SYNTHETIC_LIMITS,
+    } } : {}),
     requiredReceipts: phase === 'project-budget' ? [] : ['project-budget'],
     ...(phase === 'project-budget' ? { budgetBefore: budgetConfiguration(foundation.project) } : {}),
     allowedModify: phase === 'project-budget' ? { [r.projectBudget]: ['properties.amount'] }
       : phase === 'workspace-access' ? { [r.workspace]: ['properties.features.disableLocalAuth', 'properties.features.enableLogAccessUsingOnlyResourcePermissions'] }
-      : phase === 'synthetic-admission' ? { [r.app]: ['properties.template.containers'] } : {},
+      : TOGGLE_PHASES.includes(phase) ? { [r.app]: ['properties.template.containers'] } : {},
     computedReadbacksRequired: phase === 'core' ? ['UAMI client/principal IDs', 'workspace customerId/access flags', 'default-network environment identity/privacy settings']
       : phase === 'data' ? ['same DCR immutable ID and ingestion endpoint'] : [],
     publicationAuthorized: false, cliActivationAuthorized: false, ingestEnabled: phase === 'synthetic-admission' };

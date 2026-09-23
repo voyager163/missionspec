@@ -1,15 +1,19 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
+import https from 'node:https';
 import { constants } from 'node:fs';
 import { readFile, open, mkdir, rename, rm } from 'node:fs/promises';
 import { basename, dirname, resolve, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual, types } from 'node:util';
 import { PHASES, buildPhase, deploymentName, validateConfig, ids, digest, json, fail, sameId, storageContract, firstReleaseCost, assertOwned, RECEIVER_COMMAND,
-  closed, budgetConfiguration, projectBudgetFilter, verifyFoundationBudgets, reconciliationBinding, assignmentRoleTargets } from './definition.mjs';
+  closed, budgetConfiguration, projectBudgetFilter, verifyFoundationBudgets, reconciliationBinding, assignmentRoleTargets,
+  TOGGLE_PHASES, SYNTHETIC_LIMITS, SYNTHETIC_FIXTURES, requireAccess } from './definition.mjs';
 import { assertBudget, verifyWhatIf, verifyResource, verifyApproval, verifyFreshReview, sourceContractsSummary, permitFirstPush,
-  executionIdentity, verifyExecutionOrigins, verifyReconciliation, verifyDeploymentIdentity, roleDefinitionSignature, verifyPublicationReadback } from './policy.mjs';
+  executionIdentity, verifyExecutionOrigins, verifyReconciliation, verifyDeploymentIdentity, roleDefinitionSignature, verifyPublicationReadback,
+  resourceContext, admissionFlag, descriptorWithFlag, canonicalAppWrite, syntheticTransitionHash, verifySyntheticWindow,
+  verifyWindowApproval, verifyWindowState, canonicalInstant, verifySyntheticRows } from './policy.mjs';
 
 const execute = promisify(execFile), here = dirname(fileURLToPath(import.meta.url));
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -178,7 +182,7 @@ export function transport(c, phase, directory, invoke = az) {
   const r = ids(c);
   const forbiddenOperations = new Set(['listkeys', 'listsecrets', 'listaccountsas', 'listservicesas', 'regeneratekey', 'register']);
   const diagnosticTargets = [r.workspace, r.environment, r.app].map(id => id + '/providers/Microsoft.Insights/diagnosticSettings');
-  return async (method, id, version, body, filter, beforeDispatch, beforeAssignmentWrite) => {
+  return async (method, id, version, body, filter, beforeDispatch, beforeAssignmentWrite, beforeToggleWrite) => {
     const diagnosticRead = diagnosticTargets.includes(id) && method === 'GET' && version === DIAGNOSTIC_API && body === undefined && filter === undefined;
     if (!['GET', 'POST', 'PUT'].includes(method) || (id !== r.sub && !id.startsWith(`${r.sub}/`)) ||
         /[?#\\]|\.\.|%/u.test(id) || (!/^\d{4}-\d{2}-\d{2}$/u.test(version) && !diagnosticRead) ||
@@ -188,6 +192,8 @@ export function transport(c, phase, directory, invoke = az) {
     if (method === 'PUT' && (typeof beforeDispatch !== 'function' || types.isAsyncFunction(beforeDispatch))) fail('DISPATCH_GUARD_REQUIRED');
     if (method === 'PUT' && phase.phase === 'assignments' && typeof beforeAssignmentWrite !== 'function') fail('ASSIGNMENT_ROLE_READBACK_REQUIRED');
     if (beforeAssignmentWrite !== undefined && (method !== 'PUT' || phase.phase !== 'assignments')) fail('ASSIGNMENT_ROLE_READBACK_ONLY');
+    if (method === 'PUT' && TOGGLE_PHASES.includes(phase.phase) && typeof beforeToggleWrite !== 'function') fail('PAIRED_TOGGLE_GUARD_REQUIRED');
+    if (beforeToggleWrite !== undefined && (method !== 'PUT' || !TOGGLE_PHASES.includes(phase.phase))) fail('FIXED_TOGGLE_WRITE_ONLY');
     if (method === 'POST' && id !== `${r.sub}/providers/Microsoft.ContainerRegistry/checkNameAvailability`) fail('NONMUTATING_POST_ONLY');
     const inventoryMetadata = method === 'GET' && id === `${r.group}/resources` && version === '2021-04-01' &&
       body === undefined && filter === '$expand=createdTime,changedTime';
@@ -204,6 +210,7 @@ export function transport(c, phase, directory, invoke = az) {
         if (beforeDispatch() !== undefined) fail('DISPATCH_GUARD_REQUIRED');
         await beforeAssignmentWrite();
       }
+      if (method === 'PUT' && TOGGLE_PHASES.includes(phase.phase)) await beforeToggleWrite();
       // No await between the guard and transport invocation, including body-file preparation.
       if (method === 'PUT' && beforeDispatch() !== undefined) fail('DISPATCH_GUARD_REQUIRED');
       const result = await invoke(args);
@@ -332,7 +339,13 @@ async function readReconciledPhase(c, record, arm, context = {}) {
   verifyDeploymentIdentity(record.firstReadback.deployment, deployment);
   for (const descriptor of phase.resources) {
     const actual = await arm('GET', descriptor.id, descriptor.apiVersion);
-    verifyResource(c, phase, descriptor, actual, context);
+    let expected = descriptor;
+    if (descriptor.type === 'Microsoft.App/containerApps' && context.transition) {
+      const { phases, window, approvals, journals, source } = context.transition;
+      const flag = verifyWindowState(c, phases, window, approvals, journals, actual, context, source);
+      expected = descriptorWithFlag(descriptor, flag);
+    }
+    if (!(descriptor.type === 'Microsoft.App/containerApps' && context.transition)) verifyResource(c, phase, expected, actual, context);
     const pin = executionIdentity(actual, descriptor.type);
     if (!isDeepStrictEqual(pin, executionIdentity(record.firstReadback.resources[descriptor.id], descriptor.type))) fail('RESOURCE_IDENTITY_CHANGED');
     resources[descriptor.id] = actual; identityPins[descriptor.id] = pin;
@@ -413,11 +426,11 @@ export async function reviewedReconciliationReceipts(c, foundation, evidence, so
         originalJournalOutcome: record.journal.outcome, originalReceiptQualified: record.originalReceipt?.qualified === true } }];
   }));
 }
-export async function verifyFreshReconciliation(c, directory, evidence, invoke = az) {
+export async function verifyFreshReconciliation(c, directory, evidence, invoke = az, transition) {
   const arm = transport(c, evidence.origins.records[0].phase, directory, invoke);
   const context = await reconciliationContext(c, evidence.origins, arm, invoke);
   for (const record of evidence.origins.records) {
-    const current = await readReconciledPhase(c, record, arm, { ...context, publication: evidence.origins.imagePublication?.receipt });
+    const current = await readReconciledPhase(c, record, arm, { ...context, publication: evidence.origins.imagePublication?.receipt, transition });
     if (!isDeepStrictEqual(current.identityPins, evidence.proposal.results[record.phase.phase].identityPins)) fail('RESOURCE_IDENTITY_CHANGED');
   }
   assertBudget(await arm('GET', ids(c).stateBudget, '2024-08-01'), c, 50);
@@ -438,7 +451,7 @@ export function verifyProjectBudgetReceipt(c, receipt, foundation, sourceSha256,
   verifyResource(c, phase, phase.resources[0], receipt.resources[r.projectBudget]);
   if (receipt.sourceSha256 !== sourceSha256 && !isDeepStrictEqual(receipt, reconciled['project-budget'])) fail('RECONCILIATION_REVIEW_REQUIRED');
 }
-export async function validateReadOnly(c, phase, receipts, directory, invoke = az) {
+export async function validateReadOnly(c, phase, receipts, directory, invoke = az, currentApp) {
   const r = ids(c), known = Object.values(receipts).flatMap(v => Object.keys(v.resources ?? {}));
   const executionName = deploymentName(c, phase.phase);
   if (phase.deploymentId !== `${phase.scope}/providers/Microsoft.Resources/deployments/${executionName}`) fail('DEPLOYMENT_NAME_INVALID');
@@ -451,13 +464,16 @@ export async function validateReadOnly(c, phase, receipts, directory, invoke = a
   if (validation?.properties?.provisioningState !== 'Succeeded' || validation.error) fail('TEMPLATE_NOT_VALIDATED');
   const whatif = await invoke(['deployment', level, 'what-if', ...args, '--no-pretty-print', '--result-format', 'FullResourcePayloads'], 180000);
   await save(directory, `${phase.phase}-what-if.json`, whatif);
-  return { whatIfSha256: verifyWhatIf(phase, whatif, known), templateValidationOnly: true };
+  const context = TOGGLE_PHASES.includes(phase.phase) ? { config: c, ...resourceContext(c, receipts),
+    app: currentApp ?? receipts['disabled-app']?.resources?.[r.app] } : undefined;
+  return { whatIfSha256: verifyWhatIf(phase, whatif, known, context), templateValidationOnly: true };
 }
-export async function checkReadOnly(c, phase, origin, receipts, directory, evidenceFiles, invoke = az, lookup = publishedSourceDigest) {
+export async function checkReadOnly(c, phase, origin, receipts, directory, evidenceFiles, invoke = az, lookup = publishedSourceDigest, transition) {
   const started = Date.now(), arm = transport(c, phase, directory, invoke), r = ids(c);
   const foundation = verifyFoundationBudgets(c, evidenceFiles.foundationBudgets);
   if (evidenceFiles.reconciliation?.origins?.records.some(v => v.phase.phase === phase.phase)) fail('COMPLETED_PHASE_REQUIRES_RECONCILIATION');
   const source = await sourceDigest();
+  if (transition && (!TOGGLE_PHASES.includes(phase.phase) || transition.source !== source)) fail('CURRENT_WINDOW_SOURCE_REQUIRED');
   let reconciled = {};
   if (evidenceFiles.reconciliation?.origins) {
     reconciled = await reviewedReconciliationReceipts(c, foundation, evidenceFiles.reconciliation, source, lookup);
@@ -467,7 +483,7 @@ export async function checkReadOnly(c, phase, origin, receipts, directory, evide
   const account = await invoke(['account', 'show', '--subscription', c.subscriptionId, '--only-show-errors', '--output', 'json']);
   if (account?.id !== c.subscriptionId || account?.tenantId !== c.tenantId || account?.state !== 'Enabled' || account?.environmentName !== 'AzureCloud') fail('EXPLICIT_ACCOUNT_MISMATCH');
   await verifyOrigin(origin, arm, c, evidenceFiles.scannerAdoption);
-  if (evidenceFiles.reconciliation?.origins) await verifyFreshReconciliation(c, directory, evidenceFiles.reconciliation, invoke);
+  if (evidenceFiles.reconciliation?.origins) await verifyFreshReconciliation(c, directory, evidenceFiles.reconciliation, invoke, transition);
   if (phase.phase !== 'project-budget') {
     verifyProjectBudgetReceipt(c, receipts['project-budget'], foundation, source, reconciled);
   }
@@ -504,12 +520,24 @@ export async function checkReadOnly(c, phase, origin, receipts, directory, evide
       { name: c.registryName, type: 'Microsoft.ContainerRegistry/registries' });
     if (name?.nameAvailable !== true) fail('REGISTRY_NAME_UNAVAILABLE');
   }
+  let currentApp;
   for (const descriptor of phase.resources) {
     const actual = await arm('GET', descriptor.id, descriptor.apiVersion);
     if (Object.keys(phase.allowedModify).some(id => sameId(id, descriptor.id))) {
       if (!actual) fail('OWNED_UPDATE_TARGET_MISSING');
       const historical = phase.phase === 'project-budget' ? foundation.project
         : Object.values(receipts).map(v => v.resources?.[descriptor.id]).filter(Boolean).at(-1);
+      if (TOGGLE_PHASES.includes(phase.phase)) {
+        const context = resourceContext(c, receipts), flag = admissionFlag(actual);
+        if (!historical || !phase.transition.from.includes(flag)) fail('TOGGLE_CURRENT_STATE_INVALID');
+        if (transition) verifyWindowState(c, transition.phases, transition.window, transition.approvals, transition.journals, actual, context, source);
+        else if (flag !== 'false') fail('UNREVIEWED_ENABLED_APP_STATE');
+        const current = canonicalAppWrite(c, descriptorWithFlag(descriptor, flag), actual, context);
+        current.properties.template.containers[0].env.MSR_INGESTION_ENABLED = 'false';
+        if (!isDeepStrictEqual(current, canonicalAppWrite(c, descriptorWithFlag(descriptor, 'false'),
+          receipts['disabled-app'].resources[r.app], context))) fail('TOGGLE_IMMUTABLE_APP_DRIFT');
+        currentApp = actual; continue;
+      }
       const normalize = phase.phase === 'project-budget' ? budgetConfiguration : stableReadback;
       if (!historical || !sameId(actual.id, descriptor.id) || !isDeepStrictEqual(normalize(actual), normalize(historical))) fail('OWNED_TARGET_DRIFT');
     } else if (actual) fail('NEW_RESOURCE_NAME_EXISTS');
@@ -523,13 +551,15 @@ export async function checkReadOnly(c, phase, origin, receipts, directory, evide
     roleDefinitionsSha256 = digest(json(definitions.roles));
     await save(directory, 'assignments-role-definitions.json', { checkedAt: new Date().toISOString(), ...definitions, roleDefinitionsSha256 });
   }
-  const { whatIfSha256 } = await validateReadOnly(c, phase, receipts, directory, invoke);
+  const { whatIfSha256 } = await validateReadOnly(c, phase, receipts, directory, invoke, currentApp);
   const cost = firstReleaseCost(1);
   const proof = { startedAt: started, completedAt: Date.now(), qualified: cost.withinEstimate, configSha256: digest(json(c)),
     phaseSha256: digest(json(phase)), sourceSha256: await sourceDigest(), originSha256: digest(json(origin)),
     receiptsSha256: digest(json(receipts)),
     baselineSha256: roleDefinitionsSha256 ? digest(json({ foundationBaselineSha256: baseline, roleDefinitionsSha256 })) : baseline, whatIfSha256,
     ...(roleDefinitionsSha256 ? { foundationBaselineSha256: baseline, roleDefinitionsSha256 } : {}),
+    ...(currentApp ? { transitionSha256: syntheticTransitionHash(phase), observedFlag: admissionFlag(currentApp),
+      appObservationSha256: digest(json(currentApp)) } : {}),
     cost, computedValuesReviewed: phase.computedReadbacksRequired.length === 0 };
   await save(directory, `${phase.phase}-preflight.json`, proof);
   if (!cost.withinEstimate) fail('FIRST_RELEASE_COST_EXCEEDS_ESTIMATE');
@@ -540,6 +570,7 @@ export class CollectorController {
   constructor(c, phase, io) { this.config = c; this.phase = phase; this.io = io; }
   async execute(approval) {
     const p = this.phase;
+    if (TOGGLE_PHASES.includes(p.phase)) fail('PAIRED_SYNTHETIC_WINDOW_REQUIRED');
     verifyApproval(approval, this.config, p, await this.io.sourceDigest(), this.io.now());
     if (await this.io.loadJournal()) fail('EXISTING_PHASE_INTENT_REQUIRES_RECONCILIATION');
     const checkStartedAt = this.io.now();
@@ -592,10 +623,531 @@ export class CollectorController {
     }
   }
 }
+function checkWindowProof(c, phase, window, proof, started, now) {
+  if (proof?.qualified !== true || proof.configSha256 !== digest(json(c)) || proof.phaseSha256 !== digest(json(phase)) ||
+      proof.sourceSha256 !== window.sourceSha256 || proof.originSha256 !== window.originSha256 ||
+      proof.receiptsSha256 !== window.receiptsSha256 || proof.baselineSha256 !== window.baselineSha256 ||
+      proof.transitionSha256 !== syntheticTransitionHash(phase) || !phase.transition.from.includes(proof.observedFlag) ||
+      !/^[0-9a-f]{64}$/u.test(proof.whatIfSha256 ?? '') ||
+      proof.cost?.withinEstimate !== true || proof.cost.estimateLimit !== 350 || !Number.isFinite(proof.cost.total) || proof.cost.total < 0 || proof.cost.total > 350 ||
+      !Number.isSafeInteger(started) || !Number.isSafeInteger(now) ||
+      !Number.isSafeInteger(proof.startedAt) || !Number.isSafeInteger(proof.completedAt) || proof.startedAt < started ||
+      proof.completedAt < proof.startedAt || proof.completedAt > now || now - proof.startedAt > 300000) fail('FRESH_WINDOW_REVIEW_MISMATCH');
+}
+export function latestRevisionReady(c, phase, window, observation) {
+  const { app, revisions, context } = observation, descriptor = phase.resources[0], r = ids(c);
+  const flag = admissionFlag(app);
+  const canonical = canonicalAppWrite(c, descriptorWithFlag(descriptor, flag), app, context);
+  canonical.properties.template.containers[0].env.MSR_INGESTION_ENABLED = 'false';
+  if (!isDeepStrictEqual(canonical, canonicalAppWrite(c, descriptorWithFlag(descriptor, 'false'), window.anchorApp, context))) fail('ROLLOUT_IMMUTABLE_APP_DRIFT');
+  if (!Array.isArray(revisions?.value) || revisions.nextLink) fail('REVISION_READBACK_INCOMPLETE');
+  if (flag !== phase.transition.to || app.properties.provisioningState !== 'Succeeded' || app.properties.runningStatus !== 'Running') return false;
+  const name = app.properties.latestRevisionName;
+  if (typeof name !== 'string' || !/^[a-z0-9-]+$/u.test(name) || name !== app.properties.latestReadyRevisionName) return false;
+  const active = revisions.value.filter(v => v.properties?.active === true);
+  if (active.length !== 1 || active[0].name !== name || !sameId(active[0].id, `${r.app}/revisions/${name}`)) return false;
+  const p = active[0].properties;
+  if (p.provisioningState === 'Failed' || p.healthState === 'Unhealthy') fail('LATEST_REVISION_UNHEALTHY');
+  if (p.provisioningState !== 'Provisioned' || p.healthState !== 'Healthy' ||
+      !['Running', 'RunningAtMaxScale'].includes(p.runningState) || p.replicas !== 1 || p.trafficWeight !== 100) return false;
+  const replicaApp = structuredClone(app);
+  // The immutable revision GET omits these optional defaults as null; the live app was checked above.
+  replicaApp.properties.template = structuredClone(p.template);
+  if (replicaApp.properties.template.revisionSuffix === null) delete replicaApp.properties.template.revisionSuffix;
+  for (const key of ['cooldownPeriod', 'pollingInterval']) {
+    if (replicaApp.properties.template.scale?.[key] === null) delete replicaApp.properties.template.scale[key];
+  }
+  if (!isDeepStrictEqual(canonicalAppWrite(c, descriptorWithFlag(descriptor, phase.transition.to), replicaApp, context),
+    canonicalAppWrite(c, descriptorWithFlag(descriptor, phase.transition.to), app, context))) fail('LATEST_REVISION_TEMPLATE_DRIFT');
+  return true;
+}
+export async function syntheticHttp(host, method, path, event, beforeDispatch, deadline = Date.now() + SYNTHETIC_LIMITS.httpTimeoutMs) {
+  if (typeof host !== 'string' || !/^[a-z0-9.-]+\.azurecontainerapps\.io$/u.test(host) ||
+      !((method === 'GET' && ['/health/live', '/health/ready'].includes(path) && event === undefined) ||
+        (method === 'POST' && path === '/v1/events' && SYNTHETIC_FIXTURES.some(v => isDeepStrictEqual(v, event))))) fail('FIXED_SYNTHETIC_REQUEST_REQUIRED');
+  if (typeof beforeDispatch !== 'function' || types.isAsyncFunction(beforeDispatch) || !Number.isSafeInteger(deadline)) fail('SYNTHETIC_DISPATCH_GUARD_REQUIRED');
+  const body = event === undefined ? undefined : Buffer.from(JSON.stringify(event));
+  if (body && body.length > 1024) fail('SYNTHETIC_BODY_BOUND');
+  const started = performance.now();
+  return new Promise(resolve => {
+    let timer, done = false, size = 0, tlsVerified = false;
+    const finish = result => {
+      if (done) return; done = true; clearTimeout(timer);
+      resolve({ ...result, bodyBytes: size, tlsVerified, durationMs: performance.now() - started });
+    };
+    if (beforeDispatch() !== undefined) fail('SYNTHETIC_DISPATCH_GUARD_REQUIRED');
+    const remaining = Math.min(SYNTHETIC_LIMITS.httpTimeoutMs, deadline - Date.now());
+    if (remaining <= 0) fail('SYNTHETIC_REQUEST_DEADLINE');
+    const request = https.request({ protocol: 'https:', hostname: host, servername: host, port: 443, method, path,
+      agent: false, rejectUnauthorized: true, maxHeaderSize: 8192,
+      headers: { Connection: 'close', ...(body ? { 'Content-Type': 'application/json', 'Content-Length': String(body.length) } : {}) } }, response => {
+      const safeHeaders = Object.fromEntries(['cache-control', 'content-length', 'content-type', 'connection']
+        .filter(k => response.headers[k] !== undefined).map(k => [k, response.headers[k]]));
+      response.on('data', chunk => {
+        size += chunk.length;
+        if (size > 1024) { finish({ status: response.statusCode, safeHeaders, errorCode: 'BODY_LIMIT' }); response.destroy(); request.destroy(); }
+      });
+      response.once('end', () => finish({ status: response.statusCode, safeHeaders, errorCode: null }));
+      response.once('error', () => finish({ status: response.statusCode, safeHeaders, errorCode: 'RESPONSE_ERROR' }));
+    });
+    request.once('socket', socket => socket.once('secureConnect', () => { tlsVerified = socket.authorized === true; }));
+    request.once('error', () => finish({ status: null, errorCode: 'HTTPS_REQUEST_FAILED' }));
+    timer = setTimeout(() => { finish({ status: null, errorCode: 'TOTAL_TIMEOUT_1000MS' }); request.destroy(); }, remaining);
+    request.end(body);
+  });
+}
+export function syntheticQuery(start, end) {
+  if (canonicalInstant(end) < canonicalInstant(start) || canonicalInstant(end) - canonicalInstant(start) > SYNTHETIC_LIMITS.enabledWindowMs) fail('SYNTHETIC_QUERY_WINDOW_INVALID');
+  return ['MissionSpecTelemetry_CL',
+    `| where TimeGenerated between (datetime(${start}) .. datetime(${end}))`,
+    '| where schemaVersion == 1 and event == "operation-completed" and cliVersion == "0.0.0" and outcome == "completed" and host == "none" and os == "linux"',
+    '| where (operation == "draft" and durationBucket == "under-1s") or (operation == "verify" and durationBucket == "1s-to-10s")',
+    '| project TimeGenerated, schemaVersion, event, operation, cliVersion, outcome, host, os, durationBucket',
+    '| take 3'].join('\n');
+}
+export class SyntheticDeadlines {
+  constructor(window, approvals, io) {
+    Object.assign(this, { window, approvals, io, enabledAt: null, terminalFalseAt: null, incident: null,
+      incidentPersistenceFailure: false, pendingIncident: Promise.resolve(), timer: null, reserveExhaustedAt: null });
+  }
+  bind(journal) {
+    if (!journal) return;
+    const enabledAt = canonicalInstant(journal.intentAt);
+    if (journal.phase !== 'synthetic-admission' || journal.windowSha256 !== digest(json(this.window)) ||
+        journal.phaseSha256 !== this.window.phases['synthetic-admission'].phaseSha256 ||
+        journal.approvalSha256 !== digest(json(this.approvals['synthetic-admission'])) ||
+        (this.enabledAt !== null && this.enabledAt !== enabledAt)) fail('WINDOW_INTENT_BINDING_CHANGED');
+    if (this.enabledAt === null) {
+      this.enabledAt = enabledAt;
+      const delay = this.windowDeadline - this.io.now();
+      if (delay > 0) {
+        this.timer = (this.io.setTimer ?? setTimeout)(() => this.observe(), delay);
+        this.timer?.unref?.();
+      }
+    }
+    this.observe();
+  }
+  get workDeadline() { return this.enabledAt === null ? null : this.enabledAt + SYNTHETIC_LIMITS.enabledWindowMs - SYNTHETIC_LIMITS.rollbackReserveMs; }
+  get windowDeadline() { return this.enabledAt === null ? null : this.enabledAt + SYNTHETIC_LIMITS.enabledWindowMs; }
+  get recoveryDeadline() {
+    return this.enabledAt === null ? null : Math.min(canonicalInstant(this.approvals['synthetic-disable'].expiresAt),
+      this.windowDeadline + SYNTHETIC_LIMITS.rollbackReserveMs);
+  }
+  observe() {
+    if (this.enabledAt !== null && this.terminalFalseAt === null && this.io.now() >= this.windowDeadline && !this.incident) {
+      this.incident = { version: 1, code: 'ENABLED_WINDOW_EXCEEDED', windowSha256: digest(json(this.window)),
+        enableIntentAt: new Date(this.enabledAt).toISOString(), deadlineAt: new Date(this.windowDeadline).toISOString(),
+        observedAt: new Date(this.io.now()).toISOString(), terminalFalseVerified: false };
+      try {
+        this.pendingIncident = Promise.resolve(this.io.recordWindowIncident?.(this.incident))
+          .catch(() => { this.incidentPersistenceFailure = true; });
+      } catch { this.incidentPersistenceFailure = true; }
+    }
+  }
+  check(deadline, code = 'SYNTHETIC_OPERATION_DEADLINE') {
+    this.observe();
+    if (!Number.isSafeInteger(deadline) || this.io.now() >= deadline) fail(code);
+  }
+  reserveRollout() {
+    this.observe();
+    if (this.windowDeadline !== null && this.io.now() + SYNTHETIC_LIMITS.rolloutTimeoutMs > this.windowDeadline && this.reserveExhaustedAt === null) {
+      this.reserveExhaustedAt = this.io.now();
+    }
+  }
+  terminalFalse() {
+    this.observe(); this.terminalFalseAt = this.io.now(); this.dispose();
+  }
+  dispose() {
+    if (this.timer !== null) (this.io.clearTimer ?? clearTimeout)(this.timer);
+    this.timer = null;
+  }
+  snapshot() {
+    return { enableIntentAt: this.enabledAt, workDeadline: this.workDeadline, windowDeadline: this.windowDeadline,
+      recoveryDeadline: this.recoveryDeadline, terminalFalseAt: this.terminalFalseAt, reserveExhaustedAt: this.reserveExhaustedAt,
+      incident: this.incident, incidentPersistenceFailure: this.incidentPersistenceFailure };
+  }
+}
+export class SyntheticWindowDriver {
+  constructor(c, phases, window, approvals, toggle, io) { Object.assign(this, { config: c, phases, window, approvals, toggle, io }); }
+  async run() {
+    verifySyntheticWindow(this.config, this.phases, this.window, this.approvals, await this.io.sourceDigest(), this.io.now(), true);
+    if (await this.io.loadRun()) fail('SYNTHETIC_WINDOW_HISTORY_REQUIRES_RECONCILIATION');
+    const run = { version: 1, windowSha256: digest(json(this.window)), startedAt: new Date(this.io.now()).toISOString(),
+      stage: 'initial-disabled', requests: [], queries: [], enabledPosts: 0, disabledPosts: 0, healthGets: 0,
+      outcome: 'in-progress', terminalFalseVerified: false };
+    await this.io.saveRun(run);
+    let failure = null, rollbackFailure = null, terminalDeadline = null;
+    const deadlines = this.toggle.deadlines;
+    const initialDeadline = Math.min(this.io.now() + SYNTHETIC_LIMITS.rolloutTimeoutMs, canonicalInstant(this.approvals['synthetic-admission'].expiresAt));
+    const persist = () => {
+      deadlines.observe(); run.deadlines = deadlines.snapshot();
+      if (deadlines.incident) { run.enabledWindowExceeded = true; run.expiryIncident = deadlines.incident; }
+      return this.io.saveRun(run);
+    };
+    const admit = () => {
+      deadlines.observe();
+      if (this.io.cancelled?.()) fail('SYNTHETIC_CANCELLED');
+      deadlines.check(Math.min(deadlines.workDeadline ?? initialDeadline,
+        canonicalInstant(this.approvals['synthetic-admission'].expiresAt)), 'SYNTHETIC_REQUEST_WINDOW_CLOSED');
+    };
+    const request = async (method, path, fixture, disabled = false) => {
+      if (!disabled) admit();
+      if (run.requests.length >= SYNTHETIC_LIMITS.maximumHttpRequests) fail('SYNTHETIC_HTTP_BOUND');
+      if (method === 'GET') { if (++run.healthGets > SYNTHETIC_LIMITS.maximumHealthGets) fail('SYNTHETIC_HTTP_BOUND'); }
+      else if (disabled) { if (++run.disabledPosts > SYNTHETIC_LIMITS.maximumDisabledPosts) fail('SYNTHETIC_POST_RETRY_FORBIDDEN'); }
+      else if (++run.enabledPosts > SYNTHETIC_LIMITS.maximumEnabledPosts) fail('SYNTHETIC_POST_RETRY_FORBIDDEN');
+      const entry = { stage: run.stage, method, path, fixture: fixture ?? null, intentAt: new Date(this.io.now()).toISOString(), transportDispatchAttempted: false };
+      run.requests.push(entry); await persist();
+      const source = await this.io.sourceDigest();
+      const operationDeadline = Math.min(disabled ? terminalDeadline : deadlines.workDeadline ?? initialDeadline,
+        this.io.now() + SYNTHETIC_LIMITS.httpTimeoutMs);
+      const guard = () => {
+        if (source !== this.window.sourceSha256) fail('CURRENT_WINDOW_SOURCE_REQUIRED');
+        if (!disabled) admit();
+        deadlines.check(operationDeadline, 'SYNTHETIC_HTTP_DEADLINE');
+      };
+      guard();
+      const response = await this.io.http(method, path, fixture, () => {
+        guard(); entry.transportDispatchAttempted = true; entry.dispatchedAt = new Date(this.io.now()).toISOString();
+      }, operationDeadline);
+      entry.response = response;
+      guard(); await persist();
+      if (!disabled) admit();
+      const expected = method === 'POST' && disabled ? 503 : 204;
+      return response.status === expected && response.bodyBytes === 0 && response.tlsVerified === true &&
+        response.errorCode === null && response.durationMs <= SYNTHETIC_LIMITS.httpTimeoutMs &&
+        response.safeHeaders?.['cache-control'] === 'no-store';
+    };
+    const health = async (attempts, disabled = false) => {
+      for (const path of ['/health/live', '/health/ready']) {
+        let passed = false;
+        for (let i = 0; i < attempts; i++) {
+          if (await request('GET', path, undefined, disabled)) { passed = true; break; }
+          if (i + 1 < attempts) await this.io.sleep(400);
+        }
+        if (!passed) fail('SYNTHETIC_HEALTH_FAILED');
+      }
+    };
+    try {
+      await this.toggle.ready('synthetic-disable', initialDeadline);
+      await health(1);
+      run.stage = 'enabling'; await persist();
+      await this.toggle.execute('synthetic-admission');
+      const journal = await this.toggle.io.loadJournal('synthetic-admission');
+      deadlines.bind(journal);
+      run.enabledIntentAt = journal.intentAt;
+      run.stage = 'enabled-health'; await persist(); admit();
+      await health(2);
+      run.stage = 'two-fixed-events'; await persist();
+      const queryStart = new Date(deadlines.enabledAt).toISOString();
+      for (const [index, fixture] of SYNTHETIC_FIXTURES.entries()) {
+        if (index) await this.io.sleep(2000);
+        if (!await request('POST', '/v1/events', fixture)) fail('SYNTHETIC_POST_FAILED_NO_RETRY');
+      }
+      const queryEnd = new Date(this.io.now()).toISOString();
+      run.stage = 'bounded-read-queries'; await persist();
+      let matched = false;
+      for (const delay of [15000, 60000, 180000]) {
+        if (this.io.now() + delay >= deadlines.workDeadline) fail('SYNTHETIC_REQUEST_WINDOW_CLOSED');
+        await this.io.sleep(delay); admit();
+        if (run.queries.length >= SYNTHETIC_LIMITS.maximumQueries) fail('SYNTHETIC_QUERY_BOUND');
+        const entry = { startedAt: new Date(this.io.now()).toISOString(), start: queryStart, end: queryEnd, transportDispatchAttempted: false };
+        run.queries.push(entry); await persist();
+        const source = await this.io.sourceDigest(), queryDeadline = Math.min(deadlines.workDeadline, this.io.now() + 30000);
+        const guard = () => {
+          if (source !== this.window.sourceSha256) fail('CURRENT_WINDOW_SOURCE_REQUIRED');
+          admit(); deadlines.check(queryDeadline, 'SYNTHETIC_QUERY_DEADLINE');
+        };
+        guard();
+        const result = await this.io.query(queryStart, queryEnd, guard, queryDeadline, () => {
+          entry.transportDispatchAttempted = true; entry.dispatchedAt = new Date(this.io.now()).toISOString();
+        });
+        guard();
+        entry.result = result; entry.verification = verifySyntheticRows(result, queryStart, queryEnd);
+        await persist();
+        admit();
+        if (entry.verification.complete) { matched = true; break; }
+      }
+      if (!matched) fail('SYNTHETIC_ROWS_NOT_CONFIRMED');
+    } catch (error) {
+      failure = /^[A-Z_]+$/u.test(error.message) ? error.message : 'SYNTHETIC_WINDOW_FAILED';
+    } finally {
+      run.stage = 'disabling'; run.failureCode = failure;
+      try { await persist(); } catch { failure ??= 'WINDOW_JOURNAL_WRITE_FAILED'; }
+      try {
+        const receipt = await this.toggle.execute('synthetic-disable');
+        if (receipt.qualified !== true || admissionFlag(receipt.resources?.[ids(this.config).app]) !== 'false') fail('TERMINAL_FALSE_NOT_VERIFIED');
+        run.disableReceiptSha256 = digest(json(receipt)); run.terminalFalseVerified = true;
+        run.lateDisableRecovery = receipt.lateRecovery === true;
+        terminalDeadline = deadlines.recoveryDeadline ?? receipt.operationDeadline;
+        run.stage = 'terminal-disabled-http'; await persist();
+        await health(1, true);
+        if (!await request('POST', '/v1/events', SYNTHETIC_FIXTURES[0], true)) fail('TERMINAL_DISABLED_POST_FAILED');
+        run.terminalDisabled503Verified = true;
+      } catch (error) {
+        rollbackFailure = /^[A-Z_]+$/u.test(error.message) ? error.message : 'DISABLE_RECONCILIATION_REQUIRED';
+      }
+      deadlines.observe(); await deadlines.pendingIncident;
+      if (deadlines.incident) { run.enabledWindowExceeded = true; failure ??= 'ENABLED_WINDOW_EXCEEDED'; }
+      if (deadlines.reserveExhaustedAt !== null) failure ??= 'ROLLBACK_RESERVE_EXHAUSTED';
+      if (deadlines.incidentPersistenceFailure) failure ??= 'WINDOW_EXPIRY_RECORD_FAILED';
+      run.failureCode = failure; run.disableFailureCode = rollbackFailure;
+      run.outcome = rollbackFailure ? 'held-terminal-state-or-http-unproven' :
+        run.lateDisableRecovery ? 'stopped-disabled-late-recovery' : failure ? 'stopped-disabled' : 'qualified-and-disabled';
+      run.stage = 'finished'; run.completedAt = new Date(this.io.now()).toISOString();
+      try { await persist(); } finally { deadlines.dispose(); }
+    }
+    return run;
+  }
+}
+export class SyntheticToggleController {
+  constructor(c, phases, window, approvals, io) {
+    Object.assign(this, { config: c, phases, window, approvals, io });
+    this.deadlines = new SyntheticDeadlines(window, approvals, io);
+  }
+  async transition(deadline) {
+    const source = await this.io.sourceDigest();
+    if (deadline !== undefined) this.deadlines.check(deadline);
+    const journals = Object.fromEntries(await Promise.all(TOGGLE_PHASES.map(async name => [name, await this.io.loadJournal(name)])));
+    if (deadline !== undefined) this.deadlines.check(deadline);
+    return { phases: this.phases, window: this.window, approvals: this.approvals, source, journals };
+  }
+  async settleEnable(deadline) {
+    const journal = await this.io.loadJournal('synthetic-admission');
+    this.deadlines.check(deadline, 'SYNTHETIC_RECOVERY_DEADLINE');
+    if (!journal || journal.transportDispatchAttempted === false) return;
+    for (let poll = 0; poll < SYNTHETIC_LIMITS.maxRolloutPolls && this.io.now() < deadline; poll++) {
+      const deployment = await this.io.deployment('synthetic-admission', deadline);
+      this.deadlines.check(deadline, 'SYNTHETIC_RECOVERY_DEADLINE');
+      if (deployment && !sameId(deployment.id, this.phases['synthetic-admission'].deploymentId)) fail('TOGGLE_DEPLOYMENT_IDENTITY_CHANGED');
+      if (['Succeeded', 'Failed', 'Canceled'].includes(deployment?.properties?.provisioningState)) return;
+      await this.io.sleep(Math.min(SYNTHETIC_LIMITS.rolloutPollMs, Math.max(0, deadline - this.io.now())));
+      this.deadlines.observe();
+    }
+    fail('ENABLE_SUBMISSION_UNRESOLVED_NO_REPLAY');
+  }
+  async ready(name, deadline, polls = { remaining: SYNTHETIC_LIMITS.maxRolloutPolls }) {
+    const phase = this.phases[name];
+    while (polls.remaining > 0 && this.io.now() < deadline) {
+      polls.remaining--;
+      const observation = await this.io.rollout(deadline);
+      this.deadlines.check(deadline, 'LATEST_REVISION_NOT_READY_WITHIN_BOUND');
+      const state = await this.transition(deadline);
+      this.deadlines.check(deadline, 'LATEST_REVISION_NOT_READY_WITHIN_BOUND');
+      verifyWindowState(this.config, this.phases, this.window, this.approvals, state.journals,
+        observation.app, observation.context, state.source);
+      if (latestRevisionReady(this.config, phase, this.window, observation)) return observation;
+      await this.io.sleep(Math.min(SYNTHETIC_LIMITS.rolloutPollMs, Math.max(0, deadline - this.io.now())));
+      this.deadlines.observe();
+    }
+    fail('LATEST_REVISION_NOT_READY_WITHIN_BOUND');
+  }
+  async execute(name) {
+    if (!TOGGLE_PHASES.includes(name)) fail('FIXED_TOGGLE_PHASE_REQUIRED');
+    const operationStarted = this.io.now();
+    const c = this.config, phase = this.phases[name], approval = this.approvals[name], source = await this.io.sourceDigest();
+    verifySyntheticWindow(c, this.phases, this.window, this.approvals, source, this.io.now(), name === 'synthetic-admission');
+    if (await this.io.loadJournal(name)) fail('EXISTING_TOGGLE_INTENT_REQUIRES_RECONCILIATION');
+    const enableIntent = await this.io.loadJournal('synthetic-admission');
+    this.deadlines.bind(enableIntent);
+    // After the recovery write bound, only a bounded already-false observation can complete.
+    const recoveryExpired = this.deadlines.recoveryDeadline !== null && this.io.now() >= this.deadlines.recoveryDeadline;
+    const operationDeadline = name === 'synthetic-disable' && this.deadlines.recoveryDeadline !== null && !recoveryExpired
+      ? this.deadlines.recoveryDeadline : operationStarted + SYNTHETIC_LIMITS.rolloutTimeoutMs;
+    this.deadlines.check(operationDeadline);
+    if (name === 'synthetic-disable') await this.settleEnable(operationDeadline);
+    const started = this.io.now(), state = await this.transition(operationDeadline);
+    const proof = await this.io.check(phase, state, operationDeadline);
+    this.deadlines.check(operationDeadline);
+    checkWindowProof(c, phase, this.window, proof, started, this.io.now());
+    let rolloutDeadline = null;
+    const remainingDeadline = () => rolloutDeadline === null ? operationDeadline :
+      name === 'synthetic-admission' ? rolloutDeadline : Math.min(operationDeadline, rolloutDeadline);
+    const checkCurrent = async () => {
+      this.deadlines.check(remainingDeadline());
+      const value = await this.io.observe(remainingDeadline());
+      this.deadlines.check(remainingDeadline());
+      const latest = await this.transition(remainingDeadline());
+      if (latest.source !== this.window.sourceSha256) fail('CURRENT_WINDOW_SOURCE_REQUIRED');
+      const flag = verifyWindowState(c, this.phases, this.window, this.approvals, latest.journals, value.app, value.context, latest.source);
+      if (flag !== proof.observedFlag) fail('TOGGLE_STATE_CHANGED_AFTER_PREFLIGHT');
+      return value;
+    };
+    await checkCurrent();
+    const noWrite = name === 'synthetic-disable' && proof.observedFlag === 'false';
+    const guard = () => {
+      checkWindowProof(c, phase, this.window, proof, started, this.io.now());
+      verifyWindowApproval(c, phase, this.window, approval, source, this.io.now());
+      this.deadlines.check(remainingDeadline());
+      if (name === 'synthetic-disable' && this.deadlines.recoveryDeadline !== null) this.deadlines.check(this.deadlines.recoveryDeadline, 'SYNTHETIC_RECOVERY_DEADLINE');
+      if (name === 'synthetic-admission' && this.io.cancelled?.()) fail('SYNTHETIC_CANCELLED');
+      if (name === 'synthetic-admission' &&
+          canonicalInstant(this.approvals['synthetic-disable'].expiresAt) < this.io.now() + SYNTHETIC_LIMITS.enabledWindowMs + SYNTHETIC_LIMITS.rollbackReserveMs) fail('DISABLE_AUTHORITY_WINDOW_TOO_SHORT');
+    };
+    if (!noWrite) guard();
+    if (!noWrite && await this.io.deployment(name, remainingDeadline())) fail('DEPLOYMENT_NAME_EXISTS');
+    if (!noWrite) guard();
+    const journal = { phase: name, phaseSha256: digest(json(phase)), windowSha256: digest(json(this.window)),
+      approvalSha256: digest(json(approval)), intentAt: new Date(this.io.now()).toISOString(),
+      outcome: noWrite ? 'read-only-observation' : 'submission-possible', transportDispatchAttempted: noWrite ? false : null };
+    if (name === 'synthetic-admission') this.deadlines.bind(journal);
+    if (!noWrite) {
+      if (name === 'synthetic-disable') this.deadlines.reserveRollout();
+      rolloutDeadline = Math.min(canonicalInstant(journal.intentAt) + SYNTHETIC_LIMITS.rolloutTimeoutMs,
+        name === 'synthetic-disable' ? this.deadlines.recoveryDeadline ?? operationDeadline :
+          this.deadlines.workDeadline ?? Number.MAX_SAFE_INTEGER);
+    }
+    journal.preparationDeadline = operationDeadline;
+    journal.operationDeadline = remainingDeadline();
+    journal.rolloutDeadline = rolloutDeadline;
+    journal.deadlines = this.deadlines.snapshot();
+    await this.io.saveJournal(name, journal);
+    let dispatched = false;
+    try {
+      let deployment = null;
+      const polls = { remaining: SYNTHETIC_LIMITS.maxRolloutPolls };
+      if (!noWrite) {
+        guard();
+        await this.io.arm(phase, remainingDeadline())('PUT', phase.deploymentId, '2022-09-01',
+          { properties: { mode: 'Incremental', template: phase.template } }, undefined,
+          () => { guard(); dispatched = true; }, undefined, checkCurrent);
+        journal.transportDispatchAttempted = true;
+        this.deadlines.check(remainingDeadline(), 'TOGGLE_ROLLOUT_DEADLINE');
+        const deadline = remainingDeadline();
+        while (polls.remaining > 0 && this.io.now() < deadline) {
+          polls.remaining--;
+          deployment = await this.io.deployment(name, deadline);
+          this.deadlines.check(deadline, 'TOGGLE_ROLLOUT_DEADLINE');
+          if (deployment && !sameId(deployment.id, phase.deploymentId)) fail('TOGGLE_DEPLOYMENT_IDENTITY_CHANGED');
+          if (deployment?.properties?.provisioningState === 'Succeeded') break;
+          if (['Failed', 'Canceled'].includes(deployment?.properties?.provisioningState)) fail('TOGGLE_DEPLOYMENT_FAILED_PRESERVED');
+          await this.io.sleep(Math.min(SYNTHETIC_LIMITS.rolloutPollMs, Math.max(0, deadline - this.io.now())));
+          this.deadlines.observe();
+        }
+        if (deployment?.properties?.provisioningState !== 'Succeeded') fail('TOGGLE_DEPLOYMENT_OUTCOME_UNRESOLVED');
+      }
+      const ready = await this.ready(name, remainingDeadline(), polls);
+      this.deadlines.check(remainingDeadline(), 'TOGGLE_ROLLOUT_DEADLINE');
+      await this.io.privacy(phase, remainingDeadline());
+      this.deadlines.check(remainingDeadline(), 'TOGGLE_ROLLOUT_DEADLINE');
+      if (name === 'synthetic-disable') this.deadlines.terminalFalse();
+      const lateRecovery = name === 'synthetic-disable' && this.deadlines.incident !== null;
+      const receipt = { qualified: true, qualificationKind: noWrite ? 'read-only-terminal-disable' : 'ready-toggle-deployment',
+        phase: name, configSha256: digest(json(c)), phaseSha256: digest(json(phase)), sourceSha256: source,
+        windowSha256: digest(json(this.window)), approvalSha256: digest(json(approval)), deployment,
+        resources: { [ids(c).app]: ready.app }, revisionReadback: ready.revisions, noCloudWrite: noWrite,
+        operationDeadline: remainingDeadline(), preparationDeadline: operationDeadline, rolloutDeadline, deadlines: this.deadlines.snapshot(), lateRecovery,
+        withinEnabledWindow: !lateRecovery,
+        completedAt: new Date(this.io.now()).toISOString() };
+      await this.io.saveReceipt(name, receipt);
+      journal.outcome = noWrite ? 'read-only-already-disabled' : lateRecovery ? 'readback-qualified-late-recovery' : 'readback-qualified';
+      journal.deadlines = this.deadlines.snapshot();
+      journal.transportDispatchAttempted = dispatched; journal.receiptSha256 = digest(json(receipt));
+      await this.io.saveJournal(name, journal); return receipt;
+    } catch (error) {
+      journal.outcome = 'reconciliation-required'; journal.transportDispatchAttempted = dispatched;
+      journal.failureCode = /^[A-Z_]+$/u.test(error.message) ? error.message : 'TOGGLE_STOPPED';
+      journal.deadlines = this.deadlines.snapshot();
+      await this.io.saveJournal(name, journal); fail('TOGGLE_STOPPED_RESOURCES_PRESERVED');
+    }
+  }
+}
+export function buildSyntheticWindow(c, phases, receipts, origin, source, whatifs) {
+  const anchorApp = receipts['disabled-app']?.resources?.[ids(c).app];
+  if (!anchorApp || admissionFlag(anchorApp) !== 'false') fail('QUALIFIED_DISABLED_ANCHOR_REQUIRED');
+  const context = { config: c, ...resourceContext(c, receipts), app: anchorApp };
+  const known = Object.values(receipts).flatMap(v => Object.keys(v.resources ?? {}));
+  const entries = {};
+  for (const name of TOGGLE_PHASES) {
+    const phase = phases[name], whatif = whatifs[name];
+    verifyWhatIf(phase, whatif, known, context);
+    entries[name] = { phaseSha256: digest(json(phase)), transitionSha256: syntheticTransitionHash(phase),
+      reviewedWhatIfSha256: digest(json(whatif)), reviewedWhatIf: whatif };
+  }
+  return { version: 1, kind: 'bounded-two-event-window', configSha256: digest(json(c)), sourceSha256: source,
+    originSha256: digest(json(origin)), receiptsSha256: digest(json(receipts)), baselineSha256: origin.policyBaselineSha256,
+    appIdentity: executionIdentity(anchorApp, 'Microsoft.App/containerApps'), anchorApp,
+    phases: entries, limits: SYNTHETIC_LIMITS, fixtures: SYNTHETIC_FIXTURES };
+}
+function boundedInvoke(deadline, invoke = az, now = Date.now) {
+  return (args, timeout = 60000) => {
+    if (!Number.isSafeInteger(deadline)) fail('WINDOW_READ_DEADLINE');
+    const remaining = deadline - now();
+    if (remaining <= 0) fail('WINDOW_READ_DEADLINE');
+    return invoke(args, Math.min(timeout, remaining, 15000));
+  };
+}
+export async function readSyntheticQuery(c, expectedWorkspace, expectedSource, start, end, beforeDispatch, deadline,
+  invoke = az, readSource = sourceDigest, now = Date.now, onDispatch = () => {}) {
+  if (typeof beforeDispatch !== 'function' || types.isAsyncFunction(beforeDispatch) || !Number.isSafeInteger(deadline)) fail('SYNTHETIC_QUERY_GUARD_REQUIRED');
+  if (typeof onDispatch !== 'function' || types.isAsyncFunction(onDispatch)) fail('SYNTHETIC_QUERY_GUARD_REQUIRED');
+  const guard = () => {
+    if (beforeDispatch() !== undefined) fail('SYNTHETIC_QUERY_GUARD_REQUIRED');
+    if (now() >= deadline) fail('SYNTHETIC_QUERY_DEADLINE');
+  };
+  const r = ids(c), query = syntheticQuery(start, end);
+  guard();
+  const workspace = await invoke(['rest', '--method', 'GET', '--url', `https://management.azure.com${r.workspace}?api-version=2023-09-01`,
+    '--subscription', c.subscriptionId, '--only-show-errors', '--output', 'json'], Math.max(1, Math.min(15000, deadline - now())));
+  if (!isDeepStrictEqual(executionIdentity(workspace), executionIdentity(expectedWorkspace))) fail('QUERY_WORKSPACE_IDENTITY_CHANGED');
+  assertOwned(workspace, r.workspace, c); requireAccess(workspace);
+  const customer = workspace.properties.customerId;
+  if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/u.test(customer)) fail('QUERY_WORKSPACE_IDENTITY_CHANGED');
+  if (await readSource() !== expectedSource) fail('CURRENT_WINDOW_SOURCE_REQUIRED');
+  const args = ['rest', '--method', 'GET', '--url', `https://api.loganalytics.azure.com/v1/workspaces/${customer}/query?query=${encodeURIComponent(query)}`,
+    '--resource', 'https://api.loganalytics.io', '--subscription', c.subscriptionId, '--only-show-errors', '--output', 'json'];
+  guard();
+  const remaining = deadline - now();
+  if (remaining <= 0) fail('SYNTHETIC_QUERY_DEADLINE');
+  if (onDispatch() !== undefined) fail('SYNTHETIC_QUERY_GUARD_REQUIRED');
+  return invoke(args, Math.min(30000, remaining));
+}
+export function syntheticWindowIO(c, phases, window, approvals, receipts, rawReceipts, origin, evidenceFiles, directory, cancelled = () => false, invoke = az) {
+  const r = ids(c);
+  const observe = async deadline => {
+    const arm = transport(c, phases['synthetic-disable'], directory, boundedInvoke(deadline, invoke));
+    const identities = { [r.ingestIdentity]: await arm('GET', r.ingestIdentity, '2023-01-31'),
+      [r.pullIdentity]: await arm('GET', r.pullIdentity, '2023-01-31') };
+    const app = await arm('GET', r.app, '2025-07-01');
+    return { app, context: { identities, publication: receipts.publication } };
+  };
+  return {
+    now: Date.now, sourceDigest, sleep: pause, cancelled,
+    setTimer: setTimeout, clearTimer: clearTimeout,
+    recordWindowIncident: async value => {
+      const prior = await load(directory, 'synthetic-window-expiry.json', true);
+      if (prior) {
+        if (prior.windowSha256 !== value.windowSha256 || prior.enableIntentAt !== value.enableIntentAt || prior.deadlineAt !== value.deadlineAt) fail('WINDOW_INCIDENT_BINDING_CHANGED');
+        return;
+      }
+      await saveImmutable(directory, 'synthetic-window-expiry.json', value);
+    },
+    loadJournal: name => load(directory, `${name}-journal.json`, true),
+    saveJournal: (name, value) => save(directory, `${name}-journal.json`, value),
+    saveReceipt: async (name, value) => {
+      await saveImmutable(directory, `${name}-receipt.json`, value);
+      rawReceipts[name] = value; await save(directory, 'receipts.json', rawReceipts);
+    },
+    check: (phase, transition, deadline) => checkReadOnly(c, phase, origin, receipts, directory, evidenceFiles,
+      boundedInvoke(deadline, invoke), publishedSourceDigest, transition),
+    observe,
+    deployment: (name, deadline) => transport(c, phases[name], directory, boundedInvoke(deadline, invoke))('GET', phases[name].deploymentId, '2022-09-01'),
+    arm: (phase, deadline) => transport(c, phase, directory, boundedInvoke(deadline, invoke)),
+    rollout: async deadline => ({ ...await observe(deadline),
+      revisions: await transport(c, phases['synthetic-disable'], directory, boundedInvoke(deadline, invoke))('GET', `${r.app}/revisions`, '2025-07-01') }),
+    privacy: (phase, deadline) => readPrivacy(c, phase, transport(c, phase, directory, boundedInvoke(deadline, invoke))),
+    loadRun: () => load(directory, 'synthetic-window-journal.json', true),
+    saveRun: value => save(directory, 'synthetic-window-journal.json', value),
+    http: (method, path, event, guard, deadline) => syntheticHttp(window.anchorApp.properties.configuration.ingress.fqdn, method, path, event, guard, deadline),
+    query: (start, end, guard, deadline, onDispatch) => readSyntheticQuery(c, receipts['workspace-access'].resources[r.workspace],
+      window.sourceSha256, start, end, guard, deadline, invoke, sourceDigest, Date.now, onDispatch),
+  };
+}
 
 async function main() {
   const [operation, phaseName, directoryArg, ...extra] = process.argv.slice(2);
-  if (!['prepare', 'check', 'validate-preview', 'reconcile', 'qualify-reconciliation', 'image-before-push', 'image-readback', 'execute'].includes(operation) ||
+  if (!['prepare', 'check', 'validate-preview', 'prepare-window', 'run-window', 'execute-disable',
+    'reconcile', 'qualify-reconciliation', 'image-before-push', 'image-readback', 'execute'].includes(operation) ||
       !PHASES.includes(phaseName) || !directoryArg || extra.length) fail('FIXED_PHASE_COMMAND_REQUIRED');
   const directory = await privateDirectory(directoryArg), c = validateConfig(await load(directory, 'config.json'));
   if (Object.entries(process.env).some(([key, value]) => value && /^(CI$|GITHUB_|ACTIONS_|RUNNER_)/u.test(key))) fail('UNTRUSTED_RUNNER_FORBIDDEN');
@@ -638,6 +1190,59 @@ async function main() {
     await registryReview(c, receipts, directory, operation === 'image-before-push', az, rawReceipts);
     console.log('PRIVATE_IMAGE_REVIEW_RECORDED_NO_PUSH_AUTHORITY'); return;
   }
+  if (['prepare-window', 'run-window', 'execute-disable'].includes(operation)) {
+    if ((operation === 'execute-disable' ? phaseName !== 'synthetic-disable' : phaseName !== 'synthetic-admission')) fail('FIXED_WINDOW_COMMAND_REQUIRED');
+    if (operation === 'prepare-window') {
+      for (const name of TOGGLE_PHASES) if (await load(directory, `${name}-journal.json`, true) || await load(directory, `${name}-approval.json`, true)) fail('PRESERVE_WINDOW_HISTORY');
+      if (await load(directory, 'synthetic-window-plan.json', true)) fail('PRESERVE_WINDOW_HISTORY');
+      const phases = Object.fromEntries(TOGGLE_PHASES.map(name => [name, buildPhase(c, name, null, receipts, evidenceFiles.foundationBudgets, evidenceFiles.reconciliation)]));
+      const source = await sourceDigest(), whatifs = {};
+      for (const name of TOGGLE_PHASES) {
+        const phase = phases[name];
+        await checkReadOnly(c, phase, origin, receipts, directory, evidenceFiles);
+        whatifs[name] = await load(directory, `${name}-what-if.json`);
+        await save(directory, `${name}-plan.json`, { ...phase, sourceSha256: source, config: c });
+      }
+      if (source !== await sourceDigest()) fail('WINDOW_SOURCE_CHANGED');
+      const window = buildSyntheticWindow(c, phases, receipts, origin, source, whatifs);
+      await saveImmutable(directory, 'synthetic-window-prerequisite-receipts.json', receipts);
+      await saveImmutable(directory, 'synthetic-window-plan.json', window);
+      console.log('PAIRED_WINDOW_PREPARED_READONLY_NO_AUTHORITY'); return;
+    }
+    const window = await load(directory, 'synthetic-window-plan.json');
+    const base = await load(directory, 'synthetic-window-prerequisite-receipts.json');
+    const current = Object.fromEntries(Object.entries(receipts).filter(([name]) => !TOGGLE_PHASES.includes(name)));
+    if (!isDeepStrictEqual(base, current) || digest(json(base)) !== window.receiptsSha256 ||
+        digest(json(origin)) !== window.originSha256) fail('WINDOW_PREREQUISITE_DRIFT');
+    const phases = Object.fromEntries(TOGGLE_PHASES.map(name => [name, buildPhase(c, name, null, base, evidenceFiles.foundationBudgets, evidenceFiles.reconciliation)]));
+    const approvals = Object.fromEntries(await Promise.all(TOGGLE_PHASES.map(async name => [name, await load(directory, `${name}-approval.json`)])));
+    const lockPath = resolve(here, '../../opentofu/telemetry/.operator-private/controller.lock');
+    const lock = await open(lockPath, 'wx', 0o600);
+    let interrupted = false, toggle;
+    const interrupt = () => { interrupted = true; };
+    for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, interrupt);
+    try {
+      const io = syntheticWindowIO(c, phases, window, approvals, base, rawReceipts, origin, evidenceFiles, directory, () => interrupted);
+      toggle = new SyntheticToggleController(c, phases, window, approvals, io);
+      if (operation === 'execute-disable') {
+        const receipt = await toggle.execute('synthetic-disable');
+        console.log(receipt.lateRecovery ? 'SYNTHETIC_LATE_RECOVERY_DISABLED_NO_CLIENT_ACTIVATION' : 'SYNTHETIC_DISABLED_READY_NO_CLIENT_ACTIVATION');
+      } else {
+        const result = await new SyntheticWindowDriver(c, phases, window, approvals, toggle, io).run();
+        console.log(result.outcome === 'qualified-and-disabled' ? 'SYNTHETIC_WINDOW_QUALIFIED_AND_DISABLED' :
+          result.outcome === 'stopped-disabled' ? 'SYNTHETIC_WINDOW_STOPPED_DISABLED' :
+          result.outcome === 'stopped-disabled-late-recovery' ? 'SYNTHETIC_WINDOW_LATE_RECOVERY_DISABLED' : 'SYNTHETIC_WINDOW_HELD_TERMINAL_PROOF_REQUIRED');
+        if (result.outcome !== 'qualified-and-disabled') process.exitCode = 1;
+      }
+    } finally {
+      toggle?.deadlines.dispose();
+      if (toggle) await toggle.deadlines.pendingIncident;
+      for (const signal of ['SIGINT', 'SIGTERM']) process.off(signal, interrupt);
+      await lock.close(); await rm(lockPath);
+    }
+    return;
+  }
+  if (operation === 'execute' && TOGGLE_PHASES.includes(phaseName)) fail('PAIRED_SYNTHETIC_WINDOW_REQUIRED');
   const phase = buildPhase(c, phaseName, await storageContract(), receipts, evidenceFiles.foundationBudgets, evidenceFiles.reconciliation);
   if (operation === 'prepare') {
     if (await load(directory, `${phaseName}-journal.json`, true) || await load(directory, `${phaseName}-approval.json`, true)) fail('PRESERVE_PHASE_HISTORY');

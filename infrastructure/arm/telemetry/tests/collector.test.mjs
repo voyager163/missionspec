@@ -7,7 +7,7 @@ import { chmod, link, mkdir, open, readFile, readdir, rename, rm, symlink, trunc
 import { buildPhase, storageContract, ids, json, digest, ownerTags, firstReleaseCost, PHASES, LIMITS, RECEIVER_DIGEST, RECEIVER_COMMAND,
   BUDGET, budgetProperties, budgetConfiguration, projectBudgetFilter, validateConfig, assignmentRoleTargets } from '../definition.mjs';
 import { verifyWhatIf, assertBudget, permitFirstPush, verifyResource, executionIdentity,
-  verifyExecutionOrigins, verifyReconciliation, verifyDeploymentIdentity, roleDefinitionSignature, verifyImagePublication, verifyPublicationReadback } from '../policy.mjs';
+  verifyExecutionOrigins, verifyReconciliation, verifyDeploymentIdentity, roleDefinitionSignature, verifyImagePublication, verifyPublicationReadback, resourceContext } from '../policy.mjs';
 import { manifestJson, configJson } from './receiver-oci.fixture.mjs';
 import { CollectorController, az, transport, validateReadOnly, verifyScannerAdoption, verifyOrigin, verifyProjectBudgetReceipt,
   checkReadOnly, load, saveImmutable, MAX_PRIVATE_ARTIFACT_BYTES, DIAGNOSTIC_API, privateDirectory, sourceDigest,
@@ -40,7 +40,7 @@ function fixtureReceipts(config = c) {
     [r.pullIdentity]: owned(r.pullIdentity, { clientId: '00000000-0000-4000-8000-000000000007', principalId: '00000000-0000-4000-8000-000000000008', tenantId: c.tenantId }),
     [r.registry]: owned(r.registry, { loginServer: `${c.registryName}.azurecr.io` }),
   } };
-  return { 'project-budget': { qualified: true, phase: 'project-budget', configSha256: digest(json(c)),
+  const receipts = { 'project-budget': { qualified: true, phase: 'project-budget', configSha256: digest(json(c)),
     sourceSha256: digest('source'), phaseSha256: digest(json(budgetPhase)),
     deployment: { id: budgetPhase.deploymentId, properties: { provisioningState: 'Succeeded' } },
     resources: { [r.projectBudget]: { id: r.projectBudget, ...structuredClone(budgetPhase.resources[0].expected) } } },
@@ -53,6 +53,15 @@ function fixtureReceipts(config = c) {
       configSha256: 'sha256:46e59e2d089b1869fb3737444fa4d1cbf380bc5ed3eb27318508dafad4c08204',
       configSha256Inputs: digest(json(c)), command: RECEIVER_COMMAND },
     'disabled-app': { configSha256: digest(json(c)), qualified: true } };
+  const descriptor = buildPhase(c, 'disabled-app', contract, receipts).resources[0];
+  const actual = { ...structuredClone(descriptor.expected), id: r.app };
+  actual.properties.configuration.ingress.fqdn = 'fixture.australiaeast.azurecontainerapps.io';
+  for (const id of [r.ingestIdentity, r.pullIdentity]) {
+    const { clientId, principalId } = core.resources[id].properties;
+    actual.identity.userAssignedIdentities[id] = { clientId, principalId };
+  }
+  receipts['disabled-app'].resources = { [r.app]: actual };
+  return receipts;
 }
 async function scratch(t) {
   const directory = `infrastructure/arm/telemetry/tests/.scratch-${randomUUID()}`;
@@ -228,6 +237,7 @@ test('read-only validate and full what-if use the actual execution name for ever
       assert.equal(args[args.indexOf('--result-format') + 1], 'FullResourcePayloads');
       return { status: 'Succeeded', changes: p.resources.map(v => phaseName === 'project-budget'
         ? { resourceId: v.id, changeType: 'Modify', before: f.project, after: v.expected }
+        : phaseName === 'synthetic-admission' ? { resourceId: v.id, changeType: 'Modify', before: receipts['disabled-app'].resources[v.id], after: { ...structuredClone(v.expected), id: v.id } }
         : { resourceId: v.id, changeType: p.allowedModify[v.id] ? 'NoChange' : 'Create' }) };
     };
     const result = await validateReadOnly(config, p, receipts, directory, invoke);
@@ -417,11 +427,12 @@ test('what-if allows exact creates or narrow approved flags, never unknown modif
 });
 test('synthetic admission cannot hide command, image or quota changes inside a container-array modification', () => {
   const receipts = fixtureReceipts(), p = buildPhase(c, 'synthetic-admission', contract, receipts);
-  const before = { properties: buildPhase(c, 'disabled-app', contract, receipts).resources[0].expected.properties };
-  const after = { properties: p.resources[0].expected.properties };
-  verifyWhatIf(p, { status: 'Succeeded', changes: [{ resourceId: r.app, changeType: 'Modify', before, after }] });
+  const before = structuredClone(receipts['disabled-app'].resources[r.app]);
+  const after = { ...structuredClone(p.resources[0].expected), id: r.app };
+  const context = { config: c, ...resourceContext(c, receipts), app: before };
+  verifyWhatIf(p, { status: 'Succeeded', changes: [{ resourceId: r.app, changeType: 'Modify', before, after }] }, [], context);
   after.properties.template.containers[0].command = ['other'];
-  assert.throws(() => verifyWhatIf(p, { status: 'Succeeded', changes: [{ resourceId: r.app, changeType: 'Modify', before, after }] }));
+  assert.throws(() => verifyWhatIf(p, { status: 'Succeeded', changes: [{ resourceId: r.app, changeType: 'Modify', before, after }] }, [], context));
 });
 test('budget key folding never relaxes values, arrays, types, recipients or count', () => {
   const b = structuredClone(buildPhase(c, 'core', contract).resources.find(v => v.id === r.budget).expected);

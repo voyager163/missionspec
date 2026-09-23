@@ -348,7 +348,9 @@ Neither these controls nor budget alerts establish a monetary hard cap.
 Deployment is explicitly phased: the separately approved exact project-budget
 amount update and qualified USD 350 readback **before** core creation/readback, workspace access,
 data schema/DCR, role definition/assignments, separately authorized image
-publication, disabled app, then separately authorized synthetic admission.
+publication, disabled app, then separately authorized paired synthetic admission
+and disable. A valid fixed disable path and its own exact release are prerequisites
+to opening a bounded test window; the original disabled deployment is never replayed.
 Generated IDs/endpoints are literal reviewed inputs only after their readbacks;
 the controller does not pretend unknown values have been reviewed.
 No arbitrary ARM/shell execution or automatic image push is exposed.
@@ -378,6 +380,11 @@ After separate authorization, operators must:
    unknown-duration representation, UTC receipt time, and platform-added columns.
    Observe real ingestion errors/visibility and deletion/retention behavior over the
    appropriate horizon; a locally passing fixture cannot prove retention.
+   The bounded direct-ARM window permits at most two intended event ingestions,
+   eleven receiver HTTP requests and three scoped read queries, with no POST
+   retries and an unchanged one-second request deadline. Latest-ready revision
+   identity must match the latest revision; an old healthy revision or ARM
+   `Succeeded` alone is insufficient. See the [paired window contract](telemetry-operator.md#paired-synthetic-window-and-fixed-disable).
 4. Exercise capacity/rate rejection, unavailable Azure/identity permissions, cold/
    warm latency, timeout ambiguity, readiness recovery, kill switch, and image
    rollback. Verify no payload-bearing logs appear during each case.
@@ -403,6 +410,12 @@ reported as successful deployment, enforced retention or client activation.
   instance that returns 503 without uploading. Existing in-flight calls may already
   have reached Azure; this is not a data deletion operation. Reconcile any emergency
   control-plane changes into IaC rather than leaving drift.
+- **Bounded synthetic rollback:** the fixed `synthetic-disable` phase changes
+  only the admission flag under its separate valid release. An already-false
+  read-only completion is explicitly distinguished from a deployment. Drift,
+  expired write authority or uncertain prior submission cause a hold, never a
+  broader overwrite or automatic retry. Terminal false/readiness/503 proof is
+  required before reporting a successful synthetic window.
 - **Rollback:** disable admission first if privacy/cost is uncertain, select the
   previous reviewed digest from the same registry, review the plan, and deploy one
   revision. The image must still match the active schema/DCR/table. Recheck health,
