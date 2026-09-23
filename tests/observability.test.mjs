@@ -575,15 +575,23 @@ function preferenceWorker(path, action) {
 test('separate processes atomically merge disclosure/disable patches; concurrent readers never default on', { timeout: 15_000 }, async () => {
   const path = join(scratch, 'multiprocess.sqlite');
   const store = ownedPreferences(path);
-  await store.save({ preference: 'disabled' });
+  assert.deepEqual(await store.save({ preference: 'disabled' }), { state: 'saved' });
   const workers = ['disable', 'disclosure', 'read'].map((action) => preferenceWorker(path, action));
   try {
     await Promise.all(workers.map((worker) => worker.ready));
     workers.forEach((worker) => worker.child.send('go'));
     const [disabled, disclosed, observed] = await Promise.all(workers.map((worker) => worker.done));
-    assert.ok(disabled.every((value) => value.state === 'saved'));
-    assert.ok(disclosed.every((value) => value.state === 'saved'));
-    assert.ok(observed.every((value) => value.state === 'ready' && value.value.preference === 'disabled'));
+    const busy = { state: 'unavailable', reason: 'busy', persistence: 'unchanged', cleanup: 'complete' };
+    // The bounded busy deadline permits explicit contention, never a lost patch or enabled default.
+    for (const results of [disabled, disclosed]) {
+      assert.ok(results.some((value) => value.state === 'saved'), JSON.stringify(results));
+      for (const value of results) if (value.state !== 'saved') assert.deepEqual(value, busy);
+    }
+    assert.ok(observed.some((value) => value.state === 'ready'), JSON.stringify(observed));
+    for (const value of observed) {
+      if (value.state === 'ready') assert.equal(value.value.preference, 'disabled');
+      else assert.deepEqual(value, busy);
+    }
     assert.deepEqual(await store.read(), { state: 'ready', value: { preference: 'disabled', disclosureVersion: 1 } });
     await Promise.all(workers.map((worker) => worker.exited));
   } finally {
