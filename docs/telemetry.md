@@ -2,8 +2,10 @@
 
 **The development composition has no active production endpoint.** Importing
 or constructing these modules neither contacts a service nor probes endpoint
-health. No cloud deployment, production delivery, retention verification or
-real coding-host qualification has occurred.
+health. A separate receiver has been deployed with ingestion disabled; bounded
+synthetic qualification is still pending. Its control-plane retention settings
+were read back, not proved as exact physical deletion timing. Production client
+delivery and real coding-host execution remain unqualified.
 
 This component implements the existing `TelemetryPort` as a caller-owned,
 one-root-operation client. It is not an SDK with auto-capture, an audit ledger,
@@ -244,23 +246,31 @@ database or a mixed settings file. With no explicit configuration directory:
 | --- | --- |
 | macOS | `~/Library/Application Support/MissionSpec/telemetry.sqlite` |
 | Linux | `~/.config/missionspec/telemetry.sqlite` |
+| Windows | `%LOCALAPPDATA%\MissionSpec\telemetry.sqlite`; when `LOCALAPPDATA` is absent, the home directory reported by the OS plus `AppData\Local\MissionSpec\telemetry.sqlite` |
 
 An explicitly supplied absolute `XDG_CONFIG_HOME` selects
-`$XDG_CONFIG_HOME/missionspec/telemetry.sqlite` on either supported platform.
+`$XDG_CONFIG_HOME/missionspec/telemetry.sqlite` on all three platforms.
 An explicit absolute `MISSIONSPEC_CONFIG_HOME` takes precedence and declares an
 exclusively MissionSpec-owned configuration directory; the file is
 `$MISSIONSPEC_CONFIG_HOME/telemetry.sqlite`. Invalid or relative configuration
-does not silently fall back elsewhere. Neither variable selects an endpoint.
-The CLI rejects symlinked or unsafe writable ancestors and requires the selected
-MissionSpec directory to be current-user-owned and private (`0700`); it never
-changes existing directory permissions. Missing directories are created with
-owner-only permissions **only for explicit `on`/`off` saves**.
+does not silently fall back elsewhere, including an explicitly empty or invalid
+Windows `LOCALAPPDATA`. None of these variables selects an endpoint.
+The CLI rejects symlinked or unsafe writable ancestors. On POSIX the selected
+MissionSpec directory must be current-user-owned and private (`0700`).
+On Windows, native validation requires canonical, absolute local NTFS paths,
+current-user SID ownership and restrictive inheritable DACLs for private
+entries; aliases, alternate streams and reparse points are rejected before
+storage access. Existing profile/application-data containers are validated as
+ancestors, not incorrectly required to be private leaves. Only new children
+receive a private security descriptor atomically at creation. The CLI never
+changes existing directory permissions or repairs an unsafe ACL.
+Missing directories are created **only for explicit `on`/`off` saves**.
 
 There is no automatic migration from general settings JSON, discovery of random
 root databases, or workspace-local telemetry preference. Existing unrecognized
 content at the dedicated filename fails closed without replacement. The
-CLI write integration is macOS/Linux-only; Windows writes explicitly return
-`unsupported-platform` until private ACL/filesystem behavior is qualified.
+Windows CLI uses the same dedicated SQLite adapter with native private-state
+validation, not a Windows `chmod` or UID approximation.
 Ordinary hard-opted-out and unconfigured workflow invocations never initialize
 the preference store. The standalone adapter still requires an existing parent;
 directory initialization is the CLI control's responsibility, not hidden adapter
@@ -272,9 +282,20 @@ owned format, not an analytics identity. There is no endpoint, event queue,
 identifier, timestamp or analytics history. The database is bounded to 64 KiB
 (16 pages of 4 KiB); journals are SQLite's transient preference-transaction
 recovery data, not telemetry queues. SQLite temporary storage stays in memory.
-New files use mode `0600`; regular-file, final-symlink, owner and POSIX
-group/world-write checks reject unsafe destinations. Windows private parent
-ACLs and filesystem behavior still require separate qualification.
+New POSIX files use mode `0600`; regular-file, final-symlink, owner and POSIX
+group/world-write checks reject unsafe destinations. Windows files are created
+with private SID ACLs, with private parent and single-link checks before SQLite
+access. No platform falls back to a JSON mirror or another user's settings.
+
+`tests/windows-cli-observability.test.mjs` is the separate native CLI
+qualification candidate. Run
+`npm run build && node --test --test-concurrency=1 tests/windows-cli-observability.test.mjs`
+on Windows. Its actual CLI subprocesses isolate all user/configuration paths
+under private OS-profile UUID fixtures and guard HTTP/HTTPS/fetch against any
+network attempt. Coverage includes SQLite reopen/on/off, disclosure preservation,
+path precedence, unchanged inspection mtimes, hard opt-outs, foreign-database
+preservation and unsafe path/ACL refusal. POSIX tests or a non-Windows skip do
+not qualify this Windows CLI glue; a passing native run is required.
 
 Existing JSON—valid or malformed—and unrelated SQLite databases are rejected
 **without conversion, replacement, or clearing**. Unrelated general settings

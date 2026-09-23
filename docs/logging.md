@@ -104,10 +104,14 @@ exact current diagnostic bytes to empty content. Its review revision additionall
 binds the `prune-local-diagnostics` purpose, absolute path, byte count and
 identity/content/metadata revision. The persisted display identifies the
 truncation and explicitly excludes the runtime ledger, approvals and evidence.
-The injected `logPruneAuthorization` callback rechecks private workspace/log
-scope and resolves that exact request through `requireApproval` before the
-JSONL adapter's locked stale-preview check. A changed snapshot needs a fresh
-review. This control does not invoke the separate evidence pruner, emit
+The CLI rechecks private workspace/log scope and resolves that exact request
+through `requireApproval` against the production `TerminalAuthority`. Native
+filesystem-backed resolution belongs to this explicit control, before the
+composition's one-second optional authorization callback budget. That callback
+accepts only the resolved, still-unexpired terminal receipt's exact reference
+and snapshot; a trusted-callback or MCP receipt is not terminal authority.
+The JSONL adapter then performs its locked stale-preview check. A changed
+snapshot needs a fresh review. This control does not invoke the separate evidence pruner, emit
 diagnostics about itself, or enable subsequent file logging.
 The handler preserves structured unavailable results, including the safe
 failure reason and whether the effect is unchanged or unknown. The main entry
@@ -115,9 +119,11 @@ point renders those results in a blocked envelope and exits nonzero rather
 than fabricating a successful prune. Grammar and confirmation failures remain
 typed `WorkflowError`s.
 
-Writes through this CLI boundary are supported only on macOS/Linux. Windows
-reports an explicit unsupported-platform result, never a POSIX-permission
-success claim.
+The CLI uses POSIX ownership/mode checks on macOS/Linux and the native
+current-user SID/DACL, canonical local NTFS and link/reparse guards on Windows.
+Windows confirmation uses the production OS-console challenge transport, not
+`isTTY`, a JSON answer, or a test callback claiming terminal assurance.
+Unsupported or unsafe storage fails closed; no existing ACL is repaired.
 
 Each optional diagnostic attempt is bounded to 100 ms; a timeout is unavailable,
 not a claim of persistence. Already-started filesystem work can settle later.
@@ -182,14 +188,16 @@ search project settings, create directories, or derive paths from operation
 arguments. Parent directories must be trusted: final-component symlink
 protection is not a sandbox for attacker-controlled ancestor directories.
 
-- Creates files with mode `0600`; rejects final symlinks, nonregular files,
-  multiple hard links, another owner's file, or group/other permissions.
+- Creates files with mode `0600` on POSIX; rejects final symlinks, nonregular
+  files, multiple hard links, another owner's file, or group/other permissions.
 - Requires a `.jsonl` target. Existing content must be bounded canonical
   diagnostic records, not arbitrary JSONL, raw evidence or a runtime database.
   Unrecognized content is neither appended to nor pruned.
-- This built-in file sink fails closed on Windows because POSIX mode bits
-  do not establish a private Windows ACL. Stderr remains available; a
-  separately qualified Windows sink may implement `DiagnosticSink`.
+- On Windows, the built-in sink validates canonical current-user-owned local
+  NTFS paths and restrictive inheritable SID ACLs through the native private-state
+  helper. New files and locks receive their private descriptor at creation.
+  Unsafe existing ACLs, aliases and reparse points are rejected, never repaired;
+  POSIX mode bits are not used as Windows ownership proof.
 - Appends one validated bounded record per write, synchronizes it, and closes.
   In-process pending writes are serialized, with at most 64 pending operations.
 - An exclusive adjacent `.lock` coordinates independent instances/processes.
@@ -260,3 +268,14 @@ boundary directly, including no-write controls, result/error preservation,
 typed stderr diagnostics and real controlled pseudo-terminal confirmation,
 persisted-reference validation and diagnostic-only pruning. These tests do not
 substitute for the main entry point's routing tests.
+
+The Windows CLI candidate has a separate native suite:
+`npm run build && node --test --test-concurrency=1 tests/windows-cli-observability.test.mjs`.
+It runs the actual CLI child process, uses private UUID fixtures beneath the
+OS-reported user profile, and reuses the existing ConPTY driver for genuine
+OS-console challenges, declined reviews, exact persisted references and
+diagnostic-only pruning. It also asserts no-write previews, non-TTY refusal,
+unchanged retained ledger/evidence/grant fixtures, and no network attempt.
+Synthetic ConPTY does not attest human presence. A non-Windows skip or syntax
+check is not native qualification; this CLI glue requires a passing Windows
+run before its release qualification is claimed.

@@ -154,6 +154,25 @@ jobs:
         run: npm run build
       - name: Qualify real Windows backup and state selection
         run: node --test --test-concurrency=1 tests/windows-runtime-lifecycle.test.mjs
+  windows-cli-observability:
+    name: Windows CLI observability qualification
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24.21.0"
+      - name: Restore locked dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build the Windows CLI controls
+        run: npm run build
+      - name: Qualify actual private preferences and reviewed diagnostic pruning
+        run: node --test --test-concurrency=1 tests/windows-cli-observability.test.mjs
   windows-execution:
     name: Windows execution (${{ matrix.scenario }})
     runs-on: windows-latest

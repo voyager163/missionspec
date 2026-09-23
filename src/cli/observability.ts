@@ -4,6 +4,7 @@ import path from 'node:path';
 import { TerminalAuthority } from '../adapters/authority/terminal.js';
 import { LocalWorkspace } from '../adapters/filesystem/local-workspace.js';
 import type { LogPrunePreview } from '../adapters/logging/jsonl.js';
+import { validateWindowsStatePath, windowsPrivateEntries } from '../adapters/platform/windows-private-state.js';
 import { createUserTelemetryPreferenceStore } from '../adapters/telemetry/preferences.js';
 import { requireApproval } from '../application/authority.js';
 import { WorkflowError } from '../application/errors.js';
@@ -21,7 +22,7 @@ import type { InvocationPolicy, TelemetryPreferenceStore } from '../observabilit
 export type ObservabilityCliValues = Readonly<Record<string, string | boolean | readonly string[] | undefined>>;
 
 const logPath = parseProjectPath('.missionspec/logs/diagnostics.jsonl');
-const supported = (): boolean => process.platform === 'darwin' || process.platform === 'linux';
+const supported = (): boolean => ['darwin', 'linux', 'win32'].includes(process.platform);
 const unavailablePreference = {
   state: 'unavailable', reason: 'io', persistence: 'unchanged', cleanup: 'complete',
 } as const;
@@ -38,6 +39,19 @@ function preferenceDirectory(): string | undefined {
   const explicit = process.env.MISSIONSPEC_CONFIG_HOME;
   const xdg = process.env.XDG_CONFIG_HOME;
   const home = homedir();
+  if (process.platform === 'win32') {
+    const container = explicit ?? xdg ?? process.env.LOCALAPPDATA ?? home;
+    try {
+      // Validate the supplied spelling before join can erase dot/alias components.
+      validateWindowsStatePath(container);
+      const directory = explicit !== undefined ? explicit :
+        xdg !== undefined ? path.join(xdg, 'missionspec') :
+          process.env.LOCALAPPDATA !== undefined ? path.join(container, 'MissionSpec') :
+            path.join(home, 'AppData', 'Local', 'MissionSpec');
+      validateWindowsStatePath(path.join(directory, 'telemetry.sqlite'));
+      return directory;
+    } catch { return undefined; }
+  }
   const directory = explicit !== undefined ? explicit : xdg !== undefined ? path.join(xdg, 'missionspec') :
     process.platform === 'darwin' ? path.join(home, 'Library/Application Support/MissionSpec') :
       path.join(home, '.config/missionspec');
@@ -60,19 +74,28 @@ async function preferenceParents(directory: string, create: boolean): Promise<'r
     } catch (error) {
       if (!missing(error)) throw error;
       if (!create) return 'absent';
-      try { await mkdir(current, { mode: 0o700 }); } catch (creationError) {
-        if (!(typeof creationError === 'object' && creationError !== null &&
-            'code' in creationError && creationError.code === 'EEXIST')) throw creationError;
+      if (process.platform === 'win32') {
+        // Existing profile containers are ancestors, not private leaves. The
+        // native helper validates them before atomically securing a new child.
+        windowsPrivateEntries([{ path: current, directory: true, writable: true, create: true }]);
+      } else {
+        try { await mkdir(current, { mode: 0o700 }); } catch (creationError) {
+          if (!(typeof creationError === 'object' && creationError !== null &&
+              'code' in creationError && creationError.code === 'EEXIST')) throw creationError;
+        }
       }
       info = await lstat(current);
     }
-    if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o022) !== 0 ||
+    if (!info.isDirectory() || info.isSymbolicLink() || process.platform !== 'win32' && ((info.mode & 0o022) !== 0 ||
         info.uid !== 0 && info.uid !== process.getuid?.() ||
-        current === directory && (info.uid !== process.getuid?.() || (info.mode & 0o077) !== 0)) {
+        current === directory && (info.uid !== process.getuid?.() || (info.mode & 0o077) !== 0))) {
       throw new TypeError('The preference directory is not privately owned');
     }
   }
   if (directory === path.parse(directory).root) throw new TypeError('A dedicated preference directory is required');
+  if (process.platform === 'win32') {
+    windowsPrivateEntries([{ path: directory, directory: true, writable: create }]);
+  }
   return 'ready';
 }
 
@@ -176,17 +199,29 @@ export async function runObservabilityCommand(
     }
     approval = result.value.approval.reference;
   }
+  // This explicit control resolves native filesystem-backed authority before
+  // the composition's one-second optional callback budget, not inside it.
+  let issued;
+  try {
+    const current = await logPruneRequest(files, preview);
+    issued = await requireApproval(authority, approval, current, new Date().toISOString());
+  } catch (error) {
+    return {
+      state: 'unavailable',
+      reason: error instanceof WorkflowError && error.code !== 'persistence-failed' ?
+        'authorization-rejected' : 'authorization-unavailable',
+      effect: 'unchanged',
+    };
+  }
+  const verified = issued;
   const lifecycle = createObservabilityLifecycle({
     policy: policy(values), distributedVersion: '0.0.0', localLogPath: path.join(files.root, logPath),
     logPruneAuthorization: {
       async authorize(input) {
-        try {
-          const current = await logPruneRequest(files, input.preview);
-          const issued = await requireApproval(authority, input.approval, current, new Date().toISOString());
-          return { state: issued.assurance.channel === 'terminal-confirmation' ? 'authorized' : 'rejected' };
-        } catch (error) {
-          return { state: error instanceof WorkflowError && error.code !== 'persistence-failed' ? 'rejected' : 'unavailable' };
-        }
+        return { state: verified.assurance.channel === 'terminal-confirmation' &&
+          verified.reference.id === input.approval.id && Date.parse(verified.expiresAt) > Date.now() &&
+          input.preview.path === preview.path && input.preview.bytes === preview.bytes &&
+          input.preview.revision === preview.revision ? 'authorized' : 'rejected' };
       },
     },
   });

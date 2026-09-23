@@ -15,7 +15,9 @@ const exec = promisify(execFile);
 const moduleUrl = new URL('../dist/cli/observability.js', import.meta.url).href;
 const errorsUrl = new URL('../dist/application/errors.js', import.meta.url).href;
 const authorityUrl = new URL('../dist/adapters/authority/terminal.js', import.meta.url).href;
+const localAuthorityUrl = new URL('../dist/adapters/authority/local-authority.js', import.meta.url).href;
 const driver = path.resolve('tests/fixtures/terminal-driver.py');
+const networkGuard = path.resolve('tests/fixtures/cli-observability-network-guard.mjs');
 const cli = path.resolve('dist/cli/main.js');
 const commandSource = `
   const { runObservabilityCommand } = await import(${JSON.stringify(moduleUrl)});
@@ -25,7 +27,7 @@ const commandSource = `
   } catch (error) { console.log('OBS:' + JSON.stringify({ error: { code: error.code, name: error.name, message: error.message } })); }
 `;
 const posix = ['darwin', 'linux'].includes(process.platform);
-const options = { skip: !posix && 'The CLI write integration is qualified only on macOS/Linux.' };
+const options = { skip: !posix && 'POSIX CLI fixtures; Windows has a separate native suite.' };
 
 async function fixture(t, extraEnv = {}) {
   const root = path.resolve(`.cli-observability-test-${randomUUID()}`);
@@ -36,7 +38,7 @@ async function fixture(t, extraEnv = {}) {
     'MISSIONSPEC_CONFIG_HOME', 'XDG_CONFIG_HOME']) delete env[name];
   Object.assign(env, { HOME: root, MISSIONSPEC_CONFIG_HOME: path.join(root, 'preferences') }, extraEnv);
   const run = async (source, args = [], tty) => {
-    const invocation = ['--input-type=module', '-e', source, ...args];
+    const invocation = ['--import', networkGuard, '--input-type=module', '-e', source, ...args];
     const output = tty === undefined
       ? await exec(process.execPath, invocation, { cwd: root, env, maxBuffer: 10_000_000 })
       : await exec('python3', [driver, tty, root, process.execPath, ...invocation], { env, maxBuffer: 10_000_000 });
@@ -52,7 +54,7 @@ async function fixture(t, extraEnv = {}) {
       return tty === undefined ? { ...decode(result.stdout), stderr: result.stderr } : { ...result, ...decode(result.output) };
     },
     async initialize() {
-      const { stdout } = await exec('python3', [driver, 'confirm', root, process.execPath, cli, 'init', '--json'],
+      const { stdout } = await exec('python3', [driver, 'confirm', root, process.execPath, '--import', networkGuard, cli, 'init', '--json'],
         { env, maxBuffer: 10_000_000 });
       const result = JSON.parse(stdout);
       assert.equal(result.code, 0, result.output);
@@ -101,6 +103,15 @@ test('status, representative preview and absent log preview do not initialize an
   assert.deepEqual((await f.command(['logs', 'prune'], { preview: true })).result, { state: 'absent' });
   assert.deepEqual(await tree(f.root), before);
   for (const output of [status.stderr, preview.stderr]) assert.doesNotMatch(output, /operation-started|operation-stopped/u);
+});
+
+test('the CLI child network guard cannot hide a caught delivery attempt', options, async (t) => {
+  const f = await fixture(t);
+  await assert.rejects(f.run(`
+    import { request } from 'node:https';
+    try { request('https://telemetry.invalid'); } catch {}
+  `), (error) => error.code === 98 && error.stdout === '' && error.stderr === '');
+  assert.deepEqual(await readdir(f.root), []);
 });
 
 test('explicit on/off persist real dedicated SQLite without touching mixed settings or acknowledging disclosure', options, async (t) => {
@@ -192,20 +203,25 @@ test('control grammar rejects generic approval flags, ambiguous previews and unr
   assert.deepEqual(await readdir(f.root), []);
 });
 
-test('Windows writes are explicitly unavailable and cannot initialize state', async (t) => {
+test('native CLI failures are blocked and invalid explicit paths never fall back or initialize state', options, async (t) => {
   const f = await fixture(t);
-  const output = await f.run(`
-    import assert from 'node:assert/strict';
-    Object.defineProperty(process, 'platform', { value: 'win32' });
-    const { runObservabilityCommand } = await import(${JSON.stringify(moduleUrl)});
-    for (const args of [['telemetry', 'on'], ['telemetry', 'off'], ['logs', 'prune']]) {
-      const result = await runObservabilityCommand(args, {});
-      assert.equal(result.state, 'unavailable');
-      assert.equal(result.reason, 'unsupported-platform');
+  f.env.XDG_CONFIG_HOME = path.join(f.root, 'xdg');
+  for (const directory of ['', 'relative-config', '/invalid\npath']) {
+    f.env.MISSIONSPEC_CONFIG_HOME = directory;
+    for (const action of ['on', 'off', 'status']) {
+      await assert.rejects(exec(process.execPath, ['--import', networkGuard, cli, 'telemetry', action, '--json'], { cwd: f.root, env: f.env }),
+        (error) => {
+          assert.equal(error.code, 2);
+          const result = JSON.parse(error.stdout);
+          assert.equal(result.status, 'blocked');
+          assert.equal(result.value.state, 'unavailable');
+          return true;
+        });
     }
-    assert.equal((await runObservabilityCommand(['logs', 'prune'], { preview: true })).state, 'unavailable');
-  `);
-  assert.equal(output.stdout, '');
+  }
+  delete f.env.MISSIONSPEC_CONFIG_HOME;
+  f.env.XDG_CONFIG_HOME = 'relative-xdg';
+  assert.equal((await f.command(['telemetry', 'off'])).result.state, 'unavailable');
   assert.deepEqual(await readdir(f.root), []);
 });
 
@@ -372,6 +388,17 @@ test('real controlled TTY pruning persists exact review, rejects wrong-scope ref
     binding: { ...receipt.approval.request.binding,
       revision: digestContent(JSON.stringify({ action: 'prune-local-diagnostics', preview: currentPreview })) },
   };
+  const callback = await f.run(`
+    const { openLocalAuthority } = await import(${JSON.stringify(localAuthorityUrl)});
+    const authority = await openLocalAuthority({ directory: process.cwd(), transport: {
+      channel: 'trusted-callback', protocolIdentity: { id: 'cli-prune-component-test', version: '1' },
+      async confirm() { return 'accept'; },
+    } });
+    console.log('OBS:' + JSON.stringify(await authority.requestConfirmation(JSON.parse(process.argv[1]))));
+  `, [JSON.stringify(request)]);
+  const callbackReference = f.decode(callback.stdout).value.approval.reference;
+  assert.equal((await f.command(['logs', 'prune'], { approval: callbackReference.id })).result.reason, 'authorization-rejected');
+  assert.deepEqual(await readFile(file), changed);
   const issued = await f.run(`
     const { TerminalAuthority } = await import(${JSON.stringify(authorityUrl)});
     const authority = await TerminalAuthority.open(process.cwd());
@@ -383,7 +410,16 @@ test('real controlled TTY pruning persists exact review, rejects wrong-scope ref
   `, [JSON.stringify(request), JSON.stringify(currentPreview)], 'confirm');
   assert.equal(issued.confirmations, 1, issued.output);
   const reference = f.decode(issued.output).value.approval.reference;
-  assert.equal((await f.command(['logs', 'prune'], { approval: reference.id })).result.state, 'pruned');
+  const delayed = await f.run(`
+    const { TerminalAuthority } = await import(${JSON.stringify(authorityUrl)});
+    const resolve = TerminalAuthority.prototype.resolve;
+    TerminalAuthority.prototype.resolve = async function (...args) {
+      await new Promise((done) => setTimeout(done, 1100));
+      return resolve.apply(this, args);
+    };
+    ${commandSource}
+  `, [JSON.stringify(['logs', 'prune']), JSON.stringify({ approval: reference.id })]);
+  assert.equal(f.decode(delayed.stdout).result.state, 'pruned');
   assert.equal((await readFile(file)).length, 0);
   const revoked = await f.run(`
     const { TerminalAuthority } = await import(${JSON.stringify(authorityUrl)});

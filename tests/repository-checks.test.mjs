@@ -77,6 +77,14 @@ test('telemetry CI checks only the canonical ARM definition without executing cl
   assert(steps.every((step) => !step.run?.includes('infrastructure/opentofu/telemetry')));
 });
 
+test('Windows CLI observability runs its complete native suite within a bounded job', async () => {
+  const workflow = parseYaml(await readFile(new URL('../.github/workflows/repository.yml', import.meta.url), 'utf8'), 'repository workflow');
+  const job = workflow.jobs['windows-cli-observability'];
+  assert.equal(job['runs-on'], 'windows-latest');
+  assert(job['timeout-minutes'] > 0 && job['timeout-minutes'] <= 15);
+  assert(job.steps.some((step) => step.run === 'node --test --test-concurrency=1 tests/windows-cli-observability.test.mjs'));
+});
+
 test('Windows execution matrix covers each console and registered-check case once and the complete process suite', async () => {
   const workflow = parseYaml(await readFile(new URL('../.github/workflows/repository.yml', import.meta.url), 'utf8'), 'repository workflow');
   const job = workflow.jobs['windows-execution'];

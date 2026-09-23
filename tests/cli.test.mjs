@@ -86,7 +86,10 @@ test('real CLI telemetry controls persist the sole preference without an endpoin
   const call = async (action) => JSON.parse((await promisify(execFile)(process.execPath,
     [entry, 'telemetry', action, '--json'], { cwd, env })).stdout);
   if (process.platform === 'win32') {
-    await assert.rejects(call('status'), (error) => JSON.parse(error.stdout).status === 'blocked');
+    const status = await call('status');
+    assert.equal(status.status, 'ok');
+    assert.equal(status.value.configured, false);
+    assert.equal(status.value.preference, 'default');
     await assert.rejects(call('off'), (error) => JSON.parse(error.stdout).status === 'blocked');
     assert.equal((await call('preview')).value.delivery, 'not-attempted');
     assert.deepEqual(await readdir(cwd), []);
