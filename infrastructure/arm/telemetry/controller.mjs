@@ -9,7 +9,7 @@ import { isDeepStrictEqual, types } from 'node:util';
 import { PHASES, buildPhase, deploymentName, validateConfig, ids, digest, json, fail, sameId, storageContract, firstReleaseCost, assertOwned, RECEIVER_COMMAND,
   closed, budgetConfiguration, projectBudgetFilter, verifyFoundationBudgets, reconciliationBinding } from './definition.mjs';
 import { assertBudget, verifyWhatIf, verifyResource, verifyApproval, verifyFreshReview, sourceContractsSummary, permitFirstPush,
-  executionIdentity, verifyExecutionOrigin, verifyReconciliation, verifyDeploymentIdentity } from './policy.mjs';
+  executionIdentity, verifyExecutionOrigins, verifyReconciliation, verifyDeploymentIdentity } from './policy.mjs';
 
 const execute = promisify(execFile), here = dirname(fileURLToPath(import.meta.url));
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -274,12 +274,9 @@ export async function publishedSourceDigest(commitSha, run = execute) {
     return hash.digest('hex');
   } catch { fail('PUBLISHED_ORIGIN_UNAVAILABLE'); }
 }
-async function verifyPublishedOrigins(c, foundation, origins, lookup = publishedSourceDigest) {
-  closed(origins, ['version', 'records']);
-  if (origins.version !== 1 || !Array.isArray(origins.records) || !origins.records.length || origins.records.length > 2 ||
-      new Set(origins.records.map(v => v.phase?.phase)).size !== origins.records.length) fail('EXECUTION_ORIGIN_INVALID');
+async function verifyPublishedOrigins(c, foundation, origins, lookup = publishedSourceDigest, contract) {
+  verifyExecutionOrigins(c, foundation, origins, contract ?? await storageContract());
   for (const record of origins.records) {
-    verifyExecutionOrigin(c, foundation, record);
     if (await lookup(record.publication.commitSha) !== record.publication.sourceSha256) fail('PUBLISHED_SOURCE_MISMATCH');
   }
 }
@@ -298,21 +295,22 @@ export async function readPrivacy(c, phase, arm) {
   }
   return { diagnostics, exports };
 }
-async function readReconciledPhase(c, record, arm) {
+async function readReconciledPhase(c, record, arm, context = {}) {
   const phase = record.phase, deployment = await arm('GET', phase.deploymentId, '2022-09-01'), resources = {}, identityPins = {};
   verifyDeploymentIdentity(record.firstReadback.deployment, deployment);
   for (const descriptor of phase.resources) {
     const actual = await arm('GET', descriptor.id, descriptor.apiVersion);
-    verifyResource(c, phase, descriptor, actual);
-    const pin = executionIdentity(actual);
-    if (!isDeepStrictEqual(pin, executionIdentity(record.firstReadback.resources[descriptor.id]))) fail('RESOURCE_IDENTITY_CHANGED');
+    verifyResource(c, phase, descriptor, actual, context);
+    const pin = executionIdentity(actual, descriptor.type);
+    if (!isDeepStrictEqual(pin, executionIdentity(record.firstReadback.resources[descriptor.id], descriptor.type))) fail('RESOURCE_IDENTITY_CHANGED');
     resources[descriptor.id] = actual; identityPins[descriptor.id] = pin;
   }
   return { executionOriginSha256: digest(json(record)), deployment, resources, identityPins, ...await readPrivacy(c, phase, arm) };
 }
 export async function collectReconciliation(c, origin, directory, evidence, invoke = az, lookup = publishedSourceDigest) {
   const foundation = verifyFoundationBudgets(c, evidence.foundationBudgets), origins = evidence.reconciliation.origins;
-  await verifyPublishedOrigins(c, foundation, origins, lookup);
+  const contract = await storageContract();
+  await verifyPublishedOrigins(c, foundation, origins, lookup, contract);
   const r = ids(c), arm = transport(c, origins.records[0].phase, directory, invoke);
   const account = await invoke(['account', 'show', '--subscription', c.subscriptionId, '--only-show-errors', '--output', 'json']);
   if (account?.id !== c.subscriptionId || account?.tenantId !== c.tenantId || account?.state !== 'Enabled' || account?.environmentName !== 'AzureCloud') fail('EXPLICIT_ACCOUNT_MISMATCH');
@@ -325,34 +323,37 @@ export async function collectReconciliation(c, origin, directory, evidence, invo
   if (provider?.registrationState !== 'Registered' || !provider.resourceTypes?.some(v =>
     v.resourceType?.toLowerCase() === 'diagnosticsettings' && v.apiVersions?.includes(DIAGNOSTIC_API))) fail('DIAGNOSTIC_API_NOT_REGISTERED');
   const results = {};
-  for (const record of origins.records) results[record.phase.phase] = await readReconciledPhase(c, record, arm);
+  const workspace = origins.records.some(v => v.phase.phase === 'data') ? await arm('GET', r.workspace, '2023-09-01') : null;
+  for (const record of origins.records) results[record.phase.phase] = await readReconciledPhase(c, record, arm, { workspace });
   const stateBudget = await arm('GET', r.stateBudget, '2024-08-01');
   const inventory = await arm('GET', `${r.group}/resources`, '2021-04-01', undefined, '$expand=createdTime,changedTime');
   const managedGroup = await arm('GET', r.managedGroup, '2024-03-01');
-  const proposal = { version: 1, kind: 'read-only-completed-phases', sourceSha256: await sourceDigest(),
+  const proposal = { version: 2, kind: 'read-only-completed-phases', sourceSha256: await sourceDigest(),
     configSha256: digest(json(c)), executionOriginsSha256: digest(json(origins)), baselineSha256,
-    checkedAt: new Date().toISOString(), results, stateBudget, inventory, managedGroup };
-  verifyReconciliation(c, foundation, origins, proposal, proposal.sourceSha256);
+    checkedAt: new Date().toISOString(), results, stateBudget, workspace, inventory, managedGroup };
+  verifyReconciliation(c, foundation, origins, proposal, proposal.sourceSha256, null, contract);
   return proposal;
 }
 export async function reviewedReconciliationReceipts(c, foundation, evidence, sourceSha256, lookup = publishedSourceDigest) {
   if (!evidence?.origins || !evidence.proposal || !evidence.review) fail('RECONCILIATION_REVIEW_REQUIRED');
-  await verifyPublishedOrigins(c, foundation, evidence.origins, lookup);
-  verifyReconciliation(c, foundation, evidence.origins, evidence.proposal, sourceSha256, evidence.review);
+  const contract = await storageContract();
+  await verifyPublishedOrigins(c, foundation, evidence.origins, lookup, contract);
+  verifyReconciliation(c, foundation, evidence.origins, evidence.proposal, sourceSha256, evidence.review, contract);
   return Object.fromEntries(evidence.origins.records.map(record => {
     const phase = record.phase.phase, result = evidence.proposal.results[phase];
     return [phase, { qualificationKind: 'reviewed-read-only-reconciliation', qualified: true, phase,
       configSha256: digest(json(c)), phaseSha256: digest(json(record.phase)), sourceSha256: record.publication.sourceSha256,
       deployment: result.deployment, resources: result.resources,
-      reconciliation: { ...reconciliationBinding(evidence), policySourceSha256: sourceSha256,
+      reconciliation: { contractVersion: 2, ...reconciliationBinding(evidence), policySourceSha256: sourceSha256,
         executionOriginSha256: digest(json(record)), checkedAt: evidence.proposal.checkedAt, reviewedAt: evidence.review.reviewedAt,
         originalJournalOutcome: record.journal.outcome, originalReceiptQualified: record.originalReceipt?.qualified === true } }];
   }));
 }
 export async function verifyFreshReconciliation(c, directory, evidence, invoke = az) {
   const arm = transport(c, evidence.origins.records[0].phase, directory, invoke);
+  const workspace = evidence.origins.records.some(v => v.phase.phase === 'data') ? await arm('GET', ids(c).workspace, '2023-09-01') : null;
   for (const record of evidence.origins.records) {
-    const current = await readReconciledPhase(c, record, arm);
+    const current = await readReconciledPhase(c, record, arm, { workspace });
     if (!isDeepStrictEqual(current.identityPins, evidence.proposal.results[record.phase.phase].identityPins)) fail('RESOURCE_IDENTITY_CHANGED');
   }
   assertBudget(await arm('GET', ids(c).stateBudget, '2024-08-01'), c, 50);
@@ -487,8 +488,10 @@ export class CollectorController {
         const state = d?.properties?.provisioningState;
         if (state === 'Succeeded') {
           const resources = {};
+          const context = p.resources.some(v => v.type === 'Microsoft.Insights/dataCollectionRules')
+            ? { workspace: await this.io.arm('GET', ids(this.config).workspace, '2023-09-01') } : {};
           for (const descriptor of p.resources) resources[descriptor.id] =
-            verifyResource(this.config, p, descriptor, await this.io.arm('GET', descriptor.id, descriptor.apiVersion));
+            verifyResource(this.config, p, descriptor, await this.io.arm('GET', descriptor.id, descriptor.apiVersion), context);
           await this.io.privacyChecks(resources);
           const receipt = { qualified: true, phase: p.phase, configSha256: approval.configSha256, phaseSha256: approval.phaseSha256,
             sourceSha256: approval.sourceSha256, deployment: d, resources, completedAt: new Date(this.io.now()).toISOString() };
@@ -516,13 +519,13 @@ async function main() {
   const origin = await load(directory, 'origin.json'), rawReceipts = await load(directory, 'receipts.json');
   const evidenceFiles = { scannerAdoption: await load(directory, 'scanner-adoption.json'),
     foundationBudgets: await load(directory, 'foundation-budgets.json'),
-    reconciliation: { origins: await load(directory, 'execution-origins-v1.json', true),
+    reconciliation: { origins: await load(directory, 'execution-origins-v2.json', true),
       proposal: await load(directory, 'reconciliation-proposal.json', true),
       review: await load(directory, 'reconciliation-review.json', true) } };
   verifyScannerAdoption(c, origin, evidenceFiles.scannerAdoption);
   verifyFoundationBudgets(c, evidenceFiles.foundationBudgets);
   if (['reconcile', 'qualify-reconciliation'].includes(operation)) {
-    if (phaseName !== 'core' || !evidenceFiles.reconciliation.origins?.records.some(v => v.phase.phase === 'core')) fail('CORE_RECONCILIATION_ORIGINS_REQUIRED');
+    if (evidenceFiles.reconciliation.origins?.records.at(-1)?.phase.phase !== phaseName) fail('RECONCILIATION_ORIGINS_REQUIRED');
     if (operation === 'reconcile') {
       if (evidenceFiles.reconciliation.proposal || evidenceFiles.reconciliation.review) fail('PRESERVE_RECONCILIATION_HISTORY');
       const proposal = await collectReconciliation(c, origin, directory, evidenceFiles);

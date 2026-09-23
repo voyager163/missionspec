@@ -7,7 +7,7 @@ import { chmod, link, mkdir, open, readFile, readdir, rename, rm, symlink, trunc
 import { buildPhase, storageContract, ids, json, digest, ownerTags, firstReleaseCost, PHASES, LIMITS, RECEIVER_DIGEST, RECEIVER_COMMAND,
   BUDGET, budgetProperties, budgetConfiguration, projectBudgetFilter, validateConfig } from '../definition.mjs';
 import { verifyWhatIf, assertBudget, permitFirstPush, verifyResource, executionIdentity,
-  verifyExecutionOrigin, verifyReconciliation, verifyDeploymentIdentity } from '../policy.mjs';
+  verifyExecutionOrigins, verifyReconciliation, verifyDeploymentIdentity } from '../policy.mjs';
 import { CollectorController, az, transport, validateReadOnly, verifyScannerAdoption, verifyOrigin, verifyProjectBudgetReceipt,
   checkReadOnly, load, saveImmutable, MAX_PRIVATE_ARTIFACT_BYTES, DIAGNOSTIC_API, privateDirectory, sourceDigest,
   publishedSourceDigest, collectReconciliation, reviewedReconciliationReceipts, verifyFreshReconciliation, readPrivacy } from '../controller.mjs';
@@ -406,62 +406,99 @@ test('later phases require a matching qualified budget deployment receipt, never
 });
 function fixtureReconciliation(config = c, baseline = digest('baseline')) {
   const f = fixtureFoundation(config), r = ids(config), source = digest('current policy');
-  const records = ['project-budget', 'core'].map((name, index) => {
-    const phase = buildPhase(config, name, contract, {}, f);
+  const records = [], inventory = { value: [] }, base = Date.parse('2026-09-23T00:00:00.000Z');
+  const iso = offset => new Date(base + offset).toISOString();
+  for (const [index, name] of ['project-budget', 'core', 'workspace-access', 'data'].entries()) {
+    const oldSource = digest(index < 2 ? `executed source ${name}` : 'executed workspace and data source');
+    const intent = (index * 5 + 1) * 60000, prerequisiteReceipts = {};
+    for (const prior of records) {
+      const priorName = prior.phase.phase;
+      if (index >= 2 && ['project-budget', 'core'].includes(priorName)) {
+        prerequisiteReceipts[priorName] = { qualificationKind: 'reviewed-read-only-reconciliation', qualified: true, phase: priorName,
+          configSha256: digest(json(config)), phaseSha256: digest(json(prior.phase)), sourceSha256: prior.publication.sourceSha256,
+          deployment: structuredClone(prior.firstReadback.deployment), resources: structuredClone(prior.firstReadback.resources),
+          reconciliation: { proposalSha256: digest('historical proposal'), reviewSha256: digest('historical review'),
+            executionOriginSha256: digest(json(prior)), policySourceSha256: oldSource,
+            checkedAt: iso(8 * 60000), reviewedAt: iso(9 * 60000),
+            originalJournalOutcome: prior.journal.outcome, originalReceiptQualified: prior.originalReceipt?.qualified === true } };
+      } else prerequisiteReceipts[priorName] = structuredClone(prior.originalReceipt);
+    }
+    const phase = buildPhase(config, name, contract, prerequisiteReceipts, f);
     if (name === 'core') {
       phase.resources.find(v => v.id === r.environment).expected.properties.infrastructureResourceGroup = `${config.namePrefix}-managed`;
     }
-    const oldSource = digest(`executed source ${name}`), resources = {};
+    const resources = {};
     for (const descriptor of phase.resources) {
-      const v = { ...structuredClone(descriptor.expected), id: descriptor.id };
+      const v = name === 'workspace-access' ? structuredClone(prerequisiteReceipts.core.resources[r.workspace])
+        : { ...structuredClone(descriptor.expected), id: descriptor.id };
       v.properties.provisioningState = 'Succeeded';
-      if (descriptor.id === r.registry) Object.assign(v.properties, { loginServer: `${config.registryName}.azurecr.io`, creationDate: '2026-09-23T00:01:02.000Z' });
+      if (descriptor.id === r.registry) Object.assign(v.properties, { loginServer: `${config.registryName}.azurecr.io`, creationDate: iso(intent + 2000) });
       if (descriptor.id === r.ingestIdentity || descriptor.id === r.pullIdentity) {
         const ids = fixtureReceipts(config).core.resources[descriptor.id].properties;
         Object.assign(v.properties, ids, { tenantId: config.tenantId });
       }
-      if (descriptor.id === r.workspace) Object.assign(v.properties, { customerId: '00000000-0000-4000-8000-000000000009', createdDate: '2026-09-23T00:01:02.000Z' });
+      if (descriptor.id === r.workspace && name === 'core') Object.assign(v.properties, { customerId: '00000000-0000-4000-8000-000000000009', createdDate: iso(intent + 2000) });
       if (descriptor.id === r.environment) {
         Object.assign(v.properties, { infrastructureResourceGroup: null, vnetConfiguration: null,
           defaultDomain: 'fixture.australiaeast.azurecontainerapps.io', customDomainConfiguration: { customDomainVerificationId: 'fixture-verification' } });
         // The provider stamp is pinned, not reinterpreted as the ARM inventory's creation time.
-        v.systemData = { createdAt: '2026-09-22T16:01:02.000Z' };
+        v.systemData = { createdAt: iso(intent + 2000 - 8 * 3600000) };
       }
       if (descriptor.type === 'Microsoft.Consumption/budgets') delete v.properties.provisioningState;
+      if (descriptor.id === r.table) {
+        delete v.type;
+        v.systemData = { createdAt: iso(intent + 2000) };
+        v.properties.archiveRetentionInDays = 0;
+        Object.assign(v.properties.schema, { tableType: 'CustomLog', tableSubType: 'DataCollectionRuleBased', solutions: ['LogManagement'],
+          isTroubleshootingAllowed: true, standardColumns: [{ name: 'TenantId', type: 'guid', isDefaultDisplay: false, isHidden: false }] });
+        v.properties.schema.columns = v.properties.schema.columns.map(column => ({ ...column, isDefaultDisplay: false, isHidden: false }));
+      }
+      if (descriptor.id === r.dcr) {
+        v.systemData = { createdAt: iso(intent + 2000) };
+        Object.assign(v.properties, { immutableId: 'dcr-' + 'a'.repeat(32), endpoints: { logsIngestion: 'https://fixture.australiaeast-1.ingest.monitor.azure.com' } });
+        v.properties.destinations.logAnalytics[0].workspaceId = prerequisiteReceipts['workspace-access'].resources[r.workspace].properties.customerId;
+      }
       resources[descriptor.id] = v;
+      if (descriptor.type !== 'Microsoft.Consumption/budgets' && descriptor.id !== r.table && !inventory.value.some(v => v.id === descriptor.id)) {
+        inventory.value.push({ id: descriptor.id, type: descriptor.type, createdTime: iso(intent + 2000) });
+      }
     }
     const deployment = { id: phase.deploymentId, properties: { provisioningState: 'Succeeded', mode: 'Incremental',
-      correlationId: `${name}-correlation`, timestamp: '2026-09-23T00:02:00.000Z', templateHash: `${name}-template` } };
-    const whatIf = { status: 'Succeeded', changes: phase.resources.map(d => name === 'core'
-      ? { resourceId: d.id, changeType: 'Create' }
-      : { resourceId: d.id, changeType: 'Modify', before: f.project, after: d.expected }) };
+      correlationId: `${name}-correlation`, timestamp: iso(intent + 60000), templateHash: `${name}-template` } };
+    const whatIf = { status: 'Succeeded', changes: phase.resources.map(d => name === 'project-budget'
+      ? { resourceId: d.id, changeType: 'Modify', before: f.project, after: d.expected }
+      : { resourceId: d.id, changeType: name === 'workspace-access' ? 'NoChange' : 'Create' }) };
+    if (index >= 2) for (const descriptor of records[1].phase.resources) {
+      if (descriptor.type !== 'Microsoft.Consumption/budgets' && !phase.resources.some(v => v.id === descriptor.id)) {
+        whatIf.changes.push({ resourceId: descriptor.id, changeType: 'Ignore' });
+      }
+    }
     const bindings = { sourceSha256: oldSource, phaseSha256: digest(json(phase)), configSha256: digest(json(config)),
-      originSha256: config.originSha256, whatIfSha256: digest(json(whatIf)), baselineSha256: baseline, receiptsSha256: digest('previous receipts') };
-    const originalReceipt = name === 'core' ? null : { qualified: true, phase: name, configSha256: bindings.configSha256,
-      phaseSha256: bindings.phaseSha256, sourceSha256: oldSource, deployment, resources, completedAt: '2026-09-23T00:02:01.000Z' };
-    return { version: 1, publication: { commitSha: String(index + 1).repeat(40), sourceSha256: oldSource }, phase,
-      approval: { action: `direct-arm-${name}`, ...bindings, approvedAt: '2026-09-23T00:00:00.000Z', expiresAt: '2026-09-23T00:30:00.000Z' },
-      journal: { phase: name, phaseSha256: bindings.phaseSha256, intentAt: '2026-09-23T00:01:00.000Z',
-        outcome: name === 'core' ? 'reconciliation-required' : 'readback-qualified',
-        ...(name === 'core' ? { failureCode: 'ENVIRONMENT_PRIVACY_DRIFT' } : {}) },
-      preflight: { ...bindings, qualified: true, cost: firstReleaseCost(), startedAt: Date.parse('2026-09-23T00:00:20.000Z'), completedAt: Date.parse('2026-09-23T00:00:40.000Z') },
+      originSha256: config.originSha256, whatIfSha256: digest(json(whatIf)), baselineSha256: baseline, receiptsSha256: digest(json(prerequisiteReceipts)) };
+    const held = ['core', 'data'].includes(name);
+    const originalReceipt = held ? null : { qualified: true, phase: name, configSha256: bindings.configSha256,
+      phaseSha256: bindings.phaseSha256, sourceSha256: oldSource, deployment, resources, completedAt: iso(intent + 61000) };
+    records.push({ version: 2, publication: { commitSha: String(index + 1).repeat(40), sourceSha256: oldSource }, phase, prerequisiteReceipts,
+      approval: { action: `direct-arm-${name}`, ...bindings, approvedAt: iso(intent - 60000), expiresAt: iso(intent + 29 * 60000) },
+      journal: { phase: name, phaseSha256: bindings.phaseSha256, intentAt: iso(intent),
+        outcome: held ? 'reconciliation-required' : 'readback-qualified',
+        ...(held ? { failureCode: name === 'core' ? 'ENVIRONMENT_PRIVACY_DRIFT' : 'TABLE_RETENTION_SCHEMA_DRIFT' } : {}) },
+      preflight: { ...bindings, qualified: true, cost: firstReleaseCost(), startedAt: base + intent - 40000, completedAt: base + intent - 20000 },
       validation: { properties: { provisioningState: 'Succeeded', templateHash: deployment.properties.templateHash } }, whatIf,
-      firstReadback: { checkedAt: '2026-09-23T00:02:01.000Z', deployment, resources }, originalReceipt };
-  });
-  const origins = { version: 1, records };
-  const inventory = { value: records[1].phase.resources.filter(v => v.type !== 'Microsoft.Consumption/budgets')
-    .map(v => ({ id: v.id, type: v.type, createdTime: '2026-09-23T00:01:02.000Z' })) };
-  const proposal = { version: 1, kind: 'read-only-completed-phases', sourceSha256: source,
+      firstReadback: { checkedAt: iso(intent + 61000), deployment, resources }, originalReceipt });
+  }
+  const origins = { version: 2, records };
+  const proposal = { version: 2, kind: 'read-only-completed-phases', sourceSha256: source,
     configSha256: digest(json(config)), executionOriginsSha256: digest(json(origins)), baselineSha256: baseline,
-    checkedAt: '2026-09-23T00:03:00.000Z', results: Object.fromEntries(records.map(record => [record.phase.phase, {
+    checkedAt: iso(40 * 60000), results: Object.fromEntries(records.map(record => [record.phase.phase, {
       executionOriginSha256: digest(json(record)), deployment: structuredClone(record.firstReadback.deployment),
       resources: structuredClone(record.firstReadback.resources),
-      identityPins: Object.fromEntries(Object.entries(record.firstReadback.resources).map(([id, value]) => [id, executionIdentity(value)])),
-      diagnostics: record.phase.phase === 'core' ? { [r.workspace]: { value: [] }, [r.environment]: { value: [] } } : {},
-      exports: record.phase.phase === 'core' ? { value: [] } : null }])),
-    stateBudget: f.state, inventory, managedGroup: null };
-  const review = { version: 1, action: 'accept-exact-arm-reconciliation', sourceSha256: source,
-    proposalSha256: digest(json(proposal)), reviewedAt: '2026-09-23T00:04:00.000Z' };
+      identityPins: Object.fromEntries(record.phase.resources.map(descriptor => [descriptor.id, executionIdentity(record.firstReadback.resources[descriptor.id], descriptor.type)])),
+      diagnostics: Object.fromEntries(record.phase.resources.filter(v => [r.workspace, r.environment].includes(v.id)).map(v => [v.id, { value: [] }])),
+      exports: record.phase.phase !== 'project-budget' ? { value: [] } : null }])),
+    stateBudget: f.state, workspace: structuredClone(records[2].firstReadback.resources[r.workspace]), inventory, managedGroup: null };
+  const review = { version: 2, action: 'accept-exact-arm-reconciliation', sourceSha256: source,
+    proposalSha256: digest(json(proposal)), reviewedAt: iso(41 * 60000) };
   const lookup = async commit => records.find(v => v.publication.commitSha === commit)?.publication.sourceSha256;
   return { config, foundation: f, origins, proposal, review, source, lookup };
 }
@@ -484,10 +521,68 @@ test('default-network Consumption readback admits null infrastructure group but 
   assert.throws(() => verifyResource(c, p, custom, actual), /ENVIRONMENT_PRIVACY_DRIFT/);
   assert.equal(firstReleaseCost().total, 301.66);
 });
+test('Table GET accepts only the documented boolean column display flags without changing the data contract', () => {
+  const f = fixtureReconciliation(), p = f.origins.records[3].phase, descriptor = p.resources.find(v => v.id === r.table);
+  const actual = f.proposal.results.data.resources[r.table];
+  assert.equal(actual.type, undefined);
+  verifyResource(c, p, descriptor, actual);
+  for (const key of ['isDefaultDisplay', 'isHidden']) {
+    const allowed = structuredClone(actual); allowed.properties.schema.columns[0][key] = true;
+    verifyResource(c, p, descriptor, allowed);
+    delete allowed.properties.schema.columns[0][key];
+    verifyResource(c, p, descriptor, allowed);
+    for (const value of [null, 0, 'false', [], {}]) {
+      const bad = structuredClone(actual); bad.properties.schema.columns[0][key] = value;
+      assert.throws(() => verifyResource(c, p, descriptor, bad), /TABLE_RETENTION_SCHEMA_DRIFT/);
+    }
+  }
+  for (const change of [
+    v => { v.properties.schema.columns.reverse(); }, v => { v.properties.schema.columns[1].type = 'string'; },
+    v => { v.properties.schema.columns[1].name = 'other'; }, v => { v.properties.schema.columns.push({ name: 'clientId', type: 'string' }); },
+    v => { v.properties.schema.columns.pop(); }, v => { v.properties.schema.columns[0].dataTypeHint = 'armPath'; },
+    v => { v.properties.schema.columns[0].description = 'unreviewed'; }, v => { v.properties.schema.extra = true; },
+    v => { v.properties.schema.name = 'Other_CL'; }, v => { v.properties.schema.tableType = 'SearchResults'; },
+    v => { v.properties.schema.tableSubType = 'Classic'; },
+    v => { v.properties.schema.standardColumns.push({ name: 'clientAddress', type: 'string' }); },
+    v => { v.properties.schema.isTroubleshootingAllowed = 'true'; }, v => { v.properties.schema.solutions = ['Other']; },
+    v => { v.properties.retentionInDays = 30; }, v => { v.properties.totalRetentionInDays = 365; },
+    v => { v.properties.archiveRetentionInDays = 1; }, v => { v.properties.plan = 'Basic'; },
+  ]) { const bad = structuredClone(actual); change(bad); assert.throws(() => verifyResource(c, p, descriptor, bad), /TABLE_RETENTION_SCHEMA_DRIFT/); }
+});
+test('DCR GET must bind its computed workspaceId to a separate owned workspace read and retain exact streams and routing', () => {
+  const f = fixtureReconciliation(), p = f.origins.records[3].phase, descriptor = p.resources.find(v => v.id === r.dcr);
+  const actual = f.proposal.results.data.resources[r.dcr], context = { workspace: f.proposal.workspace };
+  verifyResource(c, p, descriptor, actual, context);
+  assert.throws(() => verifyResource(c, p, descriptor, actual), /DCR_WORKSPACE_READBACK_REQUIRED/);
+  const wrongWorkspace = structuredClone(context.workspace); wrongWorkspace.id = r.table;
+  assert.throws(() => verifyResource(c, p, descriptor, actual, { workspace: wrongWorkspace }), /DCR_WORKSPACE_READBACK_REQUIRED/);
+  for (const change of [
+    v => { delete v.properties.destinations.logAnalytics[0].workspaceId; },
+    v => { v.properties.destinations.logAnalytics[0].workspaceId = c.operatorPrincipalId; },
+    v => { v.properties.destinations.logAnalytics[0].workspaceId = 123; },
+    v => { v.properties.destinations.logAnalytics[0].workspaceResourceId = r.table; },
+    v => { v.properties.destinations.logAnalytics[0].name = 'other'; },
+    v => { v.properties.destinations.logAnalytics[0].extra = true; },
+    v => { v.properties.destinations.logAnalytics.push(v.properties.destinations.logAnalytics[0]); },
+    v => { v.properties.streamDeclarations['Custom-MissionSpecTelemetry'].columns.push({ name: 'raw', type: 'string' }); },
+    v => { v.properties.streamDeclarations['Custom-MissionSpecTelemetry'].columns[0].isHidden = false; },
+    v => { v.properties.dataFlows[0].transformKql = 'source'; },
+    v => { v.properties.dataFlows[0].outputStream = 'Custom_Other_CL'; },
+    v => { v.properties.dataFlows[0].streams = ['Custom-Other']; },
+    v => { v.properties.immutableId = 'not-an-immutable-id'; },
+    v => { v.kind = 'Linux'; },
+  ]) { const bad = structuredClone(actual); change(bad); assert.throws(() => verifyResource(c, p, descriptor, bad, context), /DCR_READBACK_FAILED/); }
+  for (const endpoint of ['not-a-url', 'http://fixture.ingest.monitor.azure.com', 'https://other.invalid',
+    'https://fixture.ingest.monitor.azure.com/path', 'https://fixture.ingest.monitor.azure.com?token=value',
+    'https://user:password@fixture.ingest.monitor.azure.com', 'https://fixture.ingest.monitor.azure.com:8443']) {
+    const bad = structuredClone(actual); bad.properties.endpoints.logsIngestion = endpoint;
+    assert.throws(() => verifyResource(c, p, descriptor, bad, context), /DCR_ENDPOINT_INVALID/);
+  }
+});
 test('shared reconciliation requires exact current review and preserves both executed sources and failed legacy outcome', async () => {
   const f = fixtureReconciliation(), before = json(f.origins);
-  for (const record of f.origins.records) verifyExecutionOrigin(c, f.foundation, record);
-  verifyReconciliation(c, f.foundation, f.origins, f.proposal, f.source);
+  verifyExecutionOrigins(c, f.foundation, f.origins, contract);
+  verifyReconciliation(c, f.foundation, f.origins, f.proposal, f.source, null, contract);
   await assert.rejects(reviewedReconciliationReceipts(c, f.foundation, { ...f, review: null }, f.source, f.lookup), /RECONCILIATION_REVIEW_REQUIRED/);
   const receipts = await reviewedReconciliationReceipts(c, f.foundation, f, f.source, f.lookup);
   assert.equal(json(f.origins), before);
@@ -496,12 +591,52 @@ test('shared reconciliation requires exact current review and preserves both exe
   assert.equal(receipts.core.reconciliation.originalReceiptQualified, false);
   assert.equal(receipts.core.reconciliation.originalJournalOutcome, 'reconciliation-required');
   assert.equal(receipts['project-budget'].reconciliation.originalReceiptQualified, true);
+  assert.equal(receipts['workspace-access'].reconciliation.originalReceiptQualified, true);
+  assert.equal(receipts.data.reconciliation.originalReceiptQualified, false);
+  assert.equal(receipts.data.reconciliation.originalJournalOutcome, 'reconciliation-required');
+  assert.equal(receipts.data.sourceSha256, f.origins.records[3].publication.sourceSha256);
   verifyProjectBudgetReceipt(c, receipts['project-budget'], f.foundation, f.source, receipts);
   assert.throws(() => verifyProjectBudgetReceipt(c, receipts['project-budget'], f.foundation, f.source), /RECONCILIATION_REVIEW_REQUIRED/);
   const next = buildPhase(c, 'workspace-access', contract, receipts, f.foundation, f);
   assert.equal(next.reconciliation.reviewSha256, digest(json(f.review)));
   assert.notEqual(digest(json(next)), digest(json(buildPhase(c, 'workspace-access', contract, receipts, f.foundation, { ...f, review: null }))));
   await assert.rejects(reviewedReconciliationReceipts(c, f.foundation, f, f.source, async () => digest('other source')), /PUBLISHED_SOURCE_MISMATCH/);
+});
+test('four-phase origins bind the actual prior receipt maps, their sources, approvals and immutable identities', async () => {
+  for (const change of [
+    record => { record.prerequisiteReceipts = {}; },
+    record => { delete record.prerequisiteReceipts['workspace-access']; },
+    record => { record.prerequisiteReceipts.core.sourceSha256 = digest('forged old source'); },
+    record => { record.prerequisiteReceipts.core.resources[r.ingestIdentity].properties.principalId = c.operatorPrincipalId; },
+    record => { record.prerequisiteReceipts['workspace-access'].resources[r.workspace].properties.customerId = c.operatorPrincipalId; },
+    record => { record.prerequisiteReceipts.core.reconciliation.policySourceSha256 = digest('another policy'); },
+    record => { record.prerequisiteReceipts.core.reconciliation.reviewedAt = '2099-09-23T00:00:00.000Z'; },
+    record => { record.prerequisiteReceipts['project-budget'].phaseSha256 = digest('wrong phase'); },
+    record => { record.prerequisiteReceipts.data = record.prerequisiteReceipts['workspace-access']; },
+  ]) {
+    const f = fixtureReconciliation(), record = f.origins.records[3];
+    change(record);
+    assert.throws(() => verifyExecutionOrigins(c, f.foundation, f.origins, contract));
+    record.approval.receiptsSha256 = digest(json(record.prerequisiteReceipts));
+    record.preflight.receiptsSha256 = record.approval.receiptsSha256;
+    assert.throws(() => verifyExecutionOrigins(c, f.foundation, f.origins, contract));
+  }
+  for (const change of [
+    f => { f.origins.records[3].publication.sourceSha256 = digest('another source'); },
+    f => { f.origins.records[3].approval.phaseSha256 = digest('wrong phase'); },
+    f => { f.origins.records[3].journal.intentAt = f.origins.records[3].approval.expiresAt; },
+    f => { f.origins.records[3].validation.properties.templateHash = 'wrong'; },
+    f => { f.origins.records[2].firstReadback.checkedAt = '2099-01-01T00:00:00.000Z'; },
+    f => { f.proposal.results.data.resources[r.table].properties.schema.columns[0].name = 'extraEventField'; },
+    f => { f.proposal.results.data.resources[r.dcr].properties.immutableId = 'dcr-' + 'b'.repeat(32); },
+    f => { f.proposal.workspace.properties.customerId = c.operatorPrincipalId;
+      f.proposal.results.data.resources[r.dcr].properties.destinations.logAnalytics[0].workspaceId = c.operatorPrincipalId; },
+    f => { f.proposal.inventory.value.push({ id: r.app, createdTime: f.proposal.checkedAt }); },
+  ]) {
+    const f = fixtureReconciliation(); change(f);
+    f.proposal.executionOriginsSha256 = digest(json(f.origins)); f.review.proposalSha256 = digest(json(f.proposal));
+    await assert.rejects(reviewedReconciliationReceipts(c, f.foundation, f, f.source, f.lookup));
+  }
 });
 test('reconciliation rejects expired original intent, changed template or deployment, identities, routes, inventory and review', async () => {
   for (const change of [
@@ -679,7 +814,7 @@ test('reconciliation and fresh qualification read only the exact deployed resour
     return structuredClone(responses.get(url.pathname));
   };
   const proposal = await collectReconciliation(a.config, a.origin, directory, evidence, invoke, f.lookup);
-  verifyReconciliation(a.config, f.foundation, f.origins, proposal, await sourceDigest());
+  verifyReconciliation(a.config, f.foundation, f.origins, proposal, await sourceDigest(), null, contract);
   assert.equal(proposal.results.core.deployment.properties.provisioningState, 'Succeeded');
   assert.equal(f.origins.records[1].originalReceipt, null);
   assert.equal((await readdir(directory)).length, 0);
@@ -696,14 +831,14 @@ test('CLI refuses to prepare, preview or execute already-deployed phases before 
   await privateDirectory(directory);
   t.after(() => rm(directory, { recursive: true }));
   for (const [name, value] of Object.entries({ 'config.json': a.config, 'origin.json': a.origin, 'scanner-adoption.json': a.adoption,
-    'foundation-budgets.json': f.foundation, 'receipts.json': {}, 'execution-origins-v1.json': f.origins })) await saveImmutable(directory, name, value);
+    'foundation-budgets.json': f.foundation, 'receipts.json': {}, 'execution-origins-v2.json': f.origins })) await saveImmutable(directory, name, value);
   const untrusted = Object.entries(process.env).some(([key, value]) => value && /^(CI$|GITHUB_|ACTIONS_|RUNNER_)/u.test(key));
   for (const operation of ['prepare', 'check', 'validate-preview', 'execute']) {
-    for (const phase of ['core', 'project-budget']) await assert.rejects(
+    for (const phase of ['core', 'project-budget', 'workspace-access', 'data']) await assert.rejects(
       promisify(execFile)(process.execPath, ['infrastructure/arm/telemetry/controller.mjs', operation, phase, directory]),
       error => error.code === 1 && error.stderr.trim() === (untrusted ? 'UNTRUSTED_RUNNER_FORBIDDEN' : 'COMPLETED_PHASE_REQUIRES_RECONCILIATION'));
   }
-  await assert.rejects(promisify(execFile)(process.execPath, ['infrastructure/arm/telemetry/controller.mjs', 'qualify-reconciliation', 'core', directory]),
+  await assert.rejects(promisify(execFile)(process.execPath, ['infrastructure/arm/telemetry/controller.mjs', 'qualify-reconciliation', 'data', directory]),
     error => error.code === 1 && error.stderr.trim() === (untrusted ? 'UNTRUSTED_RUNNER_FORBIDDEN' : 'RECONCILIATION_REVIEW_REQUIRED'));
   assert.equal(await load(directory, 'reconciliation-receipts.json', true), null);
   assert.equal(await load(directory, 'core-journal.json', true), null);
@@ -815,6 +950,27 @@ test('successful project-budget execution qualifies only the amount-update deplo
   assert.equal(writes, 1);
   assert.equal(f.journal.outcome, 'readback-qualified');
   verifyProjectBudgetReceipt(c, f.receipt, foundation, digest('source'));
+});
+test('data controller reads the workspace independently before validating real computed DCR fields', async () => {
+  const f = executionFixture('data'), observed = fixtureReconciliation();
+  let submitted = false, workspaceRead = false, writes = 0;
+  f.io.arm = async (method, id, _api, body, _filter, guard) => {
+    if (method === 'PUT') {
+      guard(); assert.equal(id, f.p.deploymentId); assert.deepEqual(body.properties.template, f.p.template);
+      writes++; submitted = true; return {};
+    }
+    if (id === f.p.deploymentId) return submitted ? { id, properties: { provisioningState: 'Succeeded' } } : null;
+    if (id === r.workspace) { workspaceRead = true; return observed.proposal.workspace; }
+    if (id === r.dcr) assert.equal(workspaceRead, true);
+    assert([r.table, r.dcr].includes(id));
+    return observed.proposal.results.data.resources[id];
+  };
+  await new CollectorController(c, f.p, f.io).execute(f.approval);
+  assert.equal(writes, 1);
+  assert.equal(workspaceRead, true);
+  assert.equal(f.receipt.qualified, true);
+  assert.equal(f.receipt.resources[r.dcr].properties.immutableId, 'dcr-' + 'a'.repeat(32));
+  assert.equal(f.journal.outcome, 'readback-qualified');
 });
 test('approval is closed, hash-bound and requires finite canonical UTC dates and a bounded interval', async t => {
   const mutations = [

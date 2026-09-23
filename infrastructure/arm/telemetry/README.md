@@ -13,7 +13,7 @@ collector phases; `prepare` makes no cloud calls, and `check`/`validate-preview`
 perform only nonmutating reads and ARM validation/what-if. No checked-in file
 contains deployment authority or account-specific configuration.
 
-Already-completed budget/core deployments use `reconcile core` for a read-only,
-unapproved proposal. `qualify-reconciliation core` requires a separate exact
+The completed budget/core/workspace-access/data sequence uses `reconcile data`
+for a read-only, unapproved version-2 proposal. `qualify-reconciliation data` requires a separate exact
 parent review and repeats live reads before issuing new read-only receipts.
 Neither command deploys resources or rewrites original execution history.

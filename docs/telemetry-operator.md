@@ -41,7 +41,7 @@ paths, so the local operator and private directory remain part of the trust boun
 
 ```sh
 node --test infrastructure/arm/telemetry/tests/*.test.mjs
-node infrastructure/arm/telemetry/controller.mjs reconcile core infrastructure/arm/telemetry/.operator-private/revision-20260923-core-reconcile
+node infrastructure/arm/telemetry/controller.mjs reconcile data infrastructure/arm/telemetry/.operator-private/revision-20260923-data-reconcile
 ```
 
 `prepare` is local. `check` rechecks account/permissions/providers/region/quota,
@@ -75,19 +75,30 @@ reported core `Succeeded`, but the old readback predicate stopped qualification:
 the default-network environment returned a null infrastructure group. The old
 core journal remains `reconciliation-required`; there is no invented legacy
 success receipt. Neither deployment may be resubmitted or deleted to resolve
-that readback hold.
+that readback hold. After the reviewed core reconciliation, workspace-access
+succeeded under `fa92e9b` with a qualified receipt. Data then reached ARM
+`Succeeded` under the same source, but its strict readback stopped on Table
+display metadata and the DCR's computed workspace ID. Its original
+`reconciliation-required` journal and absent success receipt remain unchanged.
 
-One versioned contract now covers these **two existing phases**, rather than
+One versioned contract now covers these **four existing phases**, rather than
 adding per-source trust exceptions:
 
-1. `execution-origins-v1.json` contains immutable records of the original
+1. `execution-origins-v2.json` contains immutable records of the original
    publication commit/source, exact phase/template, approval, intent journal,
    preflight, validation, what-if, first readbacks and original receipt (null
-   when legacy qualification failed). Original files are preserved separately,
+   when legacy qualification failed), plus the **recorded prerequisite receipt
+   map**. Its digest must equal the original approval and preflight receipt
+   digest, with the same serialization order. Each prerequisite must match an
+   earlier scoped execution's source, phase, deployment and immutable resource
+   identity; reconciled prerequisites retain their original review links.
+   Templates are rebuilt from these real prerequisites and the canonical
+   schema, never from fabricated empty receipts. Original files are preserved separately,
    byte-for-byte. Fixed Git blob reads verify each declared source hash and its
    ancestry in the repository; historical code is never executed. The parent
    independently confirms publication and scanner results.
-2. `reconcile core` uses only scoped GETs. It verifies the original approval's
+2. `reconcile data` uses only scoped GETs for all recorded completed phases.
+   The command names the latest phase in the recorded sequence. It verifies the original approval's
    validity **at intent time**, full phase/config/preflight bindings, validated
    ARM template hash and successful deployment identity. It rereads the exact
    existing resources, generated IDs, creation identity, budgets, foundation,
@@ -95,12 +106,12 @@ adding per-source trust exceptions:
    deployment resubmission or next-phase preparation is available in this path.
    The immutable `reconciliation-proposal.json` is **not qualified authority**.
 3. The parent must separately author `reconciliation-review.json`, with exactly
-   `version: 1`, `action: "accept-exact-arm-reconciliation"`, `proposalSha256`,
+   `version: 2`, `action: "accept-exact-arm-reconciliation"`, `proposalSha256`,
    `sourceSha256` and canonical UTC `reviewedAt`. Review must bind the exact
    current source/proposal and cannot predate the snapshot or lie in the future.
    There is no force flag, inferred approval, or automatic historical-source
    exception.
-4. Only then may `qualify-reconciliation core` repeat the live read-only checks
+4. Only then may `qualify-reconciliation data` repeat the live read-only checks
    and write **new** `reconciliation-receipts.json` and a qualification record.
    These explicitly identify a reviewed read-only reconciliation, retain the
    original executed source and journal outcome, and distinguish legacy receipt
@@ -113,8 +124,9 @@ receipt set. Fresh preflight rereads immutable identities and privacy settings;
 each actual effect still requires full what-if review and its own unexpired
 phase approval. Completed phases are refused by `prepare`, `check`,
 `validate-preview` and `execute`. A later source change requires a fresh
-read-only proposal/review, **not budget or core replay**. Old budget-only lineage
-artifacts remain historical evidence, not an active parallel authority path.
+read-only proposal/review, **not replay of any completed phase**. Old budget-only
+lineage and version-1 reconciliation artifacts remain historical evidence, not
+an active parallel authority path or a substitute for the new review.
 
 Review full private JSON on this machine. SHA-256 binds bytes, not human
 authority. Only a separately authorized exact phase approval can invoke
@@ -211,9 +223,13 @@ reserved managed-group name must remain absent. Fresh subscription inventory
 and correlated activity showed only the intended new resources; that is not a
 guarantee of absent platform infrastructure or charges.
 
-Generated identity values, workspace customer ID, environment domain, resource
+Generated identity values, workspace customer ID, DCR immutable ID/endpoint, environment domain, resource
 GUID when returned, and provider creation metadata are pinned to the original
-readbacks. ARM inventory `createdTime` supplies the execution-window check.
+readbacks. ARM inventory `createdTime` supplies the execution-window check
+against each resource's original **Create**, not a later NoChange access update.
+The Table API's own creation stamp covers the child table when it is absent
+from generic ARM inventory. Inventory membership derives from recorded resource
+IDs across all completed phases; it is not a fixed five-resource assumption.
 The environment's provider `systemData.createdAt` differed from ARM inventory
 time in the observed response: it is retained exactly as an opaque immutable
 stamp, **not corrected by adding a timezone offset**. Missing resource GUIDs are
@@ -226,6 +242,28 @@ workspace/environment/app diagnostic-settings collection, without a body or
 filter. Other preview APIs, targets and mutation methods remain forbidden.
 Production qualification requires empty diagnostic and workspace-export lists;
 an independent diagnostic read does not by itself qualify a deployment.
+
+### Table and DCR response metadata
+
+The [Table 2022-10-01 response schema](https://github.com/Azure/azure-rest-api-specs/blob/main/specification/operationalinsights/resource-manager/Microsoft.OperationalInsights/OperationalInsights/stable/2022-10-01/Tables.json)
+marks `isDefaultDisplay` and `isHidden` as read-only booleans. Readback permits
+only these two optional additions to each canonical custom-column definition.
+Column count, order, names and types remain exact; wrong flag types, additional
+event columns and other column properties fail. The table must remain
+`MissionSpecTelemetry_CL`, Analytics, 180-day Analytics/180-day total retention
+with zero extra archive. The known standard `TenantId` column is Azure-added
+workspace metadata, not another client event field. Other schema changes are
+not silently stripped.
+
+The [DCR 2024-03-11 response schema](https://github.com/Azure/azure-rest-api-specs/blob/main/specification/monitor/resource-manager/Microsoft.Insights/Insights/stable/2024-03-11/dataCollection.json)
+defines destination `workspaceId` as the read-only **Customer ID of the Log
+Analytics workspace**. It must equal a separate GET of the exact owned,
+access-qualified workspace; it is never defaulted from the DCR itself or simply
+discarded. Destination name/resource ID, declared stream, projection,
+output stream, Direct kind, actual immutable ID and HTTPS ingestion endpoint
+remain mandatory. These documented metadata fields are not classified as
+secrets merely because they are read-only; complete operator records still
+contain scoped account/resource identifiers and stay in the private directory.
 
 Preserved state remains private Blob/PE/DNS with shared-key/public access
 disabled. The explicitly reviewed Lighthouse NSG/association and opaque
