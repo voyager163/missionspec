@@ -4,7 +4,7 @@ import {
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { LocalWorkspace } from '../filesystem/local-workspace.js';
-import { observeWorkspaceRoot } from '../filesystem/local-workspace.js';
+import { observeWorkspaceRoot, windowsIoDetail } from '../filesystem/local-workspace.js';
 import { WorkflowError } from '../../application/errors.js';
 import { digestContent, parseDigest, sameWorkspaceBinding, type ContentDigest, type WorkspaceBinding } from '../../kernel/revisions.js';
 import { integer, oneOf, record, text } from '../../kernel/validation.js';
@@ -143,7 +143,9 @@ async function withPrivateStateLock<T>(
         const previous = inspectWindowsPrivateFile(windowsScope(files, false), filename);
         if (previous.digest !== digestContent(old)) throw new Error('Writer changed');
         removeWindowsPrivateFile(windowsScope(files, false), filename, previous.digest, previous, pid);
-      } catch { throw new WorkflowError('conflict', 'The prune writer is live, unknown, or changed; its lock is retained.'); }
+      } catch (error) {
+        throw new WorkflowError('conflict', `The prune writer is live, unknown, or changed; its lock is retained. ${windowsIoDetail(error)}`);
+      }
     }
     const owned = writeWindowsPrivateFile(windowsScope(files, false), filename, lockContent);
     windowsLeases.set(files, { path: filename, dev: BigInt(owned.device), ino: BigInt(owned.inode), digest: owned.digest });
@@ -153,7 +155,9 @@ async function withPrivateStateLock<T>(
     } finally {
       windowsLeases.delete(files);
       try { removeWindowsPrivateFile(windowsScope(files, false), filename, owned.digest, owned); }
-      catch { throw new WorkflowError('effect-outcome-unknown', 'Prune lock release was not confirmed; reconcile its durable state.'); }
+      catch (error) {
+        throw new WorkflowError('effect-outcome-unknown', `Prune lock release was not confirmed; reconcile its durable state. ${windowsIoDetail(error)}`);
+      }
     }
   }
   let descriptor: number;
