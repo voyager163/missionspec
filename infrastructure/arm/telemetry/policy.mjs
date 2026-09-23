@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
-import { assertOwned, assertBudget, BUDGET, budgetConfiguration, closed, digest, fail, ids, json, LIMITS, RECEIVER_COMMAND, requireAccess, sameId, projectBudgetFilter } from './definition.mjs';
+import { assertOwned, assertBudget, BUDGET, buildPhase, budgetConfiguration, closed, digest, fail, ids, json, LIMITS, RECEIVER_COMMAND, requireAccess, sameId, projectBudgetFilter } from './definition.mjs';
 export { assertBudget, notificationKeys } from './definition.mjs';
 
 const REVIEW_HASH_FIELDS = ['configSha256', 'phaseSha256', 'sourceSha256', 'originSha256', 'receiptsSha256', 'baselineSha256', 'whatIfSha256'];
@@ -32,6 +32,140 @@ export function verifyFreshReview(proof, approval, checkStartedAt, now) {
       !Number.isSafeInteger(checkStartedAt) || !Number.isSafeInteger(proof.startedAt) || !Number.isSafeInteger(proof.completedAt) ||
       proof.startedAt < checkStartedAt || proof.completedAt < proof.startedAt || proof.completedAt > now ||
       now - proof.startedAt > 300000) fail('FRESH_REVIEW_MISMATCH');
+}
+export function canonicalInstant(value) {
+  const time = typeof value === 'string' ? Date.parse(value) : NaN;
+  if (!Number.isSafeInteger(time) || new Date(time).toISOString() !== value) fail('RECONCILIATION_TIME_INVALID');
+  return time;
+}
+export function verifyDeploymentIdentity(expected, actual) {
+  if (!sameId(actual?.id, expected.id) || actual.properties?.provisioningState !== 'Succeeded' ||
+      actual.properties.mode !== 'Incremental' ||
+      ['correlationId', 'timestamp', 'templateHash'].some(k => typeof expected.properties?.[k] !== 'string' ||
+        !expected.properties[k] || actual.properties[k] !== expected.properties[k])) fail('DEPLOYMENT_IDENTITY_CHANGED');
+}
+export function executionIdentity(value) {
+  const p = value?.properties ?? {}, type = value?.type?.toLowerCase();
+  const identity = { id: value?.id?.toLowerCase(), type, location: value?.location?.toLowerCase() ?? null,
+    resourceGuid: p.resourceGuid ?? null, createdAt: value?.systemData?.createdAt ?? p.creationDate ?? p.createdDate ?? null };
+  if (type === 'microsoft.managedidentity/userassignedidentities') {
+    for (const name of ['clientId', 'principalId', 'tenantId']) {
+      if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/u.test(p[name] ?? '')) fail('GENERATED_IDENTITY_REQUIRED');
+      identity[name] = p[name];
+    }
+  } else if (type === 'microsoft.operationalinsights/workspaces') identity.customerId = p.customerId;
+  else if (type === 'microsoft.app/managedenvironments') {
+    identity.defaultDomain = p.defaultDomain;
+    identity.domainVerificationId = p.customDomainConfiguration?.customDomainVerificationId ?? null;
+    if (typeof identity.defaultDomain !== 'string' || !identity.defaultDomain) fail('GENERATED_IDENTITY_REQUIRED');
+  }
+  if (['microsoft.containerregistry/registries', 'microsoft.operationalinsights/workspaces', 'microsoft.app/managedenvironments'].includes(type) &&
+      (typeof identity.createdAt !== 'string' || !Number.isFinite(Date.parse(identity.createdAt)))) fail('CREATION_TIME_REQUIRED');
+  return identity;
+}
+function historicalTemplate(c, phase) {
+  const copy = structuredClone(phase.template);
+  if (phase.phase === 'core') {
+    const environment = copy.resources.find(v => v.type === 'Microsoft.App/managedEnvironments');
+    if (Object.hasOwn(environment?.properties ?? {}, 'infrastructureResourceGroup')) {
+      if (environment.properties.infrastructureResourceGroup !== `${c.namePrefix}-managed`) fail('HISTORICAL_TEMPLATE_CHANGED');
+      delete environment.properties.infrastructureResourceGroup;
+    }
+  }
+  return copy;
+}
+export function verifyExecutionOrigin(c, foundation, record) {
+  closed(record, ['version', 'publication', 'phase', 'approval', 'journal', 'preflight', 'validation', 'whatIf', 'firstReadback', 'originalReceipt']);
+  closed(record.publication, ['commitSha', 'sourceSha256']);
+  closed(record.firstReadback, ['checkedAt', 'deployment', 'resources']);
+  closed(record.journal, ['phase', 'phaseSha256', 'intentAt', 'outcome',
+    ...(Object.hasOwn(record.journal, 'failureCode') ? ['failureCode'] : []),
+    ...(Object.hasOwn(record.journal, 'armCode') ? ['armCode'] : [])]);
+  const p = record.phase, r = ids(c);
+  if (record.version !== 1 || !['project-budget', 'core'].includes(p?.phase) ||
+      !/^[0-9a-f]{40}$/u.test(record.publication.commitSha) || !/^[0-9a-f]{64}$/u.test(record.publication.sourceSha256)) fail('EXECUTION_ORIGIN_INVALID');
+  const expected = buildPhase(c, p.phase, null, {}, foundation);
+  if (p.version !== 1 || p.configSha256 !== digest(json(c)) || p.deploymentId !== expected.deploymentId || p.scope !== expected.scope ||
+      p.publicationAuthorized !== false || p.cliActivationAuthorized !== false || p.ingestEnabled !== false ||
+      !isDeepStrictEqual(p.allowedModify, expected.allowedModify) || !isDeepStrictEqual(p.requiredReceipts, expected.requiredReceipts) ||
+      !isDeepStrictEqual(historicalTemplate(c, p), expected.template) ||
+      p.resources.length !== expected.resources.length ||
+      p.resources.some((v, i) => v.id !== expected.resources[i].id || v.type !== expected.resources[i].type ||
+        v.apiVersion !== expected.resources[i].apiVersion || !isDeepStrictEqual(v.expected, p.template.resources[i]))) fail('HISTORICAL_TEMPLATE_CHANGED');
+  const intentAt = canonicalInstant(record.journal.intentAt);
+  verifyApproval(record.approval, c, p, record.publication.sourceSha256, intentAt);
+  verifyFreshReview(record.preflight, record.approval, record.preflight.startedAt, intentAt);
+  if (record.approval.originSha256 !== c.originSha256 || record.journal.phase !== p.phase || record.journal.phaseSha256 !== digest(json(p)) ||
+      !['readback-qualified', 'reconciliation-required'].includes(record.journal.outcome) ||
+      record.validation?.properties?.provisioningState !== 'Succeeded' || record.validation.error ||
+      record.validation.properties.templateHash !== record.firstReadback.deployment.properties?.templateHash ||
+      digest(json(record.whatIf)) !== record.approval.whatIfSha256 ||
+      canonicalInstant(record.firstReadback.checkedAt) < intentAt) fail('EXECUTION_ORIGIN_INVALID');
+  verifyWhatIf(p, record.whatIf);
+  verifyDeploymentIdentity(record.firstReadback.deployment, record.firstReadback.deployment);
+  if (!sameId(record.firstReadback.deployment.id, p.deploymentId) ||
+      !isDeepStrictEqual(Object.keys(record.firstReadback.resources).sort(), p.resources.map(v => v.id).sort())) fail('EXECUTION_ORIGIN_INVALID');
+  for (const descriptor of p.resources) {
+    const value = record.firstReadback.resources[descriptor.id];
+    verifyResource(c, p, descriptor, value);
+    executionIdentity(value);
+  }
+  if (record.originalReceipt !== null && (record.originalReceipt.qualified !== true ||
+      record.originalReceipt.sourceSha256 !== record.publication.sourceSha256 ||
+      record.originalReceipt.phaseSha256 !== digest(json(p)) || record.originalReceipt.configSha256 !== digest(json(c)) ||
+      !isDeepStrictEqual(record.originalReceipt.resources, record.firstReadback.resources) ||
+      !isDeepStrictEqual(record.originalReceipt.deployment, record.firstReadback.deployment))) fail('ORIGINAL_RECEIPT_CHANGED');
+  if (p.phase === 'project-budget') assertBudget(record.firstReadback.resources[r.projectBudget], c, 350, projectBudgetFilter(c));
+}
+export function verifyReconciliation(c, foundation, origins, proposal, sourceSha256, review = null) {
+  closed(origins, ['version', 'records']);
+  closed(proposal, ['version', 'kind', 'sourceSha256', 'configSha256', 'executionOriginsSha256', 'baselineSha256', 'checkedAt', 'results', 'stateBudget', 'inventory', 'managedGroup']);
+  if (origins.version !== 1 || !Array.isArray(origins.records) || origins.records.length < 1 || origins.records.length > 2 ||
+      new Set(origins.records.map(v => v.phase.phase)).size !== origins.records.length ||
+      proposal.version !== 1 || proposal.kind !== 'read-only-completed-phases' ||
+      !/^[0-9a-f]{64}$/u.test(sourceSha256) || proposal.sourceSha256 !== sourceSha256 || proposal.configSha256 !== digest(json(c)) ||
+      proposal.executionOriginsSha256 !== digest(json(origins)) || canonicalInstant(proposal.checkedAt) > Date.now()) fail('RECONCILIATION_INVALID');
+  const r = ids(c), expectedResults = origins.records.map(v => v.phase.phase);
+  if (!isDeepStrictEqual(Object.keys(proposal.results).sort(), [...expectedResults].sort())) fail('RECONCILIATION_INVALID');
+  assertBudget(proposal.stateBudget, c, 50);
+  if (!sameId(proposal.stateBudget.id, r.stateBudget) || proposal.managedGroup !== null ||
+      !Array.isArray(proposal.inventory?.value) || proposal.inventory.nextLink) fail('RECONCILIATION_INVENTORY_CHANGED');
+  const known = new Set(origins.records.flatMap(v => v.phase.resources.map(d => d.id.toLowerCase())));
+  if (proposal.inventory.value.some(v => !known.has(v.id.toLowerCase()))) fail('UNEXPECTED_TELEMETRY_RESOURCE');
+  for (const record of origins.records) {
+    verifyExecutionOrigin(c, foundation, record);
+    if (proposal.baselineSha256 !== record.preflight.baselineSha256) fail('POLICY_OR_SECURITY_DRIFT');
+    const p = record.phase, result = proposal.results[p.phase];
+    closed(result, ['executionOriginSha256', 'deployment', 'resources', 'identityPins', 'diagnostics', 'exports']);
+    if (result.executionOriginSha256 !== digest(json(record)) || canonicalInstant(proposal.checkedAt) < canonicalInstant(record.firstReadback.checkedAt) ||
+        !isDeepStrictEqual(Object.keys(result.resources).sort(), p.resources.map(v => v.id).sort()) ||
+        !isDeepStrictEqual(Object.keys(result.identityPins).sort(), p.resources.map(v => v.id).sort())) fail('RECONCILIATION_INVALID');
+    verifyDeploymentIdentity(record.firstReadback.deployment, result.deployment);
+    for (const descriptor of p.resources) {
+      const value = result.resources[descriptor.id], pin = executionIdentity(value);
+      verifyResource(c, p, descriptor, value);
+      if (!isDeepStrictEqual(pin, executionIdentity(record.firstReadback.resources[descriptor.id])) ||
+          !isDeepStrictEqual(pin, result.identityPins[descriptor.id])) fail('RESOURCE_IDENTITY_CHANGED');
+      if (descriptor.type !== 'Microsoft.Consumption/budgets') {
+        const metadata = proposal.inventory.value.filter(v => sameId(v.id, descriptor.id));
+        const created = metadata.length === 1 ? Date.parse(metadata[0].createdTime) : NaN;
+        if (!Number.isFinite(created) || created < canonicalInstant(record.journal.intentAt) ||
+            created > canonicalInstant(proposal.checkedAt)) fail('CREATION_TIME_OUTSIDE_EXECUTION');
+      }
+    }
+    const diagnosticIds = p.resources.filter(v => ['Microsoft.App/managedEnvironments', 'Microsoft.OperationalInsights/workspaces'].includes(v.type)).map(v => v.id);
+    if (!isDeepStrictEqual(Object.keys(result.diagnostics).sort(), diagnosticIds.sort()) ||
+        Object.values(result.diagnostics).some(v => !Array.isArray(v?.value) || v.nextLink || v.value.length !== 0)) fail('DIAGNOSTIC_ROUTE_DRIFT');
+    if (p.phase === 'core') {
+      if (!Array.isArray(result.exports?.value) || result.exports.nextLink || result.exports.value.length) fail('WORKSPACE_EXPORT_DRIFT');
+    } else if (result.exports !== null) fail('RECONCILIATION_INVALID');
+  }
+  if (review !== null) {
+    closed(review, ['version', 'action', 'proposalSha256', 'sourceSha256', 'reviewedAt']);
+    if (review.version !== 1 || review.action !== 'accept-exact-arm-reconciliation' || review.proposalSha256 !== digest(json(proposal)) ||
+        review.sourceSha256 !== sourceSha256 || canonicalInstant(review.reviewedAt) < canonicalInstant(proposal.checkedAt) ||
+        canonicalInstant(review.reviewedAt) > Date.now()) fail('RECONCILIATION_REVIEW_INVALID');
+  }
 }
 function diffLeaves(a, b, path = '') {
   if (isDeepStrictEqual(a, b)) return [];
@@ -147,9 +281,13 @@ export function verifyResource(c, phase, descriptor, actual) {
   } else if (expected.type === 'Microsoft.App/managedEnvironments') {
     if (p.publicNetworkAccess !== 'Enabled' || (p.appLogsConfiguration?.destination ?? '') !== '' ||
         p.appLogsConfiguration?.logAnalyticsConfiguration || p.daprAIInstrumentationKey || p.daprAIConnectionString ||
-        p.openTelemetryConfiguration || p.vnetConfiguration?.infrastructureSubnetId ||
+        p.openTelemetryConfiguration || p.appInsightsConfiguration || p.ingressConfiguration ||
+        p.vnetConfiguration !== null || expected.properties.vnetConfiguration ||
+        p.infrastructureResourceGroup !== null || p.zoneRedundant !== false ||
+        p.customDomainConfiguration?.dnsSuffix || p.customDomainConfiguration?.certificateValue ||
+        p.customDomainConfiguration?.certificatePassword || p.customDomainConfiguration?.certificateKeyVaultProperties ||
         !isDeepStrictEqual(p.workloadProfiles?.map(v => ({ name: v.name, workloadProfileType: v.workloadProfileType })), expected.properties.workloadProfiles) ||
-        ![`${c.namePrefix}-managed`, r.managedGroup].includes(p.infrastructureResourceGroup)) fail('ENVIRONMENT_PRIVACY_DRIFT');
+        p.workloadProfiles?.some(v => v.minimumCount != null || v.maximumCount != null)) fail('ENVIRONMENT_PRIVACY_DRIFT');
   } else if (expected.type === 'Microsoft.Consumption/budgets') {
     if (phase.phase === 'project-budget') assertBudget(actual, c, c.budget.projectAmount, projectBudgetFilter(c));
     else assertBudget(actual, c, c.budget.telemetryAmount);

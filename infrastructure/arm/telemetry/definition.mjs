@@ -191,7 +191,7 @@ function appResource(c, receipts, enabled) {
   }, { location: c.location, tags: ownerTags(c), identity: {
     type: 'UserAssigned', userAssignedIdentities: { [r.ingestIdentity]: {}, [r.pullIdentity]: {} } } });
 }
-export function budgetSourceLineageBinding(lineage) {
+export function reconciliationBinding(lineage) {
   return lineage?.proposal ? { proposalSha256: digest(json(lineage.proposal)),
     reviewSha256: lineage.review ? digest(json(lineage.review)) : null } : null;
 }
@@ -213,7 +213,7 @@ export function buildPhase(c, phase, contract, receipts = {}, foundation, source
     ...['ingest', 'pull'].map(name => resource('Microsoft.ManagedIdentity/userAssignedIdentities', '2023-01-31', `${c.namePrefix}-${name}`, {}, regional)),
     workspace(c),
     resource('Microsoft.App/managedEnvironments', '2025-07-01', `${c.namePrefix}-environment`, {
-      infrastructureResourceGroup: `${c.namePrefix}-managed`, publicNetworkAccess: 'Enabled',
+      publicNetworkAccess: 'Enabled',
       workloadProfiles: [{ name: 'Consumption', workloadProfileType: 'Consumption' }], zoneRedundant: false,
     }, regional),
     resource('Microsoft.Consumption/budgets', '2024-08-01', `${c.namePrefix}-budget`, budgetProperties(c, c.budget.telemetryAmount)),
@@ -267,13 +267,13 @@ export function buildPhase(c, phase, contract, receipts = {}, foundation, source
   return { version: 1, phase, configSha256: digest(json(c)), scope,
     deploymentId: `${scope}/providers/Microsoft.Resources/deployments/${deploymentName(c, phase)}`,
     template: template(resources, scope === r.sub), resources: descriptors,
-    ...(phase !== 'project-budget' && sourceLineage?.proposal ? { budgetSourceLineage: budgetSourceLineageBinding(sourceLineage) } : {}),
+    ...(sourceLineage?.proposal ? { reconciliation: reconciliationBinding(sourceLineage) } : {}),
     requiredReceipts: phase === 'project-budget' ? [] : ['project-budget'],
     ...(phase === 'project-budget' ? { budgetBefore: budgetConfiguration(foundation.project) } : {}),
     allowedModify: phase === 'project-budget' ? { [r.projectBudget]: ['properties.amount'] }
       : phase === 'workspace-access' ? { [r.workspace]: ['properties.features.disableLocalAuth', 'properties.features.enableLogAccessUsingOnlyResourcePermissions'] }
       : phase === 'synthetic-admission' ? { [r.app]: ['properties.template.containers'] } : {},
-    computedReadbacksRequired: phase === 'core' ? ['UAMI client/principal IDs', 'workspace customerId/access flags', 'environment infrastructure/resource/log settings']
+    computedReadbacksRequired: phase === 'core' ? ['UAMI client/principal IDs', 'workspace customerId/access flags', 'default-network environment identity/privacy settings']
       : phase === 'data' ? ['same DCR immutable ID and ingestion endpoint'] : [],
     publicationAuthorized: false, cliActivationAuthorized: false, ingestEnabled: phase === 'synthetic-admission' };
 }

@@ -12,3 +12,8 @@ No Azure credentials are needed for these tests. The CLI accepts only fixed
 collector phases; `prepare` makes no cloud calls, and `check`/`validate-preview`
 perform only nonmutating reads and ARM validation/what-if. No checked-in file
 contains deployment authority or account-specific configuration.
+
+Already-completed budget/core deployments use `reconcile core` for a read-only,
+unapproved proposal. `qualify-reconciliation core` requires a separate exact
+parent review and repeats live reads before issuing new read-only receipts.
+Neither command deploys resources or rewrites original execution history.

@@ -7,12 +7,14 @@ import { basename, dirname, resolve, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual, types } from 'node:util';
 import { PHASES, buildPhase, deploymentName, validateConfig, ids, digest, json, fail, sameId, storageContract, firstReleaseCost, assertOwned, RECEIVER_COMMAND,
-  closed, budgetConfiguration, projectBudgetFilter, verifyFoundationBudgets, budgetSourceLineageBinding } from './definition.mjs';
-import { assertBudget, verifyWhatIf, verifyResource, verifyApproval, verifyFreshReview, sourceContractsSummary, permitFirstPush } from './policy.mjs';
+  closed, budgetConfiguration, projectBudgetFilter, verifyFoundationBudgets, reconciliationBinding } from './definition.mjs';
+import { assertBudget, verifyWhatIf, verifyResource, verifyApproval, verifyFreshReview, sourceContractsSummary, permitFirstPush,
+  executionIdentity, verifyExecutionOrigin, verifyReconciliation, verifyDeploymentIdentity } from './policy.mjs';
 
 const execute = promisify(execFile), here = dirname(fileURLToPath(import.meta.url));
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 export const MAX_PRIVATE_ARTIFACT_BYTES = 64 * 1024 * 1024;
+export const DIAGNOSTIC_API = '2021-05-01-preview';
 function privateOwner() {
   if (!['darwin', 'linux'].includes(process.platform) || typeof process.getuid !== 'function' ||
       typeof process.geteuid !== 'function' || !constants.O_NOFOLLOW || !constants.O_DIRECTORY || !constants.O_NONBLOCK) fail('PRIVATE_POSIX_IO_REQUIRED');
@@ -98,7 +100,7 @@ export async function sourceDigest() {
   const contract = await storageContract(); hash.update(json(contract));
   return hash.digest('hex');
 }
-export async function registryReview(c, receipts, directory, beforePush, invoke = az) {
+export async function registryReview(c, receipts, directory, beforePush, invoke = az, ledger = receipts) {
   const r = ids(c), core = receipts.core;
   if (core?.configSha256 !== digest(json(c)) || !core?.resources?.[r.registry]) fail('REGISTRY_CORE_RECEIPT_REQUIRED');
   assertOwned(core.resources[r.registry], r.registry, c);
@@ -138,7 +140,8 @@ export async function registryReview(c, receipts, directory, beforePush, invoke 
     configUser: '65532:65532', configSha256: manifest.config.digest, command: RECEIVER_COMMAND,
     configSha256Inputs: digest(json(c)), manifest, checkedAt: new Date().toISOString(), nativeV8Clearance: 'CONDITIONAL_DISABLED_OR_SYNTHETIC_ONLY' };
   receipts.publication = receipt;
-  await save(directory, 'publication-receipt.json', receipt); await save(directory, 'receipts.json', receipts);
+  ledger.publication = receipt;
+  await save(directory, 'publication-receipt.json', receipt); await save(directory, 'receipts.json', ledger);
   return receipt;
 }
 function cliError(error) {
@@ -169,14 +172,19 @@ export async function az(args, timeout = 60000, run = execute) {
 export function transport(c, phase, directory, invoke = az) {
   const r = ids(c);
   const forbiddenOperations = new Set(['listkeys', 'listsecrets', 'listaccountsas', 'listservicesas', 'regeneratekey', 'register']);
+  const diagnosticTargets = [r.workspace, r.environment, r.app].map(id => id + '/providers/Microsoft.Insights/diagnosticSettings');
   return async (method, id, version, body, filter, beforeDispatch) => {
+    const diagnosticRead = diagnosticTargets.includes(id) && method === 'GET' && version === DIAGNOSTIC_API && body === undefined && filter === undefined;
     if (!['GET', 'POST', 'PUT'].includes(method) || (id !== r.sub && !id.startsWith(`${r.sub}/`)) ||
-        /[?#\\]|\.\.|%/u.test(id) || !/^\d{4}-\d{2}-\d{2}$/u.test(version) ||
+        /[?#\\]|\.\.|%/u.test(id) || (!/^\d{4}-\d{2}-\d{2}$/u.test(version) && !diagnosticRead) ||
+        (id.toLowerCase().includes('/providers/microsoft.insights/diagnosticsettings') && !diagnosticRead) ||
         id.split('/').some(component => forbiddenOperations.has(component.toLowerCase()))) fail('ARM_SCOPE_FORBIDDEN');
     if (method === 'PUT' && id !== phase.deploymentId) fail('FIXED_PHASE_PUT_ONLY');
     if (method === 'PUT' && (typeof beforeDispatch !== 'function' || types.isAsyncFunction(beforeDispatch))) fail('DISPATCH_GUARD_REQUIRED');
     if (method === 'POST' && id !== `${r.sub}/providers/Microsoft.ContainerRegistry/checkNameAvailability`) fail('NONMUTATING_POST_ONLY');
-    if (filter && !filter.startsWith('$filter=')) fail('QUERY_NOT_SUPPORTED');
+    const inventoryMetadata = method === 'GET' && id === `${r.group}/resources` && version === '2021-04-01' &&
+      body === undefined && filter === '$expand=createdTime,changedTime';
+    if (filter && !filter.startsWith('$filter=') && !inventoryMetadata) fail('QUERY_NOT_SUPPORTED');
     const args = ['rest', '--method', method, '--url', `https://management.azure.com${id}?api-version=${version}${filter ? '&' + filter : ''}`,
       '--subscription', c.subscriptionId, '--only-show-errors', '--output', 'json'];
     let name;
@@ -252,47 +260,110 @@ export async function verifyOrigin(origin, arm, c, adoption) {
   if (dep?.properties?.provisioningState !== 'Succeeded' ||
       ['correlationId', 'timestamp', 'templateHash'].some(k => dep.properties[k] !== origin.bootstrap[k])) fail('ORIGINAL_CREATION_RECEIPT_CHANGED');
 }
-export const PUBLISHED_BUDGET_SOURCE = Object.freeze({
-  commitSha: '39fa4f80f489cf208fdfe9d03e3ba6b3f27313e8',
-  sourceSha256: '4df9940e035ed7f3bf81156cb3aa8075e84fb21121a81b51a05c3e5b51630827',
-});
-function lineageInstant(value) {
-  const time = typeof value === 'string' ? Date.parse(value) : NaN;
-  if (!Number.isSafeInteger(time) || new Date(time).toISOString() !== value) fail('BUDGET_SOURCE_LINEAGE_INVALID');
-  return time;
+export async function publishedSourceDigest(commitSha, run = execute) {
+  if (!/^[0-9a-f]{40}$/u.test(commitSha)) fail('PUBLISHED_ORIGIN_INVALID');
+  const options = { cwd: resolve(here, '../../..'), encoding: 'buffer', maxBuffer: MAX_PRIVATE_ARTIFACT_BYTES };
+  try {
+    await run('git', ['merge-base', '--is-ancestor', commitSha, 'HEAD'], options);
+    const file = async path => (await run('git', ['--no-pager', 'show', `${commitSha}:${path}`], options)).stdout;
+    const hash = createHash('sha256');
+    for (const name of ['definition.mjs', 'policy.mjs', 'controller.mjs']) hash.update(name).update(await file(`infrastructure/arm/telemetry/${name}`));
+    const schema = JSON.parse(await file('assets/schemas/telemetry-event.schema.json'));
+    const columns = JSON.parse(await file('services/telemetry-ingest/schema/storage-columns.json'));
+    hash.update(json({ schema, columns, schemaSha256: digest(json(schema)), columnsSha256: digest(json(columns)) }));
+    return hash.digest('hex');
+  } catch { fail('PUBLISHED_ORIGIN_UNAVAILABLE'); }
 }
-export function verifyBudgetDeploymentReadback(receipt, actual) {
-  if (!sameId(actual?.id, receipt.deployment.id) || actual.properties?.provisioningState !== 'Succeeded' ||
-      actual.properties.mode !== 'Incremental' ||
-      ['correlationId', 'timestamp', 'templateHash'].some(k => typeof receipt.deployment.properties[k] !== 'string' ||
-        !receipt.deployment.properties[k] || actual.properties[k] !== receipt.deployment.properties[k])) fail('BUDGET_DEPLOYMENT_READBACK_CHANGED');
+async function verifyPublishedOrigins(c, foundation, origins, lookup = publishedSourceDigest) {
+  closed(origins, ['version', 'records']);
+  if (origins.version !== 1 || !Array.isArray(origins.records) || !origins.records.length || origins.records.length > 2 ||
+      new Set(origins.records.map(v => v.phase?.phase)).size !== origins.records.length) fail('EXECUTION_ORIGIN_INVALID');
+  for (const record of origins.records) {
+    verifyExecutionOrigin(c, foundation, record);
+    if (await lookup(record.publication.commitSha) !== record.publication.sourceSha256) fail('PUBLISHED_SOURCE_MISMATCH');
+  }
 }
-export function verifyBudgetSourceLineageProposal(c, receipt, foundation, sourceSha256, lineage, now = Date.now()) {
-  const proposal = lineage?.proposal, phase = buildPhase(c, 'project-budget', null, {}, foundation), r = ids(c);
-  closed(proposal, ['version', 'kind', 'priorCommitSha', 'priorSourceSha256', 'currentSourceSha256', 'configSha256',
-    'phaseSha256', 'receiptSha256', 'approvalSha256', 'journalSha256', 'readback']);
-  closed(proposal.readback, ['checkedAt', 'deployment', 'projectBudget', 'stateBudget']);
-  closed(lineage.journal, ['phase', 'phaseSha256', 'intentAt', 'outcome']);
-  if (proposal.version !== 1 || proposal.kind !== 'reconcile-published-budget-source' ||
-      proposal.priorCommitSha !== PUBLISHED_BUDGET_SOURCE.commitSha ||
-      proposal.priorSourceSha256 !== PUBLISHED_BUDGET_SOURCE.sourceSha256 || receipt.sourceSha256 !== proposal.priorSourceSha256 ||
-      !/^[0-9a-f]{64}$/u.test(sourceSha256) || proposal.currentSourceSha256 !== sourceSha256 || sourceSha256 === proposal.priorSourceSha256 ||
-      proposal.configSha256 !== digest(json(c)) || proposal.phaseSha256 !== digest(json(phase)) ||
-      proposal.receiptSha256 !== digest(json(receipt)) || proposal.approvalSha256 !== digest(json(lineage.approval)) ||
-      proposal.journalSha256 !== digest(json(lineage.journal)) || lineage.journal.phase !== 'project-budget' ||
-      lineage.journal.phaseSha256 !== proposal.phaseSha256 || lineage.journal.outcome !== 'readback-qualified') fail('BUDGET_SOURCE_LINEAGE_INVALID');
-  verifyProjectBudgetReceipt(c, receipt, foundation, proposal.priorSourceSha256);
-  verifyApproval(lineage.approval, c, phase, proposal.priorSourceSha256, lineageInstant(lineage.approval.approvedAt));
-  const intentAt = lineageInstant(lineage.journal.intentAt), completedAt = lineageInstant(receipt.completedAt);
-  const checkedAt = lineageInstant(proposal.readback.checkedAt);
-  if (intentAt < lineageInstant(lineage.approval.approvedAt) || intentAt >= lineageInstant(lineage.approval.expiresAt) ||
-      completedAt < intentAt || checkedAt < completedAt || checkedAt > now) fail('BUDGET_SOURCE_LINEAGE_INVALID');
-  verifyBudgetDeploymentReadback(receipt, proposal.readback.deployment);
-  if (!sameId(proposal.readback.projectBudget?.id, r.projectBudget) || !sameId(proposal.readback.stateBudget?.id, r.stateBudget)) fail('BUDGET_SOURCE_LINEAGE_INVALID');
-  assertBudget(proposal.readback.projectBudget, c, c.budget.projectAmount, projectBudgetFilter(c));
-  assertBudget(proposal.readback.stateBudget, c, c.budget.stateAmount);
+export async function readPrivacy(c, phase, arm) {
+  const diagnostics = {};
+  for (const descriptor of phase.resources.filter(v =>
+    ['Microsoft.OperationalInsights/workspaces', 'Microsoft.App/managedEnvironments', 'Microsoft.App/containerApps'].includes(v.type))) {
+    const value = await arm('GET', descriptor.id + '/providers/Microsoft.Insights/diagnosticSettings', DIAGNOSTIC_API);
+    if (!Array.isArray(value?.value) || value.nextLink || value.value.length) fail('DIAGNOSTIC_ROUTE_DRIFT');
+    diagnostics[descriptor.id] = value;
+  }
+  let exports = null;
+  if (['core', 'workspace-access', 'data', 'assignments', 'disabled-app', 'synthetic-admission'].includes(phase.phase)) {
+    exports = await arm('GET', ids(c).workspace + '/dataExports', '2020-08-01');
+    if (!Array.isArray(exports?.value) || exports.nextLink || exports.value.length) fail('WORKSPACE_EXPORT_DRIFT');
+  }
+  return { diagnostics, exports };
 }
-export function verifyProjectBudgetReceipt(c, receipt, foundation, sourceSha256, lineage, targetPhase) {
+async function readReconciledPhase(c, record, arm) {
+  const phase = record.phase, deployment = await arm('GET', phase.deploymentId, '2022-09-01'), resources = {}, identityPins = {};
+  verifyDeploymentIdentity(record.firstReadback.deployment, deployment);
+  for (const descriptor of phase.resources) {
+    const actual = await arm('GET', descriptor.id, descriptor.apiVersion);
+    verifyResource(c, phase, descriptor, actual);
+    const pin = executionIdentity(actual);
+    if (!isDeepStrictEqual(pin, executionIdentity(record.firstReadback.resources[descriptor.id]))) fail('RESOURCE_IDENTITY_CHANGED');
+    resources[descriptor.id] = actual; identityPins[descriptor.id] = pin;
+  }
+  return { executionOriginSha256: digest(json(record)), deployment, resources, identityPins, ...await readPrivacy(c, phase, arm) };
+}
+export async function collectReconciliation(c, origin, directory, evidence, invoke = az, lookup = publishedSourceDigest) {
+  const foundation = verifyFoundationBudgets(c, evidence.foundationBudgets), origins = evidence.reconciliation.origins;
+  await verifyPublishedOrigins(c, foundation, origins, lookup);
+  const r = ids(c), arm = transport(c, origins.records[0].phase, directory, invoke);
+  const account = await invoke(['account', 'show', '--subscription', c.subscriptionId, '--only-show-errors', '--output', 'json']);
+  if (account?.id !== c.subscriptionId || account?.tenantId !== c.tenantId || account?.state !== 'Enabled' || account?.environmentName !== 'AzureCloud') fail('EXPLICIT_ACCOUNT_MISMATCH');
+  await verifyOrigin(origin, arm, c, evidence.scannerAdoption);
+  const policies = await arm('GET', `${r.sub}/providers/Microsoft.Authorization/policyAssignments`, '2023-04-01');
+  const defender = await arm('GET', `${r.sub}/providers/Microsoft.Security/pricings`, '2024-01-01');
+  const baselineSha256 = digest(json({ policies, defender }));
+  if (baselineSha256 !== origin.policyBaselineSha256) fail('POLICY_OR_SECURITY_DRIFT');
+  const provider = await arm('GET', `${r.sub}/providers/Microsoft.Insights`, '2021-04-01');
+  if (provider?.registrationState !== 'Registered' || !provider.resourceTypes?.some(v =>
+    v.resourceType?.toLowerCase() === 'diagnosticsettings' && v.apiVersions?.includes(DIAGNOSTIC_API))) fail('DIAGNOSTIC_API_NOT_REGISTERED');
+  const results = {};
+  for (const record of origins.records) results[record.phase.phase] = await readReconciledPhase(c, record, arm);
+  const stateBudget = await arm('GET', r.stateBudget, '2024-08-01');
+  const inventory = await arm('GET', `${r.group}/resources`, '2021-04-01', undefined, '$expand=createdTime,changedTime');
+  const managedGroup = await arm('GET', r.managedGroup, '2024-03-01');
+  const proposal = { version: 1, kind: 'read-only-completed-phases', sourceSha256: await sourceDigest(),
+    configSha256: digest(json(c)), executionOriginsSha256: digest(json(origins)), baselineSha256,
+    checkedAt: new Date().toISOString(), results, stateBudget, inventory, managedGroup };
+  verifyReconciliation(c, foundation, origins, proposal, proposal.sourceSha256);
+  return proposal;
+}
+export async function reviewedReconciliationReceipts(c, foundation, evidence, sourceSha256, lookup = publishedSourceDigest) {
+  if (!evidence?.origins || !evidence.proposal || !evidence.review) fail('RECONCILIATION_REVIEW_REQUIRED');
+  await verifyPublishedOrigins(c, foundation, evidence.origins, lookup);
+  verifyReconciliation(c, foundation, evidence.origins, evidence.proposal, sourceSha256, evidence.review);
+  return Object.fromEntries(evidence.origins.records.map(record => {
+    const phase = record.phase.phase, result = evidence.proposal.results[phase];
+    return [phase, { qualificationKind: 'reviewed-read-only-reconciliation', qualified: true, phase,
+      configSha256: digest(json(c)), phaseSha256: digest(json(record.phase)), sourceSha256: record.publication.sourceSha256,
+      deployment: result.deployment, resources: result.resources,
+      reconciliation: { ...reconciliationBinding(evidence), policySourceSha256: sourceSha256,
+        executionOriginSha256: digest(json(record)), checkedAt: evidence.proposal.checkedAt, reviewedAt: evidence.review.reviewedAt,
+        originalJournalOutcome: record.journal.outcome, originalReceiptQualified: record.originalReceipt?.qualified === true } }];
+  }));
+}
+export async function verifyFreshReconciliation(c, directory, evidence, invoke = az) {
+  const arm = transport(c, evidence.origins.records[0].phase, directory, invoke);
+  for (const record of evidence.origins.records) {
+    const current = await readReconciledPhase(c, record, arm);
+    if (!isDeepStrictEqual(current.identityPins, evidence.proposal.results[record.phase.phase].identityPins)) fail('RESOURCE_IDENTITY_CHANGED');
+  }
+  assertBudget(await arm('GET', ids(c).stateBudget, '2024-08-01'), c, 50);
+  if (await arm('GET', ids(c).managedGroup, '2024-03-01')) fail('RECONCILIATION_INVENTORY_CHANGED');
+  const inventory = await arm('GET', `${ids(c).group}/resources`, '2021-04-01', undefined, '$expand=createdTime,changedTime');
+  if (!Array.isArray(inventory?.value) || evidence.proposal.inventory.value.some(previous => {
+    const current = inventory.value.filter(v => sameId(v.id, previous.id));
+    return current.length !== 1 || current[0].createdTime !== previous.createdTime;
+  })) fail('RESOURCE_CREATION_IDENTITY_CHANGED');
+}
+export function verifyProjectBudgetReceipt(c, receipt, foundation, sourceSha256, reconciled = {}) {
   const phase = buildPhase(c, 'project-budget', null, {}, foundation), r = ids(c);
   if (receipt?.qualified !== true || receipt.phase !== 'project-budget' ||
       receipt.phaseSha256 !== digest(json(phase)) || receipt.configSha256 !== digest(json(c)) ||
@@ -300,16 +371,7 @@ export function verifyProjectBudgetReceipt(c, receipt, foundation, sourceSha256,
       receipt.deployment.properties?.provisioningState !== 'Succeeded' ||
       !isDeepStrictEqual(Object.keys(receipt.resources ?? {}), [r.projectBudget])) fail('PROJECT_BUDGET_RECEIPT_REQUIRED');
   verifyResource(c, phase, phase.resources[0], receipt.resources[r.projectBudget]);
-  if (receipt.sourceSha256 !== sourceSha256) {
-    if (!lineage?.proposal || !lineage.review) fail('BUDGET_SOURCE_LINEAGE_REVIEW_REQUIRED');
-    verifyBudgetSourceLineageProposal(c, receipt, foundation, sourceSha256, lineage);
-    const review = lineage.review;
-    closed(review, ['version', 'action', 'proposalSha256', 'sourceSha256', 'reviewedAt']);
-    if (review.version !== 1 || review.action !== 'accept-exact-budget-source-lineage' ||
-        review.proposalSha256 !== digest(json(lineage.proposal)) || review.sourceSha256 !== sourceSha256 ||
-        lineageInstant(review.reviewedAt) < lineageInstant(lineage.proposal.readback.checkedAt) || lineageInstant(review.reviewedAt) > Date.now() ||
-        !targetPhase || !isDeepStrictEqual(targetPhase.budgetSourceLineage, budgetSourceLineageBinding(lineage))) fail('BUDGET_SOURCE_LINEAGE_INVALID');
-  }
+  if (receipt.sourceSha256 !== sourceSha256 && !isDeepStrictEqual(receipt, reconciled['project-budget'])) fail('RECONCILIATION_REVIEW_REQUIRED');
 }
 export async function validateReadOnly(c, phase, receipts, directory, invoke = az) {
   const r = ids(c), known = Object.values(receipts).flatMap(v => Object.keys(v.resources ?? {}));
@@ -329,13 +391,20 @@ export async function validateReadOnly(c, phase, receipts, directory, invoke = a
 export async function checkReadOnly(c, phase, origin, receipts, directory, evidenceFiles, invoke = az) {
   const started = Date.now(), arm = transport(c, phase, directory, invoke), r = ids(c);
   const foundation = verifyFoundationBudgets(c, evidenceFiles.foundationBudgets);
+  if (evidenceFiles.reconciliation?.origins?.records.some(v => v.phase.phase === phase.phase)) fail('COMPLETED_PHASE_REQUIRES_RECONCILIATION');
+  const source = await sourceDigest();
+  let reconciled = {};
+  if (evidenceFiles.reconciliation?.origins) {
+    reconciled = await reviewedReconciliationReceipts(c, foundation, evidenceFiles.reconciliation, source);
+    if (!isDeepStrictEqual(phase.reconciliation, reconciliationBinding(evidenceFiles.reconciliation)) ||
+        Object.entries(reconciled).some(([name, value]) => !isDeepStrictEqual(receipts[name], value))) fail('RECONCILIATION_RECEIPTS_REQUIRED');
+  }
   const account = await invoke(['account', 'show', '--subscription', c.subscriptionId, '--only-show-errors', '--output', 'json']);
   if (account?.id !== c.subscriptionId || account?.tenantId !== c.tenantId || account?.state !== 'Enabled' || account?.environmentName !== 'AzureCloud') fail('EXPLICIT_ACCOUNT_MISMATCH');
   await verifyOrigin(origin, arm, c, evidenceFiles.scannerAdoption);
+  if (evidenceFiles.reconciliation?.origins) await verifyFreshReconciliation(c, directory, evidenceFiles.reconciliation, invoke);
   if (phase.phase !== 'project-budget') {
-    const source = await sourceDigest(), receipt = receipts['project-budget'];
-    verifyProjectBudgetReceipt(c, receipt, foundation, source, evidenceFiles.budgetSourceLineage, phase);
-    if (receipt.sourceSha256 !== source) verifyBudgetDeploymentReadback(receipt, await arm('GET', receipt.deployment.id, '2022-09-01'));
+    verifyProjectBudgetReceipt(c, receipts['project-budget'], foundation, source, reconciled);
   }
   const evidence = {};
   for (const [name, id, api] of [
@@ -440,25 +509,49 @@ export class CollectorController {
 
 async function main() {
   const [operation, phaseName, directoryArg, ...extra] = process.argv.slice(2);
-  if (!['prepare', 'check', 'validate-preview', 'image-before-push', 'image-readback', 'execute'].includes(operation) ||
+  if (!['prepare', 'check', 'validate-preview', 'reconcile', 'qualify-reconciliation', 'image-before-push', 'image-readback', 'execute'].includes(operation) ||
       !PHASES.includes(phaseName) || !directoryArg || extra.length) fail('FIXED_PHASE_COMMAND_REQUIRED');
   const directory = await privateDirectory(directoryArg), c = validateConfig(await load(directory, 'config.json'));
   if (Object.entries(process.env).some(([key, value]) => value && /^(CI$|GITHUB_|ACTIONS_|RUNNER_)/u.test(key))) fail('UNTRUSTED_RUNNER_FORBIDDEN');
-  const origin = await load(directory, 'origin.json'), receipts = await load(directory, 'receipts.json');
+  const origin = await load(directory, 'origin.json'), rawReceipts = await load(directory, 'receipts.json');
   const evidenceFiles = { scannerAdoption: await load(directory, 'scanner-adoption.json'),
     foundationBudgets: await load(directory, 'foundation-budgets.json'),
-    budgetSourceLineage: { proposal: await load(directory, 'budget-source-lineage.json', true),
-      review: await load(directory, 'budget-source-lineage-review.json', true),
-      approval: await load(directory, 'project-budget-approval.json', true),
-      journal: await load(directory, 'project-budget-journal.json', true) } };
+    reconciliation: { origins: await load(directory, 'execution-origins-v1.json', true),
+      proposal: await load(directory, 'reconciliation-proposal.json', true),
+      review: await load(directory, 'reconciliation-review.json', true) } };
   verifyScannerAdoption(c, origin, evidenceFiles.scannerAdoption);
   verifyFoundationBudgets(c, evidenceFiles.foundationBudgets);
+  if (['reconcile', 'qualify-reconciliation'].includes(operation)) {
+    if (phaseName !== 'core' || !evidenceFiles.reconciliation.origins?.records.some(v => v.phase.phase === 'core')) fail('CORE_RECONCILIATION_ORIGINS_REQUIRED');
+    if (operation === 'reconcile') {
+      if (evidenceFiles.reconciliation.proposal || evidenceFiles.reconciliation.review) fail('PRESERVE_RECONCILIATION_HISTORY');
+      const proposal = await collectReconciliation(c, origin, directory, evidenceFiles);
+      await saveImmutable(directory, 'reconciliation-proposal.json', proposal);
+      console.log('READONLY_RECONCILIATION_PROPOSED_NOT_QUALIFIED'); return;
+    }
+    const adopted = await reviewedReconciliationReceipts(c, evidenceFiles.foundationBudgets, evidenceFiles.reconciliation, await sourceDigest());
+    const fresh = await collectReconciliation(c, origin, directory, evidenceFiles);
+    await saveImmutable(directory, 'reconciliation-receipts.json', adopted);
+    await saveImmutable(directory, 'reconciliation-qualification.json', { checkedAt: new Date().toISOString(),
+      sourceSha256: await sourceDigest(), receiptsSha256: digest(json(adopted)), freshReadback: fresh,
+      executionAuthorized: false, originalHistoryRewritten: false });
+    console.log('READONLY_RECONCILIATION_QUALIFIED_NO_EXECUTION_AUTHORITY'); return;
+  }
+  if (evidenceFiles.reconciliation.origins?.records.some(v => v.phase.phase === phaseName)) fail('COMPLETED_PHASE_REQUIRES_RECONCILIATION');
+  let receipts = rawReceipts;
+  if (evidenceFiles.reconciliation.origins) {
+    const adopted = await reviewedReconciliationReceipts(c, evidenceFiles.foundationBudgets, evidenceFiles.reconciliation, await sourceDigest());
+    if (!isDeepStrictEqual(await load(directory, 'reconciliation-receipts.json', true), adopted)) fail('RECONCILIATION_RECEIPTS_REQUIRED');
+    receipts = { ...adopted, ...rawReceipts };
+    // The raw ledger retains original receipts; never let its historical source replace an adopted readback.
+    for (const name of Object.keys(adopted)) receipts[name] = adopted[name];
+  }
   if (['image-before-push', 'image-readback'].includes(operation)) {
     if (phaseName !== 'disabled-app') fail('IMAGE_GATE_PHASE_REQUIRED');
-    await registryReview(c, receipts, directory, operation === 'image-before-push');
+    await registryReview(c, receipts, directory, operation === 'image-before-push', az, rawReceipts);
     console.log('PRIVATE_IMAGE_REVIEW_RECORDED_NO_PUSH_AUTHORITY'); return;
   }
-  const phase = buildPhase(c, phaseName, await storageContract(), receipts, evidenceFiles.foundationBudgets, evidenceFiles.budgetSourceLineage);
+  const phase = buildPhase(c, phaseName, await storageContract(), receipts, evidenceFiles.foundationBudgets, evidenceFiles.reconciliation);
   if (operation === 'prepare') {
     if (await load(directory, `${phaseName}-journal.json`, true) || await load(directory, `${phaseName}-approval.json`, true)) fail('PRESERVE_PHASE_HISTORY');
     await save(directory, `${phaseName}-plan.json`, { ...phase, sourceSha256: await sourceDigest(), config: c,
@@ -469,7 +562,7 @@ async function main() {
   const prepared = await load(directory, `${phaseName}-plan.json`);
   if (prepared.sourceSha256 !== await sourceDigest() || prepared.configSha256 !== digest(json(c)) ||
       !isDeepStrictEqual(prepared.template, phase.template) ||
-      !isDeepStrictEqual(prepared.budgetSourceLineage ?? null, phase.budgetSourceLineage ?? null)) fail('PREPARED_PHASE_DRIFT');
+      !isDeepStrictEqual(prepared.reconciliation ?? null, phase.reconciliation ?? null)) fail('PREPARED_PHASE_DRIFT');
   if (operation === 'check') {
     await checkReadOnly(c, phase, origin, receipts, directory, evidenceFiles); console.log('READONLY_PHASE_CHECK_PASSED'); return;
   }
@@ -489,18 +582,9 @@ async function main() {
       loadJournal: () => load(directory, `${phaseName}-journal.json`, true),
       saveJournal: value => save(directory, `${phaseName}-journal.json`, value),
       check: () => checkReadOnly(c, phase, origin, receipts, directory, evidenceFiles),
-      saveReceipt: async value => { receipts[phaseName] = value; await save(directory, `${phaseName}-receipt.json`, value); await save(directory, 'receipts.json', receipts); },
-      privacyChecks: async resources => {
-        for (const id of phase.resources.filter(value =>
-          ['Microsoft.OperationalInsights/workspaces', 'Microsoft.App/managedEnvironments', 'Microsoft.App/containerApps'].includes(value.type)).map(value => value.id)) {
-          const diag = await arm('GET', id + '/providers/Microsoft.Insights/diagnosticSettings', '2021-05-01');
-          if (!Array.isArray(diag?.value) || diag.value.length) fail('DIAGNOSTIC_ROUTE_DRIFT');
-        }
-        if (['workspace-access', 'data', 'assignments', 'disabled-app', 'synthetic-admission'].includes(phaseName)) {
-          const exports = await arm('GET', ids(c).workspace + '/dataExports', '2020-08-01');
-          if (!Array.isArray(exports?.value) || exports.value.length) fail('WORKSPACE_EXPORT_DRIFT');
-        }
-      },
+      saveReceipt: async value => { receipts[phaseName] = value; rawReceipts[phaseName] = value;
+        await save(directory, `${phaseName}-receipt.json`, value); await save(directory, 'receipts.json', rawReceipts); },
+      privacyChecks: () => readPrivacy(c, phase, arm),
     });
     await controller.execute(await load(directory, `${phaseName}-approval.json`));
     console.log('PHASE_READBACK_QUALIFIED_NO_CLIENT_ACTIVATION');

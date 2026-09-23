@@ -249,9 +249,11 @@ retrieve workspace or storage login keys. The resources are:
 - MissionSpec resource group, Consumption Container Apps environment/app, and
   **authenticated private-pull** ACR repository. ACR's network endpoint remains
   public in this design; “private” means no anonymous/admin-key pull, not Private Link.
-  The environment's platform-managed infrastructure group is explicitly named
-  `${name_prefix}-managed`, so its ownership and any separately billed resources
-  can be included in the deployment inventory and cost review.
+  The public default-network environment has no customer VNet. A custom
+  infrastructure group applies to customer-subnet deployment; the canonical
+  template omits that inapplicable field and requires null group/VNet readbacks.
+  The reserved `${name_prefix}-managed` name remains in the combined budget
+  filter; absence of that group is not proof of zero platform charges.
 - Separate user-assigned pull and upload identities: ACR-scoped `AcrPull`, and a
   custom upload-only data action assigned at the one intended DCR.
 - Dedicated Log Analytics workspace and `MissionSpecTelemetry_CL` Analytics table,
@@ -316,9 +318,10 @@ every new billed group, or explicitly filter a dedicated combined budget to thos
 groups. Do not change an unrelated subscription-wide budget. The reviewed
 direct ARM revision permits only the dedicated project-filtered budget's
 USD 250-to-350 amount change, preserving its dates/filter/notifications. The
-state budget stays USD 50; the planned telemetry budget is USD 300. The complete
+state budget stays USD 50; the created telemetry budget is USD 300. The complete
 31-day estimate is USD 301.66 with unchanged traffic and security reserves.
-The combined budget still covers the separately named managed group.
+The combined budget still includes the reserved managed-group name. The full
+environment-management, load-balancer and public-IP reserves remain unchanged.
 
 Inspect inherited Defender pricing and extensions as well as Azure Policy:
 subscription-enabled plans can automatically cover new resources without an

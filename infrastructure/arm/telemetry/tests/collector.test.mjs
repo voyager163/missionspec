@@ -1,15 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { chmod, link, mkdir, open, readFile, readdir, rename, rm, symlink, truncate, writeFile } from 'node:fs/promises';
 import { buildPhase, storageContract, ids, json, digest, ownerTags, firstReleaseCost, PHASES, LIMITS, RECEIVER_DIGEST, RECEIVER_COMMAND,
   BUDGET, budgetProperties, budgetConfiguration, projectBudgetFilter, validateConfig } from '../definition.mjs';
-import { verifyWhatIf, assertBudget, permitFirstPush, verifyResource } from '../policy.mjs';
+import { verifyWhatIf, assertBudget, permitFirstPush, verifyResource, executionIdentity,
+  verifyExecutionOrigin, verifyReconciliation, verifyDeploymentIdentity } from '../policy.mjs';
 import { CollectorController, az, transport, validateReadOnly, verifyScannerAdoption, verifyOrigin, verifyProjectBudgetReceipt,
-  checkReadOnly, load, saveImmutable, MAX_PRIVATE_ARTIFACT_BYTES, PUBLISHED_BUDGET_SOURCE,
-  verifyBudgetSourceLineageProposal, verifyBudgetDeploymentReadback } from '../controller.mjs';
+  checkReadOnly, load, saveImmutable, MAX_PRIVATE_ARTIFACT_BYTES, DIAGNOSTIC_API, privateDirectory, sourceDigest,
+  publishedSourceDigest, collectReconciliation, reviewedReconciliationReceipts, verifyFreshReconciliation, readPrivacy } from '../controller.mjs';
 
 const c = { version: 2, subscriptionId: '00000000-0000-4000-8000-000000000001',
   tenantId: '00000000-0000-4000-8000-000000000002', operatorPrincipalId: '00000000-0000-4000-8000-000000000003',
@@ -183,7 +184,7 @@ test('core creates only six named resources and never overwrites the owned resou
   assert(p.resources.every(v => v.id.startsWith(r.group + '/providers/')));
   assert(!p.resources.some(v => /resourceGroups$|virtualMachines|jobs|storageAccounts/u.test(v.type)));
   const env = p.resources.find(v => v.id === r.environment).expected.properties;
-  assert.equal(env.infrastructureResourceGroup, 'missionspec-test-managed');
+  assert.equal(env.infrastructureResourceGroup, undefined);
   assert.equal(env.appLogsConfiguration, undefined);
   assert.deepEqual(env.workloadProfiles, [{ name: 'Consumption', workloadProfileType: 'Consumption' }]);
   assert.throws(() => buildPhase({ ...c, location: 'westus' }, 'core', contract));
@@ -403,77 +404,156 @@ test('later phases require a matching qualified budget deployment receipt, never
   }
   assert.throws(() => verifyProjectBudgetReceipt(c, undefined, foundation, digest('source')));
 });
-function fixtureBudgetSourceLineage() {
-  const receipt = fixtureReceipts()['project-budget'], source = digest('new hardened source');
-  receipt.sourceSha256 = PUBLISHED_BUDGET_SOURCE.sourceSha256;
-  receipt.completedAt = '2026-09-23T00:02:00.000Z';
-  Object.assign(receipt.deployment.properties, { mode: 'Incremental', correlationId: 'budget-correlation',
-    templateHash: 'budget-template-hash', timestamp: '2026-09-23T00:01:00.000Z' });
-  const phase = buildPhase(c, 'project-budget', null, {}, foundation);
-  const approval = { action: 'direct-arm-project-budget', configSha256: digest(json(c)), phaseSha256: digest(json(phase)),
-    sourceSha256: receipt.sourceSha256, ...Object.fromEntries(['origin', 'receipts', 'baseline', 'whatIf'].map(k => [k + 'Sha256', digest(k)])),
-    approvedAt: '2026-09-23T00:00:00.000Z', expiresAt: '2026-09-23T00:30:00.000Z' };
-  const journal = { phase: 'project-budget', phaseSha256: receipt.phaseSha256, intentAt: '2026-09-23T00:01:00.000Z', outcome: 'readback-qualified' };
-  const proposal = { version: 1, kind: 'reconcile-published-budget-source', priorCommitSha: PUBLISHED_BUDGET_SOURCE.commitSha,
-    priorSourceSha256: receipt.sourceSha256, currentSourceSha256: source, configSha256: digest(json(c)), phaseSha256: receipt.phaseSha256,
-    receiptSha256: digest(json(receipt)), approvalSha256: digest(json(approval)), journalSha256: digest(json(journal)),
-    readback: { checkedAt: '2026-09-23T00:03:00.000Z', deployment: structuredClone(receipt.deployment),
-      projectBudget: structuredClone(receipt.resources[r.projectBudget]), stateBudget: structuredClone(foundation.state) } };
-  const review = { version: 1, action: 'accept-exact-budget-source-lineage', proposalSha256: digest(json(proposal)),
-    sourceSha256: source, reviewedAt: '2026-09-23T00:04:00.000Z' };
-  return { receipt, source, lineage: { proposal, review, approval, journal } };
+function fixtureReconciliation(config = c, baseline = digest('baseline')) {
+  const f = fixtureFoundation(config), r = ids(config), source = digest('current policy');
+  const records = ['project-budget', 'core'].map((name, index) => {
+    const phase = buildPhase(config, name, contract, {}, f);
+    if (name === 'core') {
+      phase.resources.find(v => v.id === r.environment).expected.properties.infrastructureResourceGroup = `${config.namePrefix}-managed`;
+    }
+    const oldSource = digest(`executed source ${name}`), resources = {};
+    for (const descriptor of phase.resources) {
+      const v = { ...structuredClone(descriptor.expected), id: descriptor.id };
+      v.properties.provisioningState = 'Succeeded';
+      if (descriptor.id === r.registry) Object.assign(v.properties, { loginServer: `${config.registryName}.azurecr.io`, creationDate: '2026-09-23T00:01:02.000Z' });
+      if (descriptor.id === r.ingestIdentity || descriptor.id === r.pullIdentity) {
+        const ids = fixtureReceipts(config).core.resources[descriptor.id].properties;
+        Object.assign(v.properties, ids, { tenantId: config.tenantId });
+      }
+      if (descriptor.id === r.workspace) Object.assign(v.properties, { customerId: '00000000-0000-4000-8000-000000000009', createdDate: '2026-09-23T00:01:02.000Z' });
+      if (descriptor.id === r.environment) {
+        Object.assign(v.properties, { infrastructureResourceGroup: null, vnetConfiguration: null,
+          defaultDomain: 'fixture.australiaeast.azurecontainerapps.io', customDomainConfiguration: { customDomainVerificationId: 'fixture-verification' } });
+        // The provider stamp is pinned, not reinterpreted as the ARM inventory's creation time.
+        v.systemData = { createdAt: '2026-09-22T16:01:02.000Z' };
+      }
+      if (descriptor.type === 'Microsoft.Consumption/budgets') delete v.properties.provisioningState;
+      resources[descriptor.id] = v;
+    }
+    const deployment = { id: phase.deploymentId, properties: { provisioningState: 'Succeeded', mode: 'Incremental',
+      correlationId: `${name}-correlation`, timestamp: '2026-09-23T00:02:00.000Z', templateHash: `${name}-template` } };
+    const whatIf = { status: 'Succeeded', changes: phase.resources.map(d => name === 'core'
+      ? { resourceId: d.id, changeType: 'Create' }
+      : { resourceId: d.id, changeType: 'Modify', before: f.project, after: d.expected }) };
+    const bindings = { sourceSha256: oldSource, phaseSha256: digest(json(phase)), configSha256: digest(json(config)),
+      originSha256: config.originSha256, whatIfSha256: digest(json(whatIf)), baselineSha256: baseline, receiptsSha256: digest('previous receipts') };
+    const originalReceipt = name === 'core' ? null : { qualified: true, phase: name, configSha256: bindings.configSha256,
+      phaseSha256: bindings.phaseSha256, sourceSha256: oldSource, deployment, resources, completedAt: '2026-09-23T00:02:01.000Z' };
+    return { version: 1, publication: { commitSha: String(index + 1).repeat(40), sourceSha256: oldSource }, phase,
+      approval: { action: `direct-arm-${name}`, ...bindings, approvedAt: '2026-09-23T00:00:00.000Z', expiresAt: '2026-09-23T00:30:00.000Z' },
+      journal: { phase: name, phaseSha256: bindings.phaseSha256, intentAt: '2026-09-23T00:01:00.000Z',
+        outcome: name === 'core' ? 'reconciliation-required' : 'readback-qualified',
+        ...(name === 'core' ? { failureCode: 'ENVIRONMENT_PRIVACY_DRIFT' } : {}) },
+      preflight: { ...bindings, qualified: true, cost: firstReleaseCost(), startedAt: Date.parse('2026-09-23T00:00:20.000Z'), completedAt: Date.parse('2026-09-23T00:00:40.000Z') },
+      validation: { properties: { provisioningState: 'Succeeded', templateHash: deployment.properties.templateHash } }, whatIf,
+      firstReadback: { checkedAt: '2026-09-23T00:02:01.000Z', deployment, resources }, originalReceipt };
+  });
+  const origins = { version: 1, records };
+  const inventory = { value: records[1].phase.resources.filter(v => v.type !== 'Microsoft.Consumption/budgets')
+    .map(v => ({ id: v.id, type: v.type, createdTime: '2026-09-23T00:01:02.000Z' })) };
+  const proposal = { version: 1, kind: 'read-only-completed-phases', sourceSha256: source,
+    configSha256: digest(json(config)), executionOriginsSha256: digest(json(origins)), baselineSha256: baseline,
+    checkedAt: '2026-09-23T00:03:00.000Z', results: Object.fromEntries(records.map(record => [record.phase.phase, {
+      executionOriginSha256: digest(json(record)), deployment: structuredClone(record.firstReadback.deployment),
+      resources: structuredClone(record.firstReadback.resources),
+      identityPins: Object.fromEntries(Object.entries(record.firstReadback.resources).map(([id, value]) => [id, executionIdentity(value)])),
+      diagnostics: record.phase.phase === 'core' ? { [r.workspace]: { value: [] }, [r.environment]: { value: [] } } : {},
+      exports: record.phase.phase === 'core' ? { value: [] } : null }])),
+    stateBudget: f.state, inventory, managedGroup: null };
+  const review = { version: 1, action: 'accept-exact-arm-reconciliation', sourceSha256: source,
+    proposalSha256: digest(json(proposal)), reviewedAt: '2026-09-23T00:04:00.000Z' };
+  const lookup = async commit => records.find(v => v.publication.commitSha === commit)?.publication.sourceSha256;
+  return { config, foundation: f, origins, proposal, review, source, lookup };
 }
-test('only an explicit exact lineage review reconciles the immutable published-source budget receipt', () => {
-  const { receipt, source, lineage } = fixtureBudgetSourceLineage(), original = json(receipt);
-  const target = buildPhase(c, 'core', contract, {}, foundation, lineage);
-  verifyBudgetSourceLineageProposal(c, receipt, foundation, source, lineage);
-  verifyProjectBudgetReceipt(c, receipt, foundation, source, lineage, target);
-  assert.equal(json(receipt), original);
-  assert.equal(receipt.sourceSha256, PUBLISHED_BUDGET_SOURCE.sourceSha256);
-  assert.throws(() => verifyProjectBudgetReceipt(c, receipt, foundation, source), /BUDGET_SOURCE_LINEAGE_REVIEW_REQUIRED/);
-  assert.throws(() => verifyProjectBudgetReceipt(c, receipt, foundation, source, { ...lineage, review: null }, target), /BUDGET_SOURCE_LINEAGE_REVIEW_REQUIRED/);
-  assert.throws(() => verifyProjectBudgetReceipt(c, receipt, foundation, source, lineage, buildPhase(c, 'core', contract)), /BUDGET_SOURCE_LINEAGE_INVALID/);
-  assert.notEqual(digest(json(target)), digest(json(buildPhase(c, 'core', contract, {}, foundation, { ...lineage, review: null }))));
-  const budget = buildPhase(c, 'project-budget', null, {}, foundation);
-  assert.deepEqual(buildPhase(c, 'project-budget', null, {}, foundation, lineage), budget);
+test('default-network Consumption readback admits null infrastructure group but rejects other networking or telemetry', () => {
+  const f = fixtureReconciliation(), p = f.origins.records[1].phase, descriptor = p.resources.find(v => v.id === r.environment);
+  const actual = f.proposal.results.core.resources[r.environment];
+  verifyResource(c, p, descriptor, actual);
+  for (const change of [
+    v => { v.properties.infrastructureResourceGroup = `${c.namePrefix}-managed`; },
+    v => { delete v.properties.infrastructureResourceGroup; },
+    v => { v.properties.vnetConfiguration = { infrastructureSubnetId: '/other/subnet' }; },
+    v => { v.properties.vnetConfiguration = {}; }, v => { v.properties.publicNetworkAccess = 'Disabled'; },
+    v => { v.properties.zoneRedundant = true; }, v => { v.properties.workloadProfiles[0].maximumCount = 1; },
+    v => { v.properties.appLogsConfiguration = { destination: 'azure-monitor' }; },
+    v => { v.properties.appLogsConfiguration = { destination: 'log-analytics' }; },
+    v => { v.properties.openTelemetryConfiguration = {}; }, v => { v.properties.appInsightsConfiguration = {}; },
+    v => { v.properties.ingressConfiguration = {}; }, v => { v.properties.customDomainConfiguration.dnsSuffix = 'other.invalid'; },
+  ]) { const bad = structuredClone(actual); change(bad); assert.throws(() => verifyResource(c, p, descriptor, bad), /ENVIRONMENT_PRIVACY_DRIFT/); }
+  const custom = structuredClone(descriptor); custom.expected.properties.vnetConfiguration = { infrastructureSubnetId: '/other/subnet' };
+  assert.throws(() => verifyResource(c, p, custom, actual), /ENVIRONMENT_PRIVACY_DRIFT/);
+  assert.equal(firstReleaseCost().total, 301.66);
 });
-test('source reconciliation rejects changed source, commit, config, execution history, review and live readbacks', () => {
-  for (const mutate of [
-    v => { v.proposal.priorSourceSha256 = digest('other'); }, v => { v.proposal.priorCommitSha = 'a'.repeat(40); },
-    v => { v.proposal.currentSourceSha256 = digest('other'); }, v => { v.proposal.configSha256 = digest('other'); },
-    v => { v.proposal.phaseSha256 = digest('other'); }, v => { v.proposal.receiptSha256 = digest('other'); },
-    v => { v.proposal.approvalSha256 = digest('other'); }, v => { v.proposal.journalSha256 = digest('other'); },
-    v => { v.proposal.extra = true; }, v => { v.proposal.readback.projectBudget.properties.amount = 250; },
-    v => { v.proposal.readback.stateBudget.properties.amount = 100; },
-    v => { v.proposal.readback.deployment.properties.correlationId = 'different'; },
-    v => { v.proposal.readback.deployment.properties.templateHash = 'different'; },
-    v => { v.proposal.readback.deployment.properties.timestamp = 'different'; },
-    v => { v.proposal.readback.deployment.properties.mode = 'Complete'; },
-    v => { v.proposal.readback.deployment.properties.provisioningState = 'Running'; },
-    v => { v.proposal.readback.checkedAt = '2099-09-23T00:00:00.000Z'; },
-    v => { v.proposal.readback.checkedAt = '2026-09-23T00:00:00.000Z'; },
-    v => { v.journal.outcome = 'reconciliation-required'; v.proposal.journalSha256 = digest(json(v.journal)); },
-    v => { v.journal.intentAt = '2026-09-23T01:00:00.000Z'; v.proposal.journalSha256 = digest(json(v.journal)); },
-    v => { v.approval.action = 'direct-arm-core'; v.proposal.approvalSha256 = digest(json(v.approval)); },
+test('shared reconciliation requires exact current review and preserves both executed sources and failed legacy outcome', async () => {
+  const f = fixtureReconciliation(), before = json(f.origins);
+  for (const record of f.origins.records) verifyExecutionOrigin(c, f.foundation, record);
+  verifyReconciliation(c, f.foundation, f.origins, f.proposal, f.source);
+  await assert.rejects(reviewedReconciliationReceipts(c, f.foundation, { ...f, review: null }, f.source, f.lookup), /RECONCILIATION_REVIEW_REQUIRED/);
+  const receipts = await reviewedReconciliationReceipts(c, f.foundation, f, f.source, f.lookup);
+  assert.equal(json(f.origins), before);
+  assert.equal(receipts.core.sourceSha256, f.origins.records[1].publication.sourceSha256);
+  assert.equal(receipts.core.qualified, true);
+  assert.equal(receipts.core.reconciliation.originalReceiptQualified, false);
+  assert.equal(receipts.core.reconciliation.originalJournalOutcome, 'reconciliation-required');
+  assert.equal(receipts['project-budget'].reconciliation.originalReceiptQualified, true);
+  verifyProjectBudgetReceipt(c, receipts['project-budget'], f.foundation, f.source, receipts);
+  assert.throws(() => verifyProjectBudgetReceipt(c, receipts['project-budget'], f.foundation, f.source), /RECONCILIATION_REVIEW_REQUIRED/);
+  const next = buildPhase(c, 'workspace-access', contract, receipts, f.foundation, f);
+  assert.equal(next.reconciliation.reviewSha256, digest(json(f.review)));
+  assert.notEqual(digest(json(next)), digest(json(buildPhase(c, 'workspace-access', contract, receipts, f.foundation, { ...f, review: null }))));
+  await assert.rejects(reviewedReconciliationReceipts(c, f.foundation, f, f.source, async () => digest('other source')), /PUBLISHED_SOURCE_MISMATCH/);
+});
+test('reconciliation rejects expired original intent, changed template or deployment, identities, routes, inventory and review', async () => {
+  for (const change of [
+    f => { f.origins.records[1].journal.intentAt = f.origins.records[1].approval.expiresAt; },
+    f => { f.origins.records[1].journal.intentAt = 'NaN'; },
+    f => { f.origins.records[1].approval.expiresAt = 'not-a-date'; },
+    f => { f.origins.records[1].journal.outcome = 'submission-possible'; },
+    f => { f.origins.records[1].journal.extra = true; },
+    f => { f.origins.records[1].validation.properties.templateHash = 'different'; },
+    f => { f.origins.records[1].phase.template.resources[0].properties.adminUserEnabled = true; },
+    f => { f.origins.records[0].originalReceipt.sourceSha256 = digest('forged'); },
+    f => { f.origins.records[1].firstReadback.deployment.properties.provisioningState = 'Failed'; },
+    f => { f.proposal.results.core.deployment.properties.provisioningState = 'Running'; },
+    f => { f.proposal.results.core.deployment.properties.correlationId = 'different'; },
+    f => { f.proposal.results.core.deployment.properties.templateHash = 'different'; },
+    f => { f.proposal.results.core.deployment.properties.mode = 'Complete'; },
+    f => { f.proposal.results.core.resources[r.ingestIdentity].properties.principalId = c.operatorPrincipalId; },
+    f => { f.proposal.results.core.resources[r.pullIdentity].properties.clientId = c.operatorPrincipalId; },
+    f => { f.proposal.results.core.resources[r.workspace].properties.customerId = c.operatorPrincipalId; },
+    f => { f.proposal.results.core.resources[r.environment].systemData.createdAt = '2026-09-23T00:01:03.000Z'; },
+    f => { f.proposal.results.core.resources[r.registry].properties.resourceGuid = c.runId; },
+    f => { f.proposal.results.core.resources[r.registry].properties.creationDate = null; },
+    f => { f.proposal.results.core.resources[r.environment].properties.infrastructureResourceGroup = 'other'; },
+    f => { f.proposal.results.core.diagnostics[r.workspace].value.push({ id: 'route' }); },
+    f => { f.proposal.results.core.diagnostics[r.environment].nextLink = 'more'; },
+    f => { f.proposal.results.core.exports.value.push({ id: 'export' }); },
+    f => { f.proposal.results.core.exports.nextLink = 'more'; },
+    f => { f.proposal.results.core.identityPins[r.workspace].customerId = 'forged'; },
+    f => { delete f.proposal.results.core.resources[r.workspace]; },
+    f => { f.proposal.stateBudget.properties.amount = 0; },
+    f => { f.proposal.results['project-budget'].resources[r.projectBudget].properties.amount = 250; },
+    f => { f.proposal.inventory.value.push({ id: r.dcr }); },
+    f => { f.proposal.inventory.value[0].createdTime = '2020-01-01T00:00:00.000Z'; },
+    f => { f.proposal.inventory.nextLink = 'more'; },
+    f => { f.proposal.managedGroup = { id: r.managedGroup }; },
+    f => { f.proposal.extra = true; },
+    f => { f.proposal.sourceSha256 = digest('other'); },
+    f => { f.proposal.baselineSha256 = digest('other'); },
   ]) {
-    const { receipt, source, lineage } = fixtureBudgetSourceLineage();
-    mutate(lineage); lineage.review.proposalSha256 = digest(json(lineage.proposal));
-    const target = buildPhase(c, 'core', contract, {}, foundation, lineage);
-    assert.throws(() => verifyProjectBudgetReceipt(c, receipt, foundation, source, lineage, target));
+    const f = fixtureReconciliation(); change(f);
+    f.proposal.executionOriginsSha256 = digest(json(f.origins));
+    f.review.proposalSha256 = digest(json(f.proposal));
+    await assert.rejects(reviewedReconciliationReceipts(c, f.foundation, f, f.source, f.lookup));
   }
-  for (const mutate of [
-    v => { v.action = 'accept-any-source'; }, v => { v.proposalSha256 = digest('other'); },
-    v => { v.sourceSha256 = digest('other'); }, v => { v.extra = true; },
-    v => { v.reviewedAt = '2026-09-23T00:00:00.000Z'; }, v => { v.reviewedAt = 'NaN'; },
-    v => { v.reviewedAt = '2099-09-23T00:00:00.000Z'; },
+  for (const change of [
+    v => { v.action = 'accept-any-source'; }, v => { v.proposalSha256 = digest('other'); }, v => { v.sourceSha256 = digest('other'); },
+    v => { v.reviewedAt = '2026-09-23T00:00:00.000Z'; }, v => { v.reviewedAt = '2099-09-23T00:00:00.000Z'; },
+    v => { v.reviewedAt = 'NaN'; }, v => { v.force = true; },
   ]) {
-    const { receipt, source, lineage } = fixtureBudgetSourceLineage(); mutate(lineage.review);
-    assert.throws(() => verifyProjectBudgetReceipt(c, receipt, foundation, source, lineage, buildPhase(c, 'core', contract, {}, foundation, lineage)));
+    const f = fixtureReconciliation(); change(f.review);
+    await assert.rejects(reviewedReconciliationReceipts(c, f.foundation, f, f.source, f.lookup));
   }
-  const { receipt } = fixtureBudgetSourceLineage(), actual = structuredClone(receipt.deployment);
-  verifyBudgetDeploymentReadback(receipt, actual);
-  actual.properties.templateHash = 'new';
-  assert.throws(() => verifyBudgetDeploymentReadback(receipt, actual), /BUDGET_DEPLOYMENT_READBACK_CHANGED/);
 });
 function fixtureAdoption() {
   const config = structuredClone(c), storageId = `${r.stateGroup}/providers/Microsoft.Storage/storageAccounts/fixturestate`;
@@ -481,6 +561,7 @@ function fixtureAdoption() {
     networkAcls: { bypass: 'None', defaultAction: 'Deny', ipRules: [], ipv6Rules: [], virtualNetworkRules: [], resourceAccessRules: [] } } };
   const ledger = { sessions: [] };
   const origin = { version: 1, adoptionDecision: { accepted: true, opaqueTagIsUTC: false }, latestLedger: ledger, latestLedgerSha256: digest(json(ledger)),
+    policyBaselineSha256: digest(json({ policies: { value: [] }, defender: { value: [] } })),
     resources: [{ id: storageId, apiVersion: '2023-05-01', snapshot }], absent: [],
     bootstrap: { id: `${r.stateGroup}/providers/Microsoft.Resources/deployments/foundation`, correlationId: 'original', timestamp: 'original', templateHash: 'original' } };
   config.originSha256 = digest(json(origin));
@@ -549,6 +630,84 @@ test('full core preflight cannot proceed on a budget preview and immutable evide
   await assert.rejects(saveImmutable(directory, 'origin.json', { replaced: true }), { code: 'EEXIST' });
   assert.deepEqual(JSON.parse(await readFile(`${directory}/origin.json`)), origin);
 });
+test('published source lookup uses immutable commit blobs and never evaluates historical code or accepts arbitrary refs', async () => {
+  const sourceFiles = Object.fromEntries(['definition.mjs', 'policy.mjs', 'controller.mjs'].map(name => [`infrastructure/arm/telemetry/${name}`, `historical ${name}`]));
+  const files = { ...sourceFiles, 'assets/schemas/telemetry-event.schema.json': JSON.stringify(contract.schema),
+    'services/telemetry-ingest/schema/storage-columns.json': JSON.stringify(contract.columns) };
+  const commit = 'a'.repeat(40), commands = [], expected = createHash('sha256');
+  for (const [path, body] of Object.entries(sourceFiles)) expected.update(path.split('/').at(-1)).update(body);
+  expected.update(json(contract));
+  const run = async (command, args) => {
+    assert.equal(command, 'git'); commands.push(args);
+    if (args[0] === 'merge-base') { assert.deepEqual(args, ['merge-base', '--is-ancestor', commit, 'HEAD']); return { stdout: Buffer.alloc(0) }; }
+    assert.deepEqual(args.slice(0, 2), ['--no-pager', 'show']);
+    assert(args[2].startsWith(commit + ':'));
+    const path = args[2].slice(41); assert(Object.hasOwn(files, path));
+    return { stdout: Buffer.from(files[path]) };
+  };
+  assert.equal(await publishedSourceDigest(commit, run), expected.digest('hex'));
+  assert.equal(commands.length, 6);
+  for (const ref of ['HEAD', '--all', 'a'.repeat(39), 'g'.repeat(40)]) await assert.rejects(publishedSourceDigest(ref, run), /PUBLISHED_ORIGIN_INVALID/);
+  assert.equal(commands.length, 6);
+  await assert.rejects(publishedSourceDigest(commit, async () => { throw new Error('private git failure'); }), { message: 'PUBLISHED_ORIGIN_UNAVAILABLE' });
+});
+test('reconciliation and fresh qualification read only the exact deployed resources and supported privacy routes', async t => {
+  const a = fixtureAdoption(), f = fixtureReconciliation(a.config, a.origin.policyBaselineSha256), directory = await scratch(t), rr = ids(a.config);
+  const evidence = { scannerAdoption: a.adoption, foundationBudgets: f.foundation, reconciliation: f };
+  const responses = new Map([
+    [a.adoption.resourceId, a.adoption.after],
+    [a.origin.bootstrap.id, { id: a.origin.bootstrap.id, properties: { ...a.origin.bootstrap, provisioningState: 'Succeeded' } }],
+    [`${rr.sub}/providers/Microsoft.Authorization/policyAssignments`, { value: [] }],
+    [`${rr.sub}/providers/Microsoft.Security/pricings`, { value: [] }],
+    [`${rr.sub}/providers/Microsoft.Insights`, { registrationState: 'Registered', resourceTypes: [{ resourceType: 'diagnosticSettings', apiVersions: [DIAGNOSTIC_API] }] }],
+    [rr.stateBudget, f.foundation.state], [rr.managedGroup, null], [`${rr.group}/resources`, f.proposal.inventory],
+    [rr.workspace + '/dataExports', { value: [] }],
+  ]);
+  for (const record of f.origins.records) {
+    responses.set(record.phase.deploymentId, record.firstReadback.deployment);
+    for (const [id, value] of Object.entries(record.firstReadback.resources)) responses.set(id, value);
+  }
+  for (const id of [rr.workspace, rr.environment]) responses.set(id + '/providers/Microsoft.Insights/diagnosticSettings', { value: [] });
+  const calls = [];
+  const invoke = async args => {
+    calls.push(args);
+    assert.equal(args[args.indexOf('--subscription') + 1], a.config.subscriptionId);
+    if (args[0] === 'account') return { id: a.config.subscriptionId, tenantId: a.config.tenantId, state: 'Enabled', environmentName: 'AzureCloud' };
+    assert.equal(args[0], 'rest'); assert.equal(args[args.indexOf('--method') + 1], 'GET');
+    const url = new URL(args[args.indexOf('--url') + 1]); assert(responses.has(url.pathname), url.pathname);
+    if (url.pathname.endsWith('/diagnosticSettings')) assert.equal(url.searchParams.get('api-version'), DIAGNOSTIC_API);
+    return structuredClone(responses.get(url.pathname));
+  };
+  const proposal = await collectReconciliation(a.config, a.origin, directory, evidence, invoke, f.lookup);
+  verifyReconciliation(a.config, f.foundation, f.origins, proposal, await sourceDigest());
+  assert.equal(proposal.results.core.deployment.properties.provisioningState, 'Succeeded');
+  assert.equal(f.origins.records[1].originalReceipt, null);
+  assert.equal((await readdir(directory)).length, 0);
+  const current = { ...f, proposal };
+  await verifyFreshReconciliation(a.config, directory, current, invoke);
+  responses.get(rr.workspace).properties.customerId = a.config.operatorPrincipalId;
+  await assert.rejects(verifyFreshReconciliation(a.config, directory, current, invoke), /RESOURCE_IDENTITY_CHANGED/);
+  assert(calls.every(args => args[0] === 'account' || args[args.indexOf('--method') + 1] === 'GET'));
+  verifyDeploymentIdentity(f.origins.records[1].firstReadback.deployment, proposal.results.core.deployment);
+});
+test('CLI refuses to prepare, preview or execute already-deployed phases before any Azure call', async t => {
+  const a = fixtureAdoption(), f = fixtureReconciliation(a.config, a.origin.policyBaselineSha256);
+  const directory = `infrastructure/arm/telemetry/.operator-private/revision-20260923-test-${randomUUID().replaceAll('-', '').slice(0, 12)}`;
+  await privateDirectory(directory);
+  t.after(() => rm(directory, { recursive: true }));
+  for (const [name, value] of Object.entries({ 'config.json': a.config, 'origin.json': a.origin, 'scanner-adoption.json': a.adoption,
+    'foundation-budgets.json': f.foundation, 'receipts.json': {}, 'execution-origins-v1.json': f.origins })) await saveImmutable(directory, name, value);
+  const untrusted = Object.entries(process.env).some(([key, value]) => value && /^(CI$|GITHUB_|ACTIONS_|RUNNER_)/u.test(key));
+  for (const operation of ['prepare', 'check', 'validate-preview', 'execute']) {
+    for (const phase of ['core', 'project-budget']) await assert.rejects(
+      promisify(execFile)(process.execPath, ['infrastructure/arm/telemetry/controller.mjs', operation, phase, directory]),
+      error => error.code === 1 && error.stderr.trim() === (untrusted ? 'UNTRUSTED_RUNNER_FORBIDDEN' : 'COMPLETED_PHASE_REQUIRES_RECONCILIATION'));
+  }
+  await assert.rejects(promisify(execFile)(process.execPath, ['infrastructure/arm/telemetry/controller.mjs', 'qualify-reconciliation', 'core', directory]),
+    error => error.code === 1 && error.stderr.trim() === (untrusted ? 'UNTRUSTED_RUNNER_FORBIDDEN' : 'RECONCILIATION_REVIEW_REQUIRED'));
+  assert.equal(await load(directory, 'reconciliation-receipts.json', true), null);
+  assert.equal(await load(directory, 'core-journal.json', true), null);
+});
 test('transport absence handling does not convert auth/quota/general strings into missing resources', async () => {
   const error = stderr => async () => { throw Object.assign(new Error('failure'), { stderr }); };
   const args = ['rest', '--method', 'GET'];
@@ -587,6 +746,24 @@ test('forbidden ARM operations match complete components in every position witho
   await assert.rejects(arm('POST', `${r.registry}/allowlistKeys`, '2024-08-01'), /NONMUTATING_POST_ONLY/);
   await assert.rejects(arm('PUT', `${r.registry}/register-helper`, '2024-08-01'), /FIXED_PHASE_PUT_ONLY/);
   assert.equal(calls, 4);
+});
+test('only exact diagnostic GET routes admit the reviewed preview API and production privacy checks use it', async () => {
+  const phase = buildPhase(c, 'core', contract), calls = [];
+  const arm = transport(c, phase, 'unused', async args => { calls.push(args); return { value: [] }; });
+  for (const target of [r.workspace, r.environment, r.app]) await arm('GET', target + '/providers/Microsoft.Insights/diagnosticSettings', DIAGNOSTIC_API);
+  assert.equal(calls.length, 3);
+  const path = r.workspace + '/providers/Microsoft.Insights/diagnosticSettings';
+  for (const args of [
+    ['GET', path, '2021-05-01'], ['GET', path, '2020-01-01-preview'], ['GET', path + '/other', DIAGNOSTIC_API],
+    ['GET', r.registry + '/providers/Microsoft.Insights/diagnosticSettings', DIAGNOSTIC_API],
+    ['GET', r.workspace, DIAGNOSTIC_API], ['POST', path, DIAGNOSTIC_API], ['PUT', phase.deploymentId, DIAGNOSTIC_API],
+    ['GET', path, DIAGNOSTIC_API, {}], ['GET', path, DIAGNOSTIC_API, undefined, '$filter=anything'],
+  ]) await assert.rejects(arm(...args), /ARM_SCOPE_FORBIDDEN/);
+  assert.equal(calls.length, 3);
+  const result = await readPrivacy(c, phase, arm);
+  assert.deepEqual(Object.keys(result.diagnostics).sort(), [r.workspace, r.environment].sort());
+  assert.deepEqual(result.exports, { value: [] });
+  assert.equal(calls.filter(args => args[args.indexOf('--url') + 1].includes('diagnosticSettings')).length, 5);
 });
 test('uncertain submission is never replayed or followed by destructive rollback', async () => {
   const f = executionFixture(), controller = new CollectorController(c, f.p, f.io);
