@@ -596,6 +596,14 @@ async function readReconciledPhase(c, record, arm, context = {}) {
   }
   return { executionOriginSha256: digest(json(record)), deployment, resources, identityPins, ...await readPrivacy(c, phase, arm) };
 }
+export function emptyAcrReferrers(value) {
+  if (!Array.isArray(value)) {
+    closed(value, ['manifests']);
+    value = value.manifests;
+  }
+  if (!Array.isArray(value) || value.length !== 0) fail('RECEIVER_REFERRER_READBACK_REQUIRED');
+  return [];
+}
 export async function readPublishedImage(c, imagePublication, arm, invoke = az, candidate) {
   const registry = await arm('GET', ids(c).registry, '2023-07-01');
   const repositories = await invoke(['acr', 'repository', 'list', '--name', c.registryName,
@@ -614,8 +622,7 @@ export async function readPublishedImage(c, imagePublication, arm, invoke = az, 
     for (const digest of [c.receiverDigest, candidate.profile.manifestDigest]) {
       const refs = await invoke(['acr', 'manifest', 'list-referrers', '--registry', c.registryName,
         '--name', `missionspec/telemetry-ingest@${digest}`, '--subscription', c.subscriptionId, '--only-show-errors', '--output', 'json']);
-      if (!Array.isArray(refs)) fail('RECEIVER_REFERRER_READBACK_REQUIRED');
-      result.referrers.push(...refs);
+      result.referrers.push(...emptyAcrReferrers(refs));
     }
   }
   verifyPublicationReadback(c, imagePublication, result, candidate);

@@ -7,10 +7,18 @@ import { randomUUID } from 'node:crypto';
 import { buildPhase, digest, json, ids, ownerTags, RECEIVER_DIGEST, RECEIVER_COMMAND, SYNTHETIC_FIXTURES, SYNTHETIC_LIMITS, deploymentName, validateWindowInstance, firstReleaseCost } from '../definition.mjs';
 import { admissionFlag, verifyWhatIf, resourceContext, verifySyntheticWindow, verifyWindowState, verifySyntheticRows, verifyWindowPredecessor, verifyWindowInstancePredecessor } from '../policy.mjs';
 import { buildSyntheticWindow, SyntheticToggleController, SyntheticWindowDriver, latestRevisionReady, syntheticHttp, syntheticQuery, readSyntheticQuery, syntheticWindowIO, transport,
-  verifyPublishedWindowPredecessor, whatIfRequestContext, reserveWindowInstance, verifyReceiverSource } from '../controller.mjs';
+  verifyPublishedWindowPredecessor, whatIfRequestContext, reserveWindowInstance, verifyReceiverSource, emptyAcrReferrers } from '../controller.mjs';
 import { candidateFixture } from './receiver-upgrade.fixture.mjs';
 import { verifyReceiverProfile, verifyReceiverCandidate, verifyReceiverInventory, prepareReceiverPublication, RECEIVER_SOURCE_INPUTS, receiverDatabaseInstant,
   buildDisabledImagePhase, verifyDisabledImageRecord, ReceiverUpgradeController } from '../receiver-upgrade.mjs';
+
+test('ACR referrer readback accepts the exact empty manifest envelope, never missing or incomplete inventory', () => {
+  assert.deepEqual(emptyAcrReferrers({ manifests: [] }), []);
+  assert.deepEqual(emptyAcrReferrers([]), []);
+  for (const value of [undefined, null, {}, { manifests: null }, { manifests: [] , nextLink: 'next' },
+    { manifests: [], error: 'unavailable' }, { manifests: [{ digest: 'sha256:' + 'a'.repeat(64) }] },
+    [{ digest: 'sha256:' + 'a'.repeat(64) }]]) assert.throws(() => emptyAcrReferrers(value));
+});
 
 function fixture() {
   const origin = { policyBaselineSha256: digest('baseline') };
