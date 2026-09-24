@@ -15,6 +15,154 @@ Retired-route approvals are terminal; none authorizes the direct ARM route.
 
 ## Local review and authority
 
+### Durable queue design: separate topology and third-image review
+
+The approved architecture keeps the CLI's **1,000 ms** request deadline and
+places a bounded **durable Azure Storage queue** ahead of the asynchronous
+Logs upload. The design/cost approval is not permission to deploy, publish,
+send a receiver request, acquire a token, query data, or configure the root CLI
+transport. Those remain exact-preflight-gated parent/operator actions.
+
+The new `durable-queue.mjs` contract preserves configuration v2, collector
+run/ownership IDs, all original seven execution origins and the original
+publication. Both the original and prepared-identity images/tags remain.
+Failed terminal windows retain their failure result; image/profile wiring
+never converts a failed POST to success or changes the admission flag.
+
+**Topology and identity.** `queue-topology.json` is derived from the unchanged
+base configuration and a separately reviewed, explicit 8–16-character
+lowercase alphanumeric namespace. The account name is `msrtq<namespace>`; the
+only queue is `telemetry-events-v1`, in the existing telemetry group in
+Australia East. This is a **new** StorageV2 / Standard_LRS account, not reuse
+of private runtime-state storage. HTTPS/TLS1_2, `allowSharedKeyAccess: false`,
+`allowBlobPublicAccess: false` and OAuth defaults are explicit. Its public
+endpoint accommodates the existing no-VNet Container App using Entra; it
+does not introduce a VM, VNet, private endpoint, firewall/security exception,
+SAS, key, connection string or anonymous queue access. Inherited Defender
+and subscription policy stay unchanged. CORS, diagnostics and exports stay
+empty; the worker cannot create/delete a queue or manage service properties.
+
+The existing ingest UAMI keeps `Main` lifecycle; registry pull keeps `None`.
+The custom role is assignable and assigned **only at that exact queue**:
+
+| Classification | Exact provider operation | Use |
+| --- | --- | --- |
+| Action | `Microsoft.Storage/storageAccounts/queueServices/queues/read` | Queue metadata |
+| DataAction | `Microsoft.Storage/storageAccounts/queueServices/queues/messages/add/action` | Send a new message |
+| DataAction | `Microsoft.Storage/storageAccounts/queueServices/queues/messages/process/action` | Receive and delete an individual message |
+
+The [official operation mapping](https://learn.microsoft.com/en-us/rest/api/storageservices/authorize-with-azure-active-directory#permissions-for-queue-service-operations)
+and [provider catalog](https://learn.microsoft.com/en-us/azure/role-based-access-control/permissions/storage#microsoftstorage)
+are authoritative. The settled worker makes **zero visibility-update calls**,
+so Sender `add/action` suffices; `messages/write` would add unused update
+access. Processor `messages/read` would add unused peek access, and
+`messages/delete` would add clear-all access. None is granted. No account
+Contributor, broad Queue Data Contributor, wildcard, alternative principal or
+new identity is accepted. Registry, DCR and workspace grants remain unchanged.
+Azure documents [resource-instance assignable scopes](https://learn.microsoft.com/en-us/azure/role-based-access-control/role-definitions#assignablescopes)
+as possible but generally discouraged for role-count reasons. This one
+dedicated role deliberately retains the tighter queue-only bound; review must
+not silently replace it with an account/group assignment.
+Fresh preflight also validates the exact three operations' `isDataAction`
+classifications from the fixed Storage provider catalog read; no keys/SAS
+operations are available.
+
+**Runtime binding.** The queued image receives only two additional values:
+`AZURE_QUEUE_URL` and `AZURE_QUEUE_RESOURCE_ID`. They must match the reviewed
+account/queue IDs exactly. There is no runtime-configurable arbitrary endpoint
+or fallback to direct Logs admission. Its source-bound profile pins the
+20-second Storage credential preparation, separate Monitor consumer scope,
+650 ms enqueue, 1 KiB record, 3,600-second per-message TTL, approximate-count
+10,000 admission threshold, eight concurrent enqueues, batch size 32, one
+15-second Logs upload at a time, 60-second visibility and three deliveries.
+The bounded implementation additionally records five-second queue operations,
+a 45-second total leased-batch budget, 30-second metadata/idle polling and
+5–60-second backoff, zero visibility renewals, one Queue SDK try, zero Logs
+SDK retries/redirects, at most 32 deletes per batch and ten-second shutdown.
+These distinct budgets are explicit review inputs, not
+extensions of the CLI timeout. Disabled operation makes zero network requests.
+Counters reset on restart and queue count is approximate: neither is an exact
+global backlog limit or a spend meter.
+
+**Local and live phases.** `preview-queue queue-storage <private-revision>`
+requires only `config.json` and `queue-namespace.json` (`{"namespace":"..."}`).
+It creates an unapproved preview and makes no cloud calls. `prepare-queue`
+prepares one fixed template locally; the fixed order is:
+
+1. `queue-storage`: one account, its default service, and one queue, created
+   together with exact ARM dependencies; no implicit SDK creation.
+2. `queue-role`: only the minimal custom role definition.
+3. `queue-assignment`: only the existing ingest UAMI at the queue scope.
+4. `disabled-queue-upgrade`: only the separately published third image and
+   the two queue environment values, with `MSR_INGESTION_ENABLED=false`.
+
+`queue-review.json` is a closed `accept-exact-durable-queue-topology` review
+binding config, topology and current policy source, canonical approval/expiry
+(at most one hour), and all-false `QUEUE_AUTHORITY`. `check-queue` repeats the
+original history, foundation/security, exact resources, account, provider and
+role reads and full validate/what-if. `execute-queue` separately requires
+`queue-policy-publication.json` and the exact phase approval. As with image
+changes, independent reads are limited to four in flight, each request to
+15 seconds and preflight to 120 seconds. A durable intent permits one PUT and
+a bounded 120-second rollout; uncertainty requires reconciliation, never retry.
+
+Each successful queue phase writes a new immutable `<phase>-record.json`.
+For the next private revision, retain those full records under their exact
+phase names in `queue-records.json`; do not replace old receipts. The new
+account becomes known inventory **only** through validated execution,
+approval, source, what-if, deployment identity and readback records. Any other
+account/queue/resource remains an error. Role definitions and assignments,
+diagnostics, account encryption/network settings and queue inventory are read
+again at dispatch, including after request-body preparation.
+
+The new receiver candidate is **version 2**, with
+`kind: reviewed-durable-queue-receiver`, the complete `priorCandidate`, original
+`legacyPublication`, exact topology and an independent
+`publish-one-reviewed-queue-receiver` review. Its exact third manifest/config
+must be supplied by the future real build; null/placeholders/`qualified: true`
+are not publishable evidence. It retains notices, scan/database freshness,
+source archive, Linux/amd64/UID/command restrictions and native caveats. Only
+this kind adds `src/queue-storage.ts`, `tests/queue-storage.test.mjs`, and
+`tests/queue-sdk.test.mjs` to the original 35-file closure (38 total). Typed
+SDK proof binds the source file map and runtime-source manifest, explicit
+fixture pass/fail counts, zero-network disabled behavior, durable ACK,
+restart/TTL/overflow/retry/visibility/worker bounds and no implicit creation.
+Unit-generated artifacts are not real publication or qualification evidence.
+
+Publication preview requires exactly the two existing manifests/tags and empty
+referrers. After the one separately reviewed copy, all three full manifests
+and empty referrers must be read back. No fourth digest, retag, deletion, repush,
+index or registry-admin exception is admitted. Existing image-only upgrade/
+rollback behavior remains available only for its original direct profile.
+
+Version-5 reconciliation binds `receiverUpgradeSha256`, `queueRecordsSha256`
+and the exact receiver candidate. This allows a current prepared/queued
+runtime observation and additional *qualified* account inventory without
+rewriting the original seven phases, old two-image inventory, version-3/4
+reviews, receipts or source hashes. Each new proposal needs its own exact
+version-5 review. The disabled queue image upgrade requires the recorded
+failed prepared-identity window as a terminal false/503 predecessor, all three
+queue records and a fresh instance/phase approval. Only image + queue env
+changes are accepted; identity, flags, ports, probes, resources, lifecycle,
+network and schema remain unchanged.
+
+**Cost and verification.** Official evidence remains in private
+`revision-20260924-durable-queue-design/{official-queue-prices.json,cost-review.json}`.
+The 31-day model uses 100,000 accepted messages/day, Queues v2 Standard LRS
+Australia East Class 1/2 at USD 0.004/10K and storage at USD 0.045/GB-month:
+311.23 existing + 9.57 third image + 10 extra storage security + 6.20 normal
+operations + 2.14272 conservative idle operations + 0.225 storage + 10 retry
+reserve = **USD 349.36772**, rounded once to **USD 349.37**. All existing
+HTTP/rejected-request, ambiguous-environment, load-balancer, IP and security
+reserves remain; there is no free-grant deduction. The USD 0.63 headroom is
+small and **not a billing cap**.
+
+Queued POST expects **202 = durably admitted, not Logs persisted**; direct
+profiles/history still expect 204. A newly approved paired window requires
+both owned bounded Logs rows, then observed approximate queue drain, followed
+by terminal false/503. A missing count never defaults to zero; ACK/counters
+alone never qualify a window or activate the CLI.
+
 ### Disabled receiver image upgrade (local candidate, no implicit release)
 
 The version-1 `receiver-upgrade.mjs` overlay leaves configuration v2, its

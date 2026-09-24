@@ -198,7 +198,7 @@ test('Python bridge rejects unsafe URLs and credential-bearing/static-expression
 
 test('Python and Node derive toggle and image-change names from the bound UUID, never the collector runId', async () => {
   const instance = { version: 1, id: '00000000-0000-4000-8000-000000000099', predecessorSha256: digest('prior'), previousInstanceIds: [] };
-  const requests = ['synthetic-admission', 'synthetic-disable', 'disabled-image-upgrade', 'disabled-image-rollback'].map(name => {
+  const requests = ['synthetic-admission', 'synthetic-disable', 'disabled-image-upgrade', 'disabled-image-rollback', 'disabled-queue-upgrade'].map(name => {
     const p = { ...phase, phase: name, windowInstance: instance,
       deploymentId: `${r.group}/providers/Microsoft.Resources/deployments/${deploymentName(c, name, instance)}` };
     const request = whatIfRequestContext(c, p);

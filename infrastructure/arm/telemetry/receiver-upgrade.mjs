@@ -4,8 +4,10 @@ import { buildPhase, closed, digest, fail, firstReleaseCost, ids, json, RECEIVER
 import { admissionFlag, canonicalAppWrite, canonicalInstant, executionIdentity, resourceContext,
   verifyApproval, verifyDeploymentIdentity, verifyFreshReview, verifyImagePublication,
   verifyResource, verifyWhatIf, verifyWindowPredecessor } from './policy.mjs';
+import { durableQueueCost, QUEUE_PROFILE_KIND, QUEUE_RUNTIME, queueEnvironment, qualifiedQueueRecords,
+  verifyQueueTopology } from './durable-queue.mjs';
 
-export const IMAGE_PHASES = Object.freeze(['disabled-image-upgrade', 'disabled-image-rollback']);
+export const IMAGE_PHASES = Object.freeze(['disabled-image-upgrade', 'disabled-image-rollback', 'disabled-queue-upgrade']);
 export const PREPARED_IDENTITY_RUNTIME = Object.freeze({
   version: 1, kind: 'explicit-uami-prepared-v1', preparationTimeoutMs: 20000,
   scope: 'https://monitor.azure.com/.default', refreshMarginMs: 120000,
@@ -26,6 +28,12 @@ export const RECEIVER_SOURCE_INPUTS = Object.freeze([...RECEIVER_BUILD_INPUTS, .
   'tests/config-storage.test.mjs', 'tests/container-runtime.test.mjs', 'tests/helpers.mjs', 'tests/http.test.mjs',
   'tests/identity-readiness.test.mjs', 'tests/loopback-tls.json', 'tests/runtime-sources.test.mjs', 'tests/sdk-deadline.test.mjs',
 ].map(path => `services/telemetry-ingest/${path}`)]);
+export const QUEUE_SOURCE_INPUTS = Object.freeze([...RECEIVER_SOURCE_INPUTS,
+  'services/telemetry-ingest/src/queue-storage.ts',
+  'services/telemetry-ingest/tests/queue-storage.test.mjs', 'services/telemetry-ingest/tests/queue-sdk.test.mjs',
+]);
+export const receiverSourceInputs = profile => profile?.kind === QUEUE_PROFILE_KIND ? QUEUE_SOURCE_INPUTS : RECEIVER_SOURCE_INPUTS;
+export const receiverCost = candidate => candidate?.version === 2 ? durableQueueCost() : firstReleaseCost(2);
 export const NATIVE_CONDITIONS = Object.freeze([
   'CVE-2026-91745:optimization-disabled',
   'CVE-2026-93377:debugger-disabled',
@@ -67,8 +75,9 @@ export function verifyReceiverProfile(profile) {
   closed(profile.scan.counts, ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN']);
   closed(profile.qualification, ['reportJson', 'reportSha256']);
   noAuthority(profile.authority);
+  const queued = profile.version === 2 && profile.kind === QUEUE_PROFILE_KIND;
   const manifest = parseArtifact(profile.manifestJson), config = parseArtifact(profile.configJson);
-  if (profile.version !== 1 || profile.kind !== 'reviewed-prepared-identity-receiver' ||
+  if ((!queued && (profile.version !== 1 || profile.kind !== 'reviewed-prepared-identity-receiver')) ||
       !imageHash(profile.manifestDigest) || profile.manifestDigest === RECEIVER_DIGEST ||
       profile.manifestDigest !== 'sha256:' + digest(profile.manifestJson) ||
       profile.configDigest !== 'sha256:' + digest(profile.configJson) ||
@@ -80,10 +89,10 @@ export function verifyReceiverProfile(profile) {
       manifest.subject !== undefined || manifest.artifactType !== undefined || manifest.manifests !== undefined ||
       config.os !== 'linux' || config.architecture !== 'amd64' || config.config?.User !== '65532:65532' ||
       !isDeepStrictEqual(config.config?.Cmd, RECEIVER_COMMAND) || (config.config?.Entrypoint?.length ?? 0) !== 0 ||
-      !isDeepStrictEqual(profile.runtime, PREPARED_IDENTITY_RUNTIME) || profile.nativeClearance !== clearance ||
+      !isDeepStrictEqual(profile.runtime, queued ? QUEUE_RUNTIME : PREPARED_IDENTITY_RUNTIME) || profile.nativeClearance !== clearance ||
       !isDeepStrictEqual(profile.retainedAdvisories, NATIVE_CONDITIONS) || profile.priorUnknownGlibcCaveatWaived !== false) fail('RECEIVER_PROFILE_INVALID');
   const source = profile.source, notices = profile.notices, scan = profile.scan;
-  closed(source.files, RECEIVER_SOURCE_INPUTS);
+  closed(source.files, receiverSourceInputs(profile));
   const report = parseArtifact(scan.reportJson);
   const noticeBundle = parseArtifact(notices.bytes);
   closed(noticeBundle, ['version', 'inventoryJson', 'inventorySha256', 'files']);
@@ -144,7 +153,8 @@ export function verifyReceiverProfile(profile) {
       qualification.oldImagePreserved !== RECEIVER_DIGEST ||
       !isDeepStrictEqual(qualification.runtimeConstraints, { cpuMax: '25000 100000', memoryMaxBytes: 536870912,
         capEff: '0000000000000000', noNewPrivs: 1, uid: 65532, gid: 65532, network: 'none', readOnlyRoot: true })) fail('RECEIVER_QUALIFICATION_INVALID');
-  for (const [name, identityRequests, ingestionRequests, status] of [
+  if (queued) verifyQueueQualification(profile, qualification);
+  else for (const [name, identityRequests, ingestionRequests, status] of [
     ['disabled-main', 0, 0, 503], ['slow-identity', 1, 1, 204], ['failed-identity', 1, 0, null],
   ]) {
     const result = qualification.resourceFixtures?.[name];
@@ -155,27 +165,65 @@ export function verifyReceiverProfile(profile) {
             result.firstEvent.elapsedMs < 0 || result.firstEvent.elapsedMs > 1000))) fail('RECEIVER_QUALIFICATION_INVALID');
   }
   return { digest: profile.manifestDigest, configSha256: profile.configDigest, configUser: config.config.User,
-    command: config.config.Cmd, manifest, nativeV8Clearance: clearance };
+    command: config.config.Cmd, manifest, nativeV8Clearance: clearance,
+    ...(queued ? { queueRuntime: QUEUE_RUNTIME } : {}) };
+}
+
+function verifyQueueQualification(profile, qualification) {
+  const proof = qualification.durableQueue;
+  closed(proof, ['version', 'kind', 'sourceFilesSha256', 'sdkSourceManifestSha256', 'runtime',
+    'disabledNetworkRequests', 'producerStatus', 'producerElapsedMs', 'storageScope', 'consumerScope',
+    'fixtures', 'cloudPublication', 'azureEffects']);
+  const fixtures = ['slow-monitor-fast-durable-ack', 'failed-producer-readiness', 'restart-preserves-queued-message',
+    'queue-overflow', 'ttl-expiration', 'three-delivery-attempts', 'visibility-retry', 'single-worker',
+    'ambiguous-send-no-retry', 'disabled-zero-network', 'no-implicit-queue-creation'];
+  closed(proof.fixtures, fixtures);
+  if (proof.version !== 1 || proof.kind !== 'source-bound-local-queue-sdk-proof' ||
+      proof.sourceFilesSha256 !== digest(json(profile.source.files)) ||
+      proof.sdkSourceManifestSha256 !== profile.source.files['services/telemetry-ingest/runtime-sources.lock.json'] ||
+      !isDeepStrictEqual(proof.runtime, QUEUE_RUNTIME) || proof.disabledNetworkRequests !== 0 ||
+      proof.producerStatus !== 202 || !Number.isFinite(proof.producerElapsedMs) || proof.producerElapsedMs < 0 ||
+      proof.producerElapsedMs > 1000 || proof.storageScope !== QUEUE_RUNTIME.producerScope ||
+      proof.consumerScope !== QUEUE_RUNTIME.consumerScope || proof.cloudPublication !== false || proof.azureEffects !== false) fail('QUEUE_SDK_QUALIFICATION_REQUIRED');
+  for (const name of fixtures) {
+    const value = proof.fixtures[name];
+    closed(value, ['result', 'reportSha256', 'passed', 'failed']);
+    if (value.result !== 'LOCAL_QUEUE_SDK_FIXTURE_PASSED' || !hash(value.reportSha256) ||
+        !Number.isSafeInteger(value.passed) || value.passed < 1 || value.failed !== 0) fail('QUEUE_SDK_QUALIFICATION_REQUIRED');
+  }
 }
 
 export function verifyReceiverCandidate(c, candidate, at, published = true) {
   validateConfig(c);
-  closed(candidate, ['version', 'profile', 'review', 'legacyPublication', 'publication']);
+  const queued = candidate?.version === 2;
+  closed(candidate, ['version', 'profile', 'review', 'legacyPublication', 'publication',
+    ...(queued ? ['priorCandidate', 'topology'] : [])]);
   const artifact = verifyReceiverProfile(candidate.profile), review = candidate.review;
   verifyImagePublication(c, candidate.legacyPublication);
+  if (queued) {
+    if (candidate.priorCandidate?.version !== 1 || candidate.profile.kind !== QUEUE_PROFILE_KIND) fail('QUEUE_PRIOR_RECEIVER_REQUIRED');
+    verifyReceiverCandidate(c, candidate.priorCandidate);
+    verifyQueueTopology(c, candidate.topology);
+    if (!isDeepStrictEqual(candidate.legacyPublication, candidate.priorCandidate.legacyPublication) ||
+        artifact.digest === candidate.priorCandidate.profile.manifestDigest) fail('QUEUE_PRIOR_RECEIVER_CHANGED');
+  } else if (candidate.profile.kind === QUEUE_PROFILE_KIND) fail('QUEUE_PRIOR_RECEIVER_REQUIRED');
   if (!isDeepStrictEqual(parseArtifact(candidate.profile.configJson).config,
     parseArtifact(candidate.legacyPublication.configJson).config)) fail('RECEIVER_IMAGE_DEFAULTS_CHANGED');
   closed(review, ['version', 'action', 'configSha256', 'profileSha256', 'legacyPublicationSha256',
-    'sourceSha256', 'policyCommitSha', 'registryId', 'repository', 'tag', 'recentDigestCount', 'cost', 'authority', 'approvedAt', 'expiresAt']);
+    'sourceSha256', 'policyCommitSha', 'registryId', 'repository', 'tag', 'recentDigestCount', 'cost', 'authority', 'approvedAt', 'expiresAt',
+    ...(queued ? ['priorCandidateSha256', 'topologySha256'] : [])]);
   noAuthority(review.authority);
-  if (candidate.version !== 1 || review.version !== 1 || review.action !== 'publish-one-reviewed-receiver-upgrade' ||
+  if ((!queued && candidate.version !== 1) || review.version !== (queued ? 2 : 1) ||
+      review.action !== (queued ? 'publish-one-reviewed-queue-receiver' : 'publish-one-reviewed-receiver-upgrade') ||
       review.configSha256 !== digest(json(c)) || review.profileSha256 !== digest(json(candidate.profile)) ||
       review.legacyPublicationSha256 !== digest(json(candidate.legacyPublication)) || !hash(review.sourceSha256) ||
       !/^[0-9a-f]{40}$/u.test(review.policyCommitSha ?? '') ||
       !sameId(review.registryId, ids(c).registry) || review.repository !== repository ||
       review.tag !== `receiver-${artifact.digest.slice(7, 19)}` ||
-      review.tag === candidate.legacyPublication.release.tag || review.recentDigestCount !== 2 ||
-      !isDeepStrictEqual(review.cost, firstReleaseCost(2)) || !review.cost.withinEstimate) fail('EXACT_RECEIVER_PUBLICATION_REVIEW_REQUIRED');
+      review.tag === candidate.legacyPublication.release.tag || review.recentDigestCount !== (queued ? 3 : 2) ||
+      !isDeepStrictEqual(review.cost, receiverCost(candidate)) || !review.cost.withinEstimate ||
+      (queued && (review.priorCandidateSha256 !== digest(json(candidate.priorCandidate)) ||
+        review.topologySha256 !== digest(json(candidate.topology)) || review.tag === candidate.priorCandidate.review.tag))) fail('EXACT_RECEIVER_PUBLICATION_REVIEW_REQUIRED');
   if (at !== undefined) {
     reviewTime(review, at);
     if (receiverDatabaseInstant(candidate.profile.scan.databaseUpdatedAt) > at || receiverDatabaseInstant(candidate.profile.scan.databaseNextUpdate) <= at) fail('RECEIVER_SCAN_EXPIRED');
@@ -205,9 +253,12 @@ export function verifyReceiverCandidate(c, candidate, at, published = true) {
 
 export function verifyReceiverInventory(c, candidate, inventory, published) {
   const old = candidate.legacyPublication.release, review = candidate.review, profile = candidate.profile;
+  const prior = candidate.version === 2 ? candidate.priorCandidate : null;
   if (!isDeepStrictEqual(inventory.repositories, [repository]) || !Array.isArray(inventory.manifests) ||
-      inventory.manifests.length !== (published ? 2 : 1) || !Array.isArray(inventory.referrers) || inventory.referrers.length) fail('RECEIVER_INVENTORY_CHANGED');
+      inventory.manifests.length !== (prior ? 2 : 1) + Number(published) ||
+      !Array.isArray(inventory.referrers) || inventory.referrers.length) fail('RECEIVER_INVENTORY_CHANGED');
   const expected = [{ digest: old.manifestDigest, tags: [old.tag] },
+    ...(prior ? [{ digest: prior.profile.manifestDigest, tags: [prior.review.tag] }] : []),
     ...(published ? [{ digest: profile.manifestDigest, tags: [review.tag] }] : [])];
   const actual = inventory.manifests.map(v => ({ digest: v.digest, tags: v.tags }));
   if (!isDeepStrictEqual(actual.sort((a, b) => a.digest.localeCompare(b.digest)), expected.sort((a, b) => a.digest.localeCompare(b.digest))) ||
@@ -220,7 +271,7 @@ export function prepareReceiverPublication(c, candidate, inventory, at) {
   return { version: 1, qualified: false, kind: 'receiver-publication-preview',
     configSha256: digest(json(c)), candidateSha256: digest(json(candidate)), inventorySha256: digest(json(inventory)),
     oldDigest: RECEIVER_DIGEST, candidateDigest: candidate.profile.manifestDigest, maximumNewImageDigests: 1,
-    recentDigestCount: 2, cost: firstReleaseCost(2), pushExecuted: false, executionAuthorized: false };
+    recentDigestCount: candidate.version === 2 ? 3 : 2, cost: receiverCost(candidate), pushExecuted: false, executionAuthorized: false };
 }
 
 export function receiverAnchor(c, receipts) {
@@ -232,8 +283,9 @@ export function receiverAnchor(c, receipts) {
 export function runtimeReceiver(c, receipts) {
   if (!receipts.receiverUpgrade) return null;
   verifyDisabledImageRecord(c, receipts.receiverUpgrade);
-  return receipts.receiverUpgrade.phase.phase === 'disabled-image-upgrade'
-    ? verifyReceiverCandidate(c, receipts.receiverUpgrade.candidate) : null;
+  return ['disabled-image-upgrade', 'disabled-queue-upgrade'].includes(receipts.receiverUpgrade.phase.phase)
+    ? { ...verifyReceiverCandidate(c, receipts.receiverUpgrade.candidate),
+      ...(receipts.receiverUpgrade.candidate.version === 2 ? { queueTopology: receipts.receiverUpgrade.candidate.topology } : {}) } : null;
 }
 
 export function buildDisabledImagePhase(c, name, receipts, candidate, predecessor, instance, lineage) {
@@ -244,6 +296,13 @@ export function buildDisabledImagePhase(c, name, receipts, candidate, predecesso
   if (instance.predecessorSha256 !== digest(json(predecessor)) ||
       !isDeepStrictEqual(instance.previousInstanceIds, summary.usedInstanceIds)) fail('IMAGE_PREDECESSOR_BINDING_CHANGED');
   if (name === 'disabled-image-upgrade' && predecessor.kind !== 'terminal-disabled-window') fail('IMAGE_UPGRADE_ORIGIN_REQUIRED');
+  const queued = name === 'disabled-queue-upgrade';
+  if (queued !== (candidate.version === 2)) fail('QUEUE_PROFILE_PHASE_REQUIRED');
+  if (queued) {
+    if (predecessor.kind !== 'terminal-disabled-window' || predecessor.prerequisiteReceipts.receiverUpgrade?.phase?.phase !== 'disabled-image-upgrade' ||
+        !isDeepStrictEqual(predecessor.prerequisiteReceipts.receiverUpgrade.candidate, candidate.priorCandidate)) fail('QUEUE_PREPARED_RECEIVER_PREDECESSOR_REQUIRED');
+    qualifiedQueueRecords(c, receipts.queueRecords, candidate.topology);
+  }
   if (name === 'disabled-image-rollback' && (predecessor.kind !== 'reviewed-disabled-image-change' ||
       predecessor.phase.phase !== 'disabled-image-upgrade' ||
       !isDeepStrictEqual(predecessor.candidate, candidate))) fail('IMAGE_ROLLBACK_ORIGIN_REQUIRED');
@@ -251,15 +310,20 @@ export function buildDisabledImagePhase(c, name, receipts, candidate, predecesso
   const baseReceipts = { ...receipts }; delete baseReceipts.receiverUpgrade;
   const phase = buildPhase(c, 'synthetic-disable', null, baseReceipts, undefined, lineage, instance);
   phase.phase = name;
-  phase.deploymentId = `${ids(c).group}/providers/Microsoft.Resources/deployments/${c.namePrefix}-u${instance.id.replaceAll('-', '')}-${name === 'disabled-image-upgrade' ? 'iu' : 'ir'}`;
-  const fromDigest = name === 'disabled-image-upgrade' ? RECEIVER_DIGEST : candidate.profile.manifestDigest;
-  const toDigest = name === 'disabled-image-upgrade' ? candidate.profile.manifestDigest : RECEIVER_DIGEST;
+  phase.deploymentId = `${ids(c).group}/providers/Microsoft.Resources/deployments/${c.namePrefix}-u${instance.id.replaceAll('-', '')}-${queued ? 'qu' : name === 'disabled-image-upgrade' ? 'iu' : 'ir'}`;
+  const fromDigest = queued ? candidate.priorCandidate.profile.manifestDigest : name === 'disabled-image-upgrade' ? RECEIVER_DIGEST : candidate.profile.manifestDigest;
+  const toDigest = queued || name === 'disabled-image-upgrade' ? candidate.profile.manifestDigest : RECEIVER_DIGEST;
+  if (queued) {
+    phase.template.resources[0].properties.template.containers[0].env.push(...Object.entries(queueEnvironment(candidate.topology)).map(([name, value]) => ({ name, value })));
+    phase.queueRecordsSha256 = digest(json(receipts.queueRecords));
+  }
   phase.template.resources[0].properties.template.containers[0].image = `${c.registryName}.azurecr.io/${repository}@${toDigest}`;
   phase.resources[0].expected = phase.template.resources[0];
   phase.transition = { version: 1, from: ['false'], to: 'false', maximumWrites: 1,
     anchorAppSha256: digest(json(anchor)), fromDigest, toDigest, candidateSha256: digest(json(candidate)),
     predecessorSha256: digest(json(predecessor)) };
-  phase.allowedModify = { [ids(c).app]: ['properties.template.containers[0].image'] };
+  phase.allowedModify = { [ids(c).app]: ['properties.template.containers[0].image',
+    ...(queued ? ['properties.template.containers[0].env'] : [])] };
   phase.ingestEnabled = false;
   return phase;
 }
@@ -267,6 +331,11 @@ export function buildDisabledImagePhase(c, name, receipts, candidate, predecesso
 function withImage(descriptor, c, image) {
   const value = structuredClone(descriptor);
   value.expected.properties.template.containers[0].image = `${c.registryName}.azurecr.io/${repository}@${image}`;
+  // The v2 preimage is the prepared-identity receiver, never a queue-configured app.
+  if (value.expected.properties.template.containers[0].env.some(v => v.name === 'AZURE_QUEUE_URL')) {
+    value.expected.properties.template.containers[0].env = value.expected.properties.template.containers[0].env
+      .filter(v => !['AZURE_QUEUE_URL', 'AZURE_QUEUE_RESOURCE_ID'].includes(v.name));
+  }
   return value;
 }
 export function verifyDisabledImageBefore(c, phase, app, anchor, context) {
@@ -284,7 +353,8 @@ export function verifyDisabledImageWhatIf(phase, change, context) {
   verifyReceiverCandidate(c, candidate);
   if (change.changeType !== 'Modify' || !change.before || !change.after ||
       admissionFlag(change.before) !== 'false' || admissionFlag(change.after) !== 'false') fail('DISABLED_IMAGE_ONLY_REQUIRED');
-  const expectedPair = phase.phase === 'disabled-image-upgrade' ? [RECEIVER_DIGEST, candidate.profile.manifestDigest]
+  const expectedPair = phase.phase === 'disabled-queue-upgrade' && candidate.version === 2 ? [candidate.priorCandidate.profile.manifestDigest, candidate.profile.manifestDigest]
+    : phase.phase === 'disabled-image-upgrade' ? [RECEIVER_DIGEST, candidate.profile.manifestDigest]
     : phase.phase === 'disabled-image-rollback' ? [candidate.profile.manifestDigest, RECEIVER_DIGEST] : [];
   if (!isDeepStrictEqual([phase.transition.fromDigest, phase.transition.toDigest], expectedPair) ||
       [change.before, change.after].some((value, i) =>
@@ -295,6 +365,7 @@ export function verifyDisabledImageWhatIf(phase, change, context) {
   const after = canonicalAppWrite(c, phase.resources[0], change.after, { ...context, appDescriptor: beforeDescriptor }, true);
   if (!isDeepStrictEqual(before, canonicalAppWrite(c, beforeDescriptor, context.app, context))) fail('DISABLED_IMAGE_PREIMAGE_CHANGED');
   before.properties.template.containers[0].image = after.properties.template.containers[0].image;
+  if (phase.phase === 'disabled-queue-upgrade') Object.assign(before.properties.template.containers[0].env, queueEnvironment(candidate.topology));
   if (!isDeepStrictEqual(before, after) || phase.transition.fromDigest === phase.transition.toDigest) fail('DISABLED_IMAGE_ONLY_REQUIRED');
 }
 
@@ -304,6 +375,7 @@ export function verifyImageRuntimePublication(c, expected, context) {
   const candidate = context?.receiverCandidate ?? context?.receiverUpgrade?.candidate;
   if (!candidate) fail('REVIEWED_RECEIVER_PROFILE_REQUIRED');
   const artifact = verifyReceiverCandidate(c, candidate);
+  if (candidate.version === 2 && image === `${c.registryName}.azurecr.io/${repository}@${candidate.priorCandidate.profile.manifestDigest}`) return true;
   if (image !== `${c.registryName}.azurecr.io/${repository}@${artifact.digest}`) fail('REVIEWED_RECEIVER_PROFILE_REQUIRED');
   return true;
 }
@@ -322,7 +394,7 @@ export function verifyDisabledImageRecord(c, record) {
   const intentAt = instant(journal.intentAt);
   verifyApproval(approval, c, phase, record.publication.sourceSha256, intentAt);
   verifyFreshReview(preflight, approval, preflight.startedAt, intentAt);
-  if (!isDeepStrictEqual(preflight.cost, firstReleaseCost(2)) ||
+  if (!isDeepStrictEqual(preflight.cost, receiverCost(candidate)) ||
       approval.receiptsSha256 !== digest(json(record.prerequisiteReceipts)) ||
       approval.whatIfSha256 !== digest(json(record.whatIf)) || approval.originSha256 !== c.originSha256 ||
       journal.phaseSha256 !== digest(json(phase)) || journal.approvalSha256 !== digest(json(approval)) ||
@@ -337,7 +409,9 @@ export function verifyDisabledImageRecord(c, record) {
   verifyDeploymentIdentity(receipt.deployment, receipt.deployment);
   const anchor = predecessor.kind === 'reviewed-disabled-image-change' ? predecessor.receipt.resources[ids(c).app] : predecessor.readback.app;
   const context = { ...resourceContext(c, record.prerequisiteReceipts), receiverCandidate: candidate, config: c, app: anchor };
-  verifyWhatIf(phase, record.whatIf, Object.values(record.prerequisiteReceipts).flatMap(v => Object.keys(v.resources ?? {})), context);
+  const preserved = Object.values(record.prerequisiteReceipts).flatMap(v => Object.keys(v.resources ?? {}));
+  if (candidate.version === 2) preserved.push(...Object.keys(qualifiedQueueRecords(c, record.prerequisiteReceipts.queueRecords, candidate.topology)));
+  verifyWhatIf(phase, record.whatIf, preserved, context);
   closed(receipt.resources, [ids(c).app]);
   const app = receipt.resources[ids(c).app];
   verifyResource(c, phase, phase.resources[0], app, context);
@@ -387,8 +461,9 @@ export class ReceiverUpgradeController {
     const guard = deadline => {
       verifyApproval(approval, c, phase, source, io.now());
       verifyFreshReview(proof, approval, started, io.now());
-      if (!isDeepStrictEqual(proof.cost, firstReleaseCost(2))) fail('IMAGE_COST_REVIEW_REQUIRED');
-      if (phase.phase === 'disabled-image-upgrade' && receiverDatabaseInstant(candidate.profile.scan.databaseNextUpdate) <= io.now()) fail('RECEIVER_SCAN_EXPIRED');
+      if (!isDeepStrictEqual(proof.cost, receiverCost(candidate))) fail('IMAGE_COST_REVIEW_REQUIRED');
+      if (['disabled-image-upgrade', 'disabled-queue-upgrade'].includes(phase.phase) &&
+          receiverDatabaseInstant(candidate.profile.scan.databaseNextUpdate) <= io.now()) fail('RECEIVER_SCAN_EXPIRED');
       if (io.cancelled?.()) fail('IMAGE_UPGRADE_CANCELLED');
       if (!Number.isSafeInteger(deadline) || io.now() >= deadline) fail('IMAGE_OPERATION_DEADLINE');
     };

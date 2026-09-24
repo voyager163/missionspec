@@ -1,14 +1,15 @@
 import { buildPhase, digest, ids, json, SYNTHETIC_FIXTURES, TOGGLE_PHASES } from '../definition.mjs';
 import { resourceContext, verifyWindowPredecessor } from '../policy.mjs';
 import { buildSyntheticWindow } from '../controller.mjs';
+import { receiverAnchor } from '../receiver-upgrade.mjs';
 
 // Closed inert predecessor evidence for exercising the real upgrade IO adapter.
-export function terminalReceiverWindow(c, prerequisites, origin, source, at) {
+export function terminalReceiverWindow(c, prerequisites, origin, source, at, suppliedInstance) {
   const r = ids(c), iso = offset => new Date(at + offset).toISOString();
-  const instance = { version: 1, id: '00000000-0000-4000-8000-000000000099',
+  const instance = suppliedInstance ?? { version: 1, id: '00000000-0000-4000-8000-000000000099',
     predecessorSha256: digest('earlier inert window'), previousInstanceIds: [] };
   const phases = Object.fromEntries(TOGGLE_PHASES.map(name => [name, buildPhase(c, name, null, prerequisites, undefined, undefined, instance)]));
-  const anchor = prerequisites['disabled-app'].resources[r.app];
+  const anchor = receiverAnchor(c, prerequisites);
   const whatifs = {
     'synthetic-admission': { status: 'Succeeded', changes: [{ resourceId: r.app, changeType: 'Modify',
       before: anchor, after: { ...structuredClone(phases['synthetic-admission'].resources[0].expected), id: r.app } }] },

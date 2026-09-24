@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from 'node:util';
 import { IMAGE_PHASES, verifyDisabledImageWhatIf, verifyDisabledImageRecord, verifyImageRuntimePublication,
   verifyReceiverCandidate, verifyReceiverInventory } from './receiver-upgrade.mjs';
+import { QUEUE_PHASES, verifyQueueWhatIf, verifyQueueResource, verifyQueueDrain, qualifiedQueueRecords, QUEUE_PROFILE_KIND } from './durable-queue.mjs';
 import { assertOwned, assertBudget, BUDGET, buildPhase, budgetConfiguration, closed, digest, fail, ids, json, LIMITS, RECEIVER_COMMAND, requireAccess, sameId, projectBudgetFilter, uploadRoleProperties, assignmentRoleTargets, TOGGLE_PHASES, SYNTHETIC_LIMITS, SYNTHETIC_FIXTURES, validateWindowInstance, deploymentName } from './definition.mjs';
 export { assertBudget, notificationKeys } from './definition.mjs';
 
@@ -168,12 +169,14 @@ export function verifyImagePublication(c, record) {
       !Number.isFinite(Date.parse(security.databaseNextUpdate)) || Date.parse(security.databaseNextUpdate) <= intentAt) fail('PUBLICATION_SECURITY_EVIDENCE_CHANGED');
 }
 export function verifyPublicationReadback(c, publication, current, candidate) {
-  closed(current, ['repositories', 'manifests', 'manifest', 'registry', ...(candidate ? ['referrers', 'candidateManifest'] : [])]);
+  closed(current, ['repositories', 'manifests', 'manifest', 'registry', ...(candidate ? ['referrers', 'candidateManifest'] : []),
+    ...(candidate?.version === 2 ? ['priorManifest'] : [])]);
   const receipt = publication.receipt, r = ids(c), p = current.registry?.properties;
   if (candidate) {
     const artifact = verifyReceiverCandidate(c, candidate);
     if (!isDeepStrictEqual(publication, candidate.legacyPublication) ||
-        !isDeepStrictEqual(current.candidateManifest, artifact.manifest)) fail('PUBLICATION_READBACK_CHANGED');
+        !isDeepStrictEqual(current.candidateManifest, artifact.manifest) ||
+        (candidate.version === 2 && !isDeepStrictEqual(current.priorManifest, JSON.parse(candidate.priorCandidate.profile.manifestJson)))) fail('PUBLICATION_READBACK_CHANGED');
     verifyReceiverInventory(c, candidate, current, true);
   }
   if (!isDeepStrictEqual(current.repositories, ['missionspec/telemetry-ingest']) || !Array.isArray(current.manifests) ||
@@ -296,21 +299,37 @@ export function verifyExecutionOrigins(c, foundation, origins, contract) {
   else if (origins.imagePublication !== null) fail('UNEXPECTED_PUBLICATION_ORIGIN');
   for (const [index, record] of origins.records.entries()) verifyExecutionOrigin(c, foundation, record, contract, origins.records.slice(0, index), origins.imagePublication);
 }
-export function verifyReconciliation(c, foundation, origins, proposal, sourceSha256, review = null, contract, receiverCandidate = null) {
+export function verifyReconciliation(c, foundation, origins, proposal, sourceSha256, review = null, contract, receiverCandidate = null, overlay = null) {
   closed(origins, ['version', 'records', 'imagePublication']);
   closed(proposal, ['version', 'kind', 'sourceSha256', 'configSha256', 'executionOriginsSha256', 'baselineSha256', 'checkedAt', 'results',
     'stateBudget', 'workspace', 'identities', 'imagePublication', 'roleDefinitions', 'inventory', 'managedGroup',
-    ...(proposal.version === 4 ? ['receiverCandidateSha256'] : [])]);
+    ...([4, 5].includes(proposal.version) ? ['receiverCandidateSha256'] : []),
+    ...(proposal.version === 5 ? ['receiverUpgradeSha256', 'queueRecordsSha256'] : [])]);
   verifyExecutionOrigins(c, foundation, origins, contract);
-  if (![3, 4].includes(proposal.version) || proposal.kind !== 'read-only-completed-phases' ||
+  if (![3, 4, 5].includes(proposal.version) || proposal.kind !== 'read-only-completed-phases' ||
       !/^[0-9a-f]{64}$/u.test(sourceSha256) || proposal.sourceSha256 !== sourceSha256 || proposal.configSha256 !== digest(json(c)) ||
       proposal.executionOriginsSha256 !== digest(json(origins)) || canonicalInstant(proposal.checkedAt) > Date.now()) fail('RECONCILIATION_INVALID');
-  if (proposal.version === 4) {
+  if ([4, 5].includes(proposal.version)) {
     if (!receiverCandidate || proposal.receiverCandidateSha256 !== digest(json(receiverCandidate)) ||
         !isDeepStrictEqual(receiverCandidate.legacyPublication, origins.imagePublication)) fail('RECONCILIATION_RECEIVER_PUBLICATION_REQUIRED');
     verifyReceiverCandidate(c, receiverCandidate);
+    if (proposal.version === 4 && receiverCandidate.version !== 1) fail('VERSIONED_RECEIVER_RECONCILIATION_REQUIRED');
     if (canonicalInstant(receiverCandidate.publication.completedAt) > canonicalInstant(proposal.checkedAt)) fail('RECONCILIATION_RECEIVER_PUBLICATION_REQUIRED');
   } else if (receiverCandidate !== null) fail('VERSIONED_RECEIVER_RECONCILIATION_REQUIRED');
+  let queueResources = {};
+  if (proposal.version === 5) {
+    closed(overlay, ['receiverUpgrade', 'queueRecords']);
+    verifyDisabledImageRecord(c, overlay.receiverUpgrade);
+    if (proposal.receiverUpgradeSha256 !== digest(json(overlay.receiverUpgrade)) ||
+        proposal.queueRecordsSha256 !== digest(json(overlay.queueRecords)) ||
+        !isDeepStrictEqual(overlay.receiverUpgrade.candidate,
+          receiverCandidate.version === 2 && overlay.receiverUpgrade.candidate.version === 1 ? receiverCandidate.priorCandidate : receiverCandidate)) fail('RECONCILIATION_OVERLAY_CHANGED');
+    const names = Object.keys(overlay.queueRecords);
+    if (names.length) {
+      const last = QUEUE_PHASES.filter(name => names.includes(name)).at(-1);
+      queueResources = qualifiedQueueRecords(c, overlay.queueRecords, overlay.queueRecords[last]?.topology, last);
+    }
+  } else if (overlay !== null) fail('VERSIONED_RECEIVER_RECONCILIATION_REQUIRED');
   const r = ids(c), expectedResults = origins.records.map(v => v.phase.phase);
   const core = origins.records.find(v => v.phase.phase === 'core'), assignments = origins.records.find(v => v.phase.phase === 'assignments');
   if (expectedResults.includes('disabled-app')) {
@@ -335,6 +354,7 @@ export function verifyReconciliation(c, foundation, origins, proposal, sourceSha
   if (!sameId(proposal.stateBudget.id, r.stateBudget) || proposal.managedGroup !== null ||
       !Array.isArray(proposal.inventory?.value) || proposal.inventory.nextLink) fail('RECONCILIATION_INVENTORY_CHANGED');
   const known = new Set(origins.records.flatMap(v => v.phase.resources.map(d => d.id.toLowerCase())));
+  for (const id of Object.keys(queueResources)) known.add(id.toLowerCase());
   if (proposal.inventory.value.some(v => !v.id?.toLowerCase().startsWith(`${r.group.toLowerCase()}/`) || !known.has(v.id.toLowerCase()))) fail('UNEXPECTED_TELEMETRY_RESOURCE');
   for (const record of origins.records) {
     const foundationBaseline = record.phase.phase === 'assignments' ? record.preflight.foundationBaselineSha256 : record.preflight.baselineSha256;
@@ -347,7 +367,10 @@ export function verifyReconciliation(c, foundation, origins, proposal, sourceSha
     verifyDeploymentIdentity(record.firstReadback.deployment, result.deployment);
     for (const descriptor of p.resources) {
       const value = result.resources[descriptor.id], pin = executionIdentity(value, descriptor.type);
-      verifyResource(c, p, descriptor, value, { workspace: proposal.workspace, identities: proposal.identities, publication: origins.imagePublication?.receipt });
+      const expected = proposal.version === 5 && descriptor.type === 'Microsoft.App/containerApps'
+        ? overlay.receiverUpgrade.phase.resources[0] : descriptor;
+      verifyResource(c, p, expected, value, { workspace: proposal.workspace, identities: proposal.identities,
+        publication: origins.imagePublication?.receipt, ...(proposal.version === 5 ? { receiverCandidate } : {}) });
       if (!isDeepStrictEqual(pin, executionIdentity(record.firstReadback.resources[descriptor.id], descriptor.type)) ||
           !isDeepStrictEqual(pin, result.identityPins[descriptor.id])) fail('RESOURCE_IDENTITY_CHANGED');
       if (descriptor.type !== 'Microsoft.Consumption/budgets') {
@@ -390,6 +413,7 @@ function budgetWhatIfConfiguration(value) {
   return configuration;
 }
 export function verifyWhatIf(phase, result, preservedIds = [], context) {
+  if (QUEUE_PHASES.includes(phase.phase)) return verifyQueueWhatIf(context?.config, phase, context?.queueTopology, result, preservedIds);
   if (result?.status !== 'Succeeded' || !Array.isArray(result.changes)) fail('WHAT_IF_INCOMPLETE');
   const target = new Map(phase.resources.map(v => [v.id.toLowerCase(), v]));
   const preserved = new Set(preservedIds.map(v => v.toLowerCase()));
@@ -625,11 +649,16 @@ export function verifyWindowPredecessor(c, predecessor) {
       run.requests.some(v => v.method === 'GET' ? !['/health/live', '/health/ready'].includes(v.path) :
         v.method !== 'POST' || v.path !== '/v1/events' || !['two-fixed-events', 'terminal-disabled-http'].includes(v.stage)) ||
       posts.some((v, i) => !isDeepStrictEqual(v.fixture, SYNTHETIC_FIXTURES[i]))) fail('PREDECESSOR_REQUEST_HISTORY_CHANGED');
-  const accepted = response => response?.status === 204 && response.errorCode === null && response.bodyBytes === 0 &&
+  const acceptedStatus = prerequisiteReceipts.receiverUpgrade?.candidate.profile.kind === QUEUE_PROFILE_KIND ? 202 : 204;
+  const accepted = response => response?.status === acceptedStatus && response.errorCode === null && response.bodyBytes === 0 &&
     response.tlsVerified === true && response.durationMs <= 1000;
   const failure = posts.findIndex(v => !accepted(v.response));
   if (failure >= 0 && failure !== posts.length - 1) fail('PREDECESSOR_RETRIED_FAILED_POST');
   if (run.outcome === 'qualified-and-disabled' && (failure >= 0 || posts.length !== 2 || run.failureCode !== null)) fail('PREDECESSOR_FAILURE_PROMOTED');
+  if (acceptedStatus === 202 && run.outcome === 'qualified-and-disabled' &&
+      (!run.queries.some(v => v.verification?.complete === true && verifySyntheticRows(v.result, v.start, v.end).complete) ||
+        !Array.isArray(run.queueObservations) || run.queueObservations.length > SYNTHETIC_LIMITS.maximumQueries ||
+        !run.queueObservations.length || !verifyQueueDrain(phases['synthetic-admission'].queueVerification, run.queueObservations.at(-1)))) fail('QUEUE_ACK_IS_NOT_LOGS_PERSISTENCE');
   if (run.outcome === 'stopped-disabled' && (typeof run.failureCode !== 'string' || !/^[A-Z_]+$/u.test(run.failureCode))) fail('PREDECESSOR_FAILURE_ERASED');
   const terminal = run.requests.at(-1);
   const noStore = terminal?.response?.headerPolicy?.noStore === true || terminal?.response?.safeHeaders?.['cache-control'] === 'no-store';
@@ -851,6 +880,7 @@ export function roleDefinitionSignature(c, target, actual) {
     roleType: p.type, createdAt: p.createdOn, permissions, assignableScopes: p.assignableScopes };
 }
 export function verifyResource(c, phase, descriptor, actual, context = {}) {
+  if (QUEUE_PHASES.includes(phase.phase)) return verifyQueueResource(c, context.queueTopology, descriptor, actual);
   const r = ids(c), expected = descriptor.expected, p = actual?.properties;
   if (!sameId(actual?.id, descriptor.id)) fail('RESOURCE_ID_MISMATCH');
   if (actual.type !== undefined && !sameId(actual.type, expected.type)) fail('RESOURCE_TYPE_CHANGED');

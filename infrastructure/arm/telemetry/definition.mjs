@@ -2,11 +2,14 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
 import { IMAGE_PHASES, receiverAnchor, runtimeReceiver } from './receiver-upgrade.mjs';
+import { queueEnvironment } from './durable-queue.mjs';
 
 const PHASE_CODES = Object.freeze({ 'project-budget': 'pb', core: 'co', 'workspace-access': 'wa', data: 'da', 'upload-role': 'ur',
   assignments: 'ra', 'disabled-app': 'di', 'synthetic-admission': 'sy', 'synthetic-disable': 'sd',
-  'disabled-image-upgrade': 'iu', 'disabled-image-rollback': 'ir' });
-export const PHASES = Object.freeze(Object.keys(PHASE_CODES).filter(v => !v.startsWith('disabled-image-')));
+  'disabled-image-upgrade': 'iu', 'disabled-image-rollback': 'ir', 'disabled-queue-upgrade': 'qu',
+  'queue-storage': 'qs', 'queue-role': 'qr', 'queue-assignment': 'qa' });
+export const PHASES = Object.freeze(['project-budget', 'core', 'workspace-access', 'data', 'upload-role', 'assignments',
+  'disabled-app', 'synthetic-admission', 'synthetic-disable']);
 export const TOGGLE_PHASES = Object.freeze(['synthetic-admission', 'synthetic-disable']);
 export const SYNTHETIC_LIMITS = Object.freeze({ enabledWindowMs: 600000, rollbackReserveMs: 180000,
   rolloutTimeoutMs: 120000, rolloutPollMs: 3000, maxRolloutPolls: 40, httpTimeoutMs: 1000,
@@ -72,7 +75,7 @@ export function deploymentName(c, phase, instance) {
   if (!/^[a-z0-9-]{1,64}$/u.test(name)) fail('DEPLOYMENT_NAME_INVALID');
   return name;
 }
-function stableGuid(value) {
+export function stableGuid(value) {
   const b = createHash('sha256').update(value).digest().subarray(0, 16);
   b[6] = (b[6] & 15) | 80; b[8] = (b[8] & 63) | 128;
   const h = b.toString('hex');
@@ -214,7 +217,8 @@ function appResource(c, receipts, enabled) {
     MSR_RESOURCE_GROUP: `${c.namePrefix}-telemetry`, AZURE_SUBSCRIPTION_ID: c.subscriptionId, AZURE_TENANT_ID: c.tenantId,
     AZURE_CLIENT_ID: ingest.properties.clientId, AZURE_DCR_RESOURCE_ID: r.dcr,
     AZURE_DCR_IMMUTABLE_ID: dcr.properties.immutableId, AZURE_LOGS_ENDPOINT: endpoint.origin,
-    ...Object.fromEntries(Object.entries(LIMITS).map(([key, value]) => [`MSR_${key.toUpperCase()}`, String(value)])) };
+    ...Object.fromEntries(Object.entries(LIMITS).map(([key, value]) => [`MSR_${key.toUpperCase()}`, String(value)])),
+    ...(runtime?.queueTopology ? queueEnvironment(runtime.queueTopology) : {}) };
   return resource('Microsoft.App/containerApps', '2025-07-01', `${c.namePrefix}-ingest`, {
     managedEnvironmentId: r.environment, workloadProfileName: 'Consumption',
     configuration: { activeRevisionsMode: 'Single', maxInactiveRevisions: 3,
@@ -311,10 +315,14 @@ export function buildPhase(c, phase, contract, receipts = {}, foundation, source
     return { id: `${value.scope ?? scope}/providers/${parts[0]}/${parts.slice(1).map((part, i) => `${part}/${names[i]}`).join('/')}`,
       apiVersion: value.apiVersion, type: value.type, expected: value };
   });
+  const runtime = TOGGLE_PHASES.includes(phase) ? runtimeReceiver(c, receipts) : null;
   return { version: 1, phase, configSha256: digest(json(c)), scope,
     deploymentId: `${scope}/providers/Microsoft.Resources/deployments/${deploymentName(c, phase, windowInstance)}`,
     ...(windowInstance ? { windowInstance: structuredClone(validateWindowInstance(c, windowInstance)) } : {}),
     ...(TOGGLE_PHASES.includes(phase) && receipts.receiverUpgrade ? { receiverUpgradeSha256: digest(json(receipts.receiverUpgrade)) } : {}),
+    ...(runtime?.queueTopology ? { queueVerification: { version: 1, queueId: runtime.queueTopology.ids.queue,
+      topologySha256: digest(json(runtime.queueTopology)), acceptedStatus: 202,
+      requiresOwnedLogsRows: true, requiresObservedApproximateDrain: true, exactBacklogClaimed: false } } : {}),
     template: template(resources, scope === r.sub), resources: descriptors,
     ...(sourceLineage?.proposal ? { reconciliation: reconciliationBinding(sourceLineage) } : {}),
     ...(TOGGLE_PHASES.includes(phase) ? { transition: {

@@ -84,3 +84,45 @@ After a successful reviewed disabled-image change, preserve
 `receipts.publication` or `receipts["disabled-app"]`. Standard paired window
 approvals, durable UUID reservation, timeouts and terminal false/503 proof
 remain mandatory.
+
+## Durable queue overlay (local review candidate)
+
+`durable-queue.mjs` adds a **separate** queue topology/profile, not configuration
+v3 or replacement execution history. The existing direct profiles still expect
+204; only the version-2 `reviewed-durable-queue-receiver` expects durable
+admission 202. This does not prove Logs persistence or permit CLI activation.
+
+`preview-queue queue-storage <private-revision>` needs only the unchanged
+`config.json` and a closed `queue-namespace.json` containing an explicit
+8–16-character lowercase alphanumeric namespace. It makes no cloud calls.
+The resulting namespace, topology, cost and missing future image binding need
+exact review; the preview is not authority. `prepare-queue` also stays local.
+
+Three fixed effect phases are `queue-storage` (one new StorageV2 Standard_LRS
+account, default queue service and one queue), `queue-role`, then
+`queue-assignment`. No existing state storage/network/security resource is
+modified. `check-queue` and `execute-queue` are separate parent/operator actions,
+with published policy, current-source topology review, exact phase approval,
+fresh bounded what-if, original-history/current-role checks and one journaled
+120-second submission. Unknown submissions cannot be replayed.
+
+After actual separate publication, `prepare-image disabled-queue-upgrade`
+binds the failed prepared-identity window's terminal false/503 predecessor,
+all three qualified queue-phase records, and the exact third manifest. Only
+the image and `AZURE_QUEUE_URL` / `AZURE_QUEUE_RESOURCE_ID` may change; admission
+remains false. Both prior digests/tags and their archived 35-file profiles remain
+unchanged. Only the new profile has the 38-file source closure and typed
+source-bound queue SDK qualification.
+
+Version-5 reconciliation explicitly binds the receiver execution overlay and
+queue records, permitting current-profile observations and the additional
+qualified account inventory. Earlier version-3/4 proposals, two-image inventory
+and source hashes remain immutable. Third-image inventory requires all three
+manifests and empty referrers, never an unknown-resource exception.
+
+The reviewed design model is **USD 349.36772 → 349.37 / 31 days**, including the
+third image, USD 10 additional storage-security reserve, queue operations and
+retry reserve. Only USD 0.63 modeled headroom remains; this is **not a bill cap**.
+Paired verification still requires owned Logs rows and terminal false/503,
+plus an observed approximate queue drain; 202 or resettable counters alone
+cannot qualify it. See the operator guide for the exact review contracts.

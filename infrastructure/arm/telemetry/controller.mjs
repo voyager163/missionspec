@@ -7,9 +7,12 @@ import { readFile, open, mkdir, rename, rm, realpath } from 'node:fs/promises';
 import { basename, dirname, resolve, isAbsolute, delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual, types } from 'node:util';
-import { IMAGE_PHASES, buildDisabledImagePhase, receiverAnchor, prepareReceiverPublication, RECEIVER_SOURCE_INPUTS, receiverDatabaseInstant,
+import { IMAGE_PHASES, buildDisabledImagePhase, receiverAnchor, prepareReceiverPublication, receiverSourceInputs, receiverCost, receiverDatabaseInstant,
   verifyReceiverCandidate, verifyDisabledImageRecord, verifyDisabledImageBefore, verifyImageRevision,
   ReceiverUpgradeController } from './receiver-upgrade.mjs';
+import { QUEUE_PHASES, durableQueueCost, buildQueuePhase, queueEnvironment, queueTopology,
+  qualifiedQueueRecords, verifyQueueTopology, verifyQueueReview, verifyQueueRecord, verifyQueueProviderOperations,
+  verifyQueueResource, verifyQueuePrivacy, verifyQueueDrain, QueueTopologyController } from './durable-queue.mjs';
 import { PHASES, buildPhase, deploymentName, validateConfig, ids, digest, json, fail, sameId, storageContract, firstReleaseCost, assertOwned, RECEIVER_COMMAND,
   closed, budgetConfiguration, projectBudgetFilter, verifyFoundationBudgets, reconciliationBinding, assignmentRoleTargets,
   TOGGLE_PHASES, SYNTHETIC_LIMITS, SYNTHETIC_FIXTURES, requireAccess, validateWindowInstance } from './definition.mjs';
@@ -144,7 +147,7 @@ export async function load(directory, name, optional = false) {
   }
 }
 export async function sourceDigest() {
-  const names = ['definition.mjs', 'policy.mjs', 'controller.mjs', 'arm-whatif.py', 'receiver-upgrade.mjs'];
+  const names = ['definition.mjs', 'policy.mjs', 'controller.mjs', 'arm-whatif.py', 'receiver-upgrade.mjs', 'durable-queue.mjs'];
   const hash = createHash('sha256');
   for (const name of names) hash.update(name).update(await readFile(resolve(here, name)));
   const contract = await storageContract(); hash.update(json(contract));
@@ -222,6 +225,9 @@ export async function az(args, timeout = 60000, run = execute) {
     const assignment = /^https:\/\/management\.azure\.com\/subscriptions\/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\/resourceGroups\/[a-z0-9-]+\/providers\/(?:Microsoft\.ContainerRegistry\/registries\/[a-z0-9]+|Microsoft\.Insights\/dataCollectionRules\/[a-z0-9-]+|Microsoft\.OperationalInsights\/workspaces\/[a-z0-9-]+)\/providers\/Microsoft\.Authorization\/roleAssignments\/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\?api-version=2022-04-01$/iu.exec(args[args.indexOf('--url') + 1] ?? '');
     if (args[0] === 'rest' && args[args.indexOf('--method') + 1] === 'GET' && status === 404 && code === 'RoleAssignmentNotFound' &&
         assignment && sameId(assignment[1], args[args.indexOf('--subscription') + 1])) return null;
+    const queueAssignment = /^https:\/\/management\.azure\.com\/subscriptions\/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\/resourceGroups\/missionspec-[a-z0-9]{2,10}-telemetry\/providers\/Microsoft\.Storage\/storageAccounts\/msrtq[a-z0-9]{8,16}\/queueServices\/default\/queues\/telemetry-events-v1\/providers\/Microsoft\.Authorization\/roleAssignments\/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\?api-version=2022-04-01$/iu.exec(args[args.indexOf('--url') + 1] ?? '');
+    if (args[0] === 'rest' && args[args.indexOf('--method') + 1] === 'GET' && status === 404 && code === 'RoleAssignmentNotFound' &&
+        queueAssignment && sameId(queueAssignment[1], args[args.indexOf('--subscription') + 1])) return null;
     const safe = new Error('ARM_OPERATION_FAILED'); safe.armCode = code; safe.httpStatus = status;
     safe.diagnostics = processFailureMetadata(error, timeout, performance.now() - started, azureStep(args), status, code);
     throw safe;
@@ -300,7 +306,7 @@ async function azureCliPython() {
   fail('AZURE_CLI_RUNTIME_UNAVAILABLE');
 }
 export function whatIfRequestContext(c, phase) {
-  const r = ids(c), scope = ['project-budget', 'upload-role'].includes(phase.phase) ? 'subscription' : 'group';
+  const r = ids(c), scope = ['project-budget', 'upload-role', 'queue-role'].includes(phase.phase) ? 'subscription' : 'group';
   if ([...TOGGLE_PHASES, ...IMAGE_PHASES].includes(phase.phase)) validateWindowInstance(c, phase.windowInstance);
   if (phase.scope !== (scope === 'subscription' ? r.sub : r.group) ||
       phase.deploymentId !== `${phase.scope}/providers/Microsoft.Resources/deployments/${deploymentName(c, phase.phase, phase.windowInstance)}`) fail('FIXED_WHAT_IF_PHASE_REQUIRED');
@@ -435,13 +441,17 @@ export async function asyncWhatIf(c, phase, directory, options = {}) {
     throw error;
   }
 }
-export function transport(c, phase, directory, invoke = az) {
+export function transport(c, phase, directory, invoke = az, topology) {
   const r = ids(c);
   const forbiddenOperations = new Set(['listkeys', 'listsecrets', 'listaccountsas', 'listservicesas', 'regeneratekey', 'register']);
-  const diagnosticTargets = [r.workspace, r.environment, r.app].map(id => id + '/providers/Microsoft.Insights/diagnosticSettings');
+  if (topology) verifyQueueTopology(c, topology);
+  const diagnosticTargets = [r.workspace, r.environment, r.app, ...(topology ? [topology.ids.account, topology.ids.service] : [])]
+    .map(id => id + '/providers/Microsoft.Insights/diagnosticSettings');
   return async (method, id, version, body, filter, beforeDispatch, beforeAssignmentWrite, beforeToggleWrite) => {
     const diagnosticRead = diagnosticTargets.includes(id) && method === 'GET' && version === DIAGNOSTIC_API && body === undefined && filter === undefined;
-    if (!['GET', 'POST', 'PUT'].includes(method) || (id !== r.sub && !id.startsWith(`${r.sub}/`)) ||
+    const queueOperationsRead = topology && id === '/providers/Microsoft.Storage/operations' && method === 'GET' &&
+      version === '2025-01-01' && body === undefined && filter === undefined;
+    if (!['GET', 'POST', 'PUT'].includes(method) || (!queueOperationsRead && id !== r.sub && !id.startsWith(`${r.sub}/`)) ||
         /[?#\\]|\.\.|%/u.test(id) || (!/^\d{4}-\d{2}-\d{2}$/u.test(version) && !diagnosticRead) ||
         (id.toLowerCase().includes('/providers/microsoft.insights/diagnosticsettings') && !diagnosticRead) ||
         id.split('/').some(component => forbiddenOperations.has(component.toLowerCase()))) fail('ARM_SCOPE_FORBIDDEN');
@@ -449,8 +459,8 @@ export function transport(c, phase, directory, invoke = az) {
     if (method === 'PUT' && (typeof beforeDispatch !== 'function' || types.isAsyncFunction(beforeDispatch))) fail('DISPATCH_GUARD_REQUIRED');
     if (method === 'PUT' && phase.phase === 'assignments' && typeof beforeAssignmentWrite !== 'function') fail('ASSIGNMENT_ROLE_READBACK_REQUIRED');
     if (beforeAssignmentWrite !== undefined && (method !== 'PUT' || phase.phase !== 'assignments')) fail('ASSIGNMENT_ROLE_READBACK_ONLY');
-    if (method === 'PUT' && [...TOGGLE_PHASES, ...IMAGE_PHASES].includes(phase.phase) && typeof beforeToggleWrite !== 'function') fail('PAIRED_TOGGLE_GUARD_REQUIRED');
-    if (beforeToggleWrite !== undefined && (method !== 'PUT' || ![...TOGGLE_PHASES, ...IMAGE_PHASES].includes(phase.phase))) fail('FIXED_TOGGLE_WRITE_ONLY');
+    if (method === 'PUT' && [...TOGGLE_PHASES, ...IMAGE_PHASES, ...QUEUE_PHASES].includes(phase.phase) && typeof beforeToggleWrite !== 'function') fail('PAIRED_TOGGLE_GUARD_REQUIRED');
+    if (beforeToggleWrite !== undefined && (method !== 'PUT' || ![...TOGGLE_PHASES, ...IMAGE_PHASES, ...QUEUE_PHASES].includes(phase.phase))) fail('FIXED_TOGGLE_WRITE_ONLY');
     if (method === 'POST' && id !== `${r.sub}/providers/Microsoft.ContainerRegistry/checkNameAvailability`) fail('NONMUTATING_POST_ONLY');
     const inventoryMetadata = method === 'GET' && id === `${r.group}/resources` && version === '2021-04-01' &&
       body === undefined && filter === '$expand=createdTime,changedTime';
@@ -467,7 +477,7 @@ export function transport(c, phase, directory, invoke = az) {
         if (beforeDispatch() !== undefined) fail('DISPATCH_GUARD_REQUIRED');
         await beforeAssignmentWrite();
       }
-      if (method === 'PUT' && [...TOGGLE_PHASES, ...IMAGE_PHASES].includes(phase.phase)) await beforeToggleWrite();
+      if (method === 'PUT' && [...TOGGLE_PHASES, ...IMAGE_PHASES, ...QUEUE_PHASES].includes(phase.phase)) await beforeToggleWrite();
       // No await between the guard and transport invocation, including body-file preparation.
       if (method === 'PUT' && beforeDispatch() !== undefined) fail('DISPATCH_GUARD_REQUIRED');
       const result = await invoke(args);
@@ -557,6 +567,12 @@ export async function publishedSourceDigest(commitSha, run = execute) {
       if (upgrade !== upgradePath) fail('PUBLISHED_ORIGIN_INVALID');
       hash.update('receiver-upgrade.mjs').update(await file(upgradePath));
     }
+    const queuePath = 'infrastructure/arm/telemetry/durable-queue.mjs';
+    const queue = (await run('git', ['ls-tree', '--name-only', commitSha, '--', queuePath], options)).stdout.toString().trim();
+    if (queue) {
+      if (queue !== queuePath) fail('PUBLISHED_ORIGIN_INVALID');
+      hash.update('durable-queue.mjs').update(await file(queuePath));
+    }
     const schema = JSON.parse(await file('assets/schemas/telemetry-event.schema.json'));
     const columns = JSON.parse(await file('services/telemetry-ingest/schema/storage-columns.json'));
     hash.update(json({ schema, columns, schemaSha256: digest(json(schema)), columnsSha256: digest(json(columns)) }));
@@ -568,7 +584,7 @@ export async function verifyReceiverSource(candidate, run = execute, lookup = pu
   if (!/^[0-9a-f]{40}$/u.test(source?.commitSha ?? '')) fail('RECEIVER_SOURCE_UNAVAILABLE');
   const options = { cwd: resolve(here, '../../..'), encoding: 'buffer', maxBuffer: MAX_PRIVATE_ARTIFACT_BYTES };
   try {
-    closed(source.files, RECEIVER_SOURCE_INPUTS);
+    closed(source.files, receiverSourceInputs(candidate.profile));
     await run('git', ['merge-base', '--is-ancestor', source.commitSha, 'HEAD'], options);
     for (const [path, sha256] of Object.entries(source.files)) {
       const bytes = (await run('git', ['--no-pager', 'show', `${source.commitSha}:${path}`], options)).stdout;
@@ -576,6 +592,7 @@ export async function verifyReceiverSource(candidate, run = execute, lookup = pu
     }
     if (await lookup(candidate.review.policyCommitSha, run) !== candidate.review.sourceSha256) fail('RECEIVER_POLICY_SOURCE_CHANGED');
   } catch { fail('RECEIVER_SOURCE_UNAVAILABLE'); }
+  if (candidate.version === 2) await verifyReceiverSource(candidate.priorCandidate, run, lookup);
 }
 async function verifyPublishedOrigins(c, foundation, origins, lookup = publishedSourceDigest, contract) {
   verifyExecutionOrigins(c, foundation, origins, contract ?? await storageContract());
@@ -660,7 +677,9 @@ export async function readPublishedImage(c, imagePublication, arm, invoke = az, 
     ['list-metadata', 'missionspec/telemetry-ingest'],
     ['show', `missionspec/telemetry-ingest@${c.receiverDigest}`],
     ...(candidate ? [['show', `missionspec/telemetry-ingest@${candidate.profile.manifestDigest}`],
-      ...[c.receiverDigest, candidate.profile.manifestDigest].map(d => ['list-referrers', `missionspec/telemetry-ingest@${d}`])] : []),
+      ...(candidate.version === 2 ? [['show', `missionspec/telemetry-ingest@${candidate.priorCandidate.profile.manifestDigest}`]] : []),
+      ...[c.receiverDigest, ...(candidate.version === 2 ? [candidate.priorCandidate.profile.manifestDigest] : []),
+        candidate.profile.manifestDigest].map(d => ['list-referrers', `missionspec/telemetry-ingest@${d}`])] : []),
   ];
   const [manifests, manifest, candidateManifest, ...refs] = await readBatch(commands, ([command, name]) =>
     invoke(['acr', 'manifest', command, '--registry', c.registryName, '--name', name,
@@ -668,6 +687,7 @@ export async function readPublishedImage(c, imagePublication, arm, invoke = az, 
   const result = { registry, repositories, manifests, manifest };
   if (candidate) {
     result.candidateManifest = candidateManifest;
+    if (candidate.version === 2) result.priorManifest = refs.shift();
     result.referrers = refs.flatMap(emptyAcrReferrers);
   }
   verifyPublicationReadback(c, imagePublication, result, candidate);
@@ -705,12 +725,18 @@ export async function collectReconciliation(c, origin, directory, evidence, invo
   const foundation = verifyFoundationBudgets(c, evidence.foundationBudgets), origins = evidence.reconciliation.origins;
   const suppliedCandidate = evidence.receiverCandidate ?? evidence.reconciliation.receiverCandidate;
   const receiverCandidate = suppliedCandidate?.publication !== undefined && suppliedCandidate.publication !== null ? suppliedCandidate : null;
+  const overlay = evidence.receiverUpgrade ? { receiverUpgrade: evidence.receiverUpgrade, queueRecords: evidence.queueRecords ?? {} } : null;
   const contract = await storageContract();
   await verifyPublishedOrigins(c, foundation, origins, lookup, contract);
   if (receiverCandidate) {
     verifyReceiverCandidate(c, receiverCandidate);
     await verifyReceiverSource(receiverCandidate, options.sourceRun, lookup);
     if (!isDeepStrictEqual(receiverCandidate.legacyPublication, origins.imagePublication)) fail('RECONCILIATION_RECEIVER_PUBLICATION_REQUIRED');
+  }
+  if (overlay) {
+    await verifyPublishedWindowPredecessor(c, overlay.receiverUpgrade, lookup, options.sourceRun);
+    knownResourceIds(c, { queueRecords: overlay.queueRecords });
+    await verifyPublishedQueueRecords(c, overlay.queueRecords, lookup);
   }
   const r = ids(c), arm = transport(c, origins.records[0].phase, directory, invoke);
   const account = await invoke(['account', 'show', '--subscription', c.subscriptionId, '--only-show-errors', '--output', 'json']);
@@ -727,18 +753,24 @@ export async function collectReconciliation(c, origin, directory, evidence, invo
     v.resourceType?.toLowerCase() === 'diagnosticsettings' && v.apiVersions?.includes(DIAGNOSTIC_API))) fail('DIAGNOSTIC_API_NOT_REGISTERED');
   const context = await reconciliationContext(c, origins, arm, invoke, receiverCandidate ?? undefined);
   const results = Object.fromEntries(await readBatch(origins.records, async record => [record.phase.phase,
-    await readReconciledPhase(c, record, arm, { ...context, publication: origins.imagePublication?.receipt })]));
+    await readReconciledPhase(c, record, arm, { ...context, publication: origins.imagePublication?.receipt,
+      ...(overlay ? { receiverCandidate, imageDescriptor: overlay.receiverUpgrade.phase.resources[0] } : {}) })]));
   const [stateBudget, inventory, managedGroup] = await readBatch([
     () => arm('GET', r.stateBudget, '2024-08-01'),
     () => arm('GET', `${r.group}/resources`, '2021-04-01', undefined, '$expand=createdTime,changedTime'),
     () => arm('GET', r.managedGroup, '2024-03-01'),
   ], read => read());
   if (await sourceDigest() !== policySource) fail('RECONCILIATION_SOURCE_CHANGED');
-  const proposal = { version: receiverCandidate ? 4 : 3, kind: 'read-only-completed-phases', sourceSha256: policySource,
+  const proposal = { version: overlay ? 5 : receiverCandidate ? 4 : 3, kind: 'read-only-completed-phases', sourceSha256: policySource,
     ...(receiverCandidate ? { receiverCandidateSha256: digest(json(receiverCandidate)) } : {}),
+    ...(overlay ? { receiverUpgradeSha256: digest(json(overlay.receiverUpgrade)), queueRecordsSha256: digest(json(overlay.queueRecords)) } : {}),
     configSha256: digest(json(c)), executionOriginsSha256: digest(json(origins)), baselineSha256,
     checkedAt: new Date().toISOString(), results, stateBudget, ...context, inventory, managedGroup };
-  verifyReconciliation(c, foundation, origins, proposal, proposal.sourceSha256, null, contract, receiverCandidate);
+  verifyReconciliation(c, foundation, origins, proposal, proposal.sourceSha256, null, contract, receiverCandidate, overlay);
+  if (overlay && Object.keys(overlay.queueRecords).length) {
+    const topology = overlay.queueRecords['queue-storage'].topology;
+    await readQueueRecords(c, topology, overlay.queueRecords, transport(c, origins.records[0].phase, directory, invoke, topology));
+  }
   if (now() >= deadline) fail('WINDOW_READ_DEADLINE');
   return proposal;
 }
@@ -746,9 +778,14 @@ export async function reviewedReconciliationReceipts(c, foundation, evidence, so
   if (!evidence?.origins || !evidence.proposal || !evidence.review) fail('RECONCILIATION_REVIEW_REQUIRED');
   const contract = await storageContract();
   await verifyPublishedOrigins(c, foundation, evidence.origins, lookup, contract);
-  const receiverCandidate = evidence.proposal.version === 4 ? evidence.receiverCandidate : null;
+  const receiverCandidate = [4, 5].includes(evidence.proposal.version) ? evidence.receiverCandidate : null;
+  const overlay = evidence.proposal.version === 5 ? { receiverUpgrade: evidence.receiverUpgrade, queueRecords: evidence.queueRecords ?? {} } : null;
   if (receiverCandidate) await verifyReceiverSource(receiverCandidate, options.sourceRun, lookup);
-  verifyReconciliation(c, foundation, evidence.origins, evidence.proposal, sourceSha256, evidence.review, contract, receiverCandidate);
+  if (overlay) {
+    await verifyPublishedWindowPredecessor(c, overlay.receiverUpgrade, lookup, options.sourceRun);
+    await verifyPublishedQueueRecords(c, overlay.queueRecords, lookup);
+  }
+  verifyReconciliation(c, foundation, evidence.origins, evidence.proposal, sourceSha256, evidence.review, contract, receiverCandidate, overlay);
   return Object.fromEntries(evidence.origins.records.map(record => {
     const phase = record.phase.phase, result = evidence.proposal.results[phase];
     return [phase, { qualificationKind: 'reviewed-read-only-reconciliation', qualified: true, phase,
@@ -764,8 +801,9 @@ export async function verifyFreshReconciliation(c, directory, evidence, invoke =
   invoke = limitReadConcurrency(invoke);
   const arm = transport(c, evidence.origins.records[0].phase, directory, invoke);
   const receiverCandidate = imageContext.receiverCandidate ?? evidence.receiverCandidate;
-  if (evidence.proposal.version === 4 && (!receiverCandidate ||
-      evidence.proposal.receiverCandidateSha256 !== digest(json(receiverCandidate)))) fail('RECONCILIATION_RECEIVER_PUBLICATION_REQUIRED');
+  const historicalCandidate = evidence.proposal.version === 4 && receiverCandidate?.version === 2 ? receiverCandidate.priorCandidate : receiverCandidate;
+  if ([4, 5].includes(evidence.proposal.version) && (!historicalCandidate ||
+      evidence.proposal.receiverCandidateSha256 !== digest(json(historicalCandidate)))) fail('RECONCILIATION_RECEIVER_PUBLICATION_REQUIRED');
   const context = await reconciliationContext(c, evidence.origins, arm, invoke, receiverCandidate);
   if (context.workspace && !isDeepStrictEqual(executionIdentity(context.workspace), executionIdentity(evidence.proposal.workspace))) fail('RESOURCE_IDENTITY_CHANGED');
   const currentApps = await readBatch(evidence.origins.records, async record => {
@@ -790,16 +828,16 @@ export async function verifyFreshReconciliation(c, directory, evidence, invoke =
   })) fail('RESOURCE_CREATION_IDENTITY_CHANGED');
   return currentApps.find(Boolean);
 }
-export async function verifyPublishedWindowPredecessor(c, predecessor, lookup = publishedSourceDigest) {
+export async function verifyPublishedWindowPredecessor(c, predecessor, lookup = publishedSourceDigest, sourceRun = execute) {
   const summary = verifyWindowPredecessor(c, predecessor);
   if (await lookup(predecessor.publication.commitSha) !== predecessor.publication.sourceSha256) fail('PREDECESSOR_PUBLISHED_SOURCE_MISMATCH');
   if (predecessor.kind === 'reviewed-disabled-image-change') {
-    await verifyPublishedWindowPredecessor(c, predecessor.predecessor, lookup);
-    await verifyReceiverSource(predecessor.candidate);
+    await verifyPublishedWindowPredecessor(c, predecessor.predecessor, lookup, sourceRun);
+    await verifyReceiverSource(predecessor.candidate, sourceRun, lookup);
     return summary;
   }
   if (predecessor.prerequisiteReceipts.receiverUpgrade) {
-    await verifyPublishedWindowPredecessor(c, predecessor.prerequisiteReceipts.receiverUpgrade, lookup);
+    await verifyPublishedWindowPredecessor(c, predecessor.prerequisiteReceipts.receiverUpgrade, lookup, sourceRun);
   }
   const context = resourceContext(c, predecessor.prerequisiteReceipts);
   for (const name of TOGGLE_PHASES) {
@@ -882,7 +920,7 @@ export async function validateReadOnly(c, phase, receipts, directory, invoke = a
   const now = options.now ?? Date.now, maximumDeadline = now() + 120000;
   const deadline = Math.min(options.deadline ?? invokeDeadlines.get(invoke) ?? maximumDeadline, maximumDeadline);
   invoke = boundedInvoke(deadline, invoke, now);
-  const r = ids(c), known = Object.values(receipts).flatMap(v => Object.keys(v.resources ?? {}));
+  const r = ids(c), known = knownResourceIds(c, receipts);
   const executionName = deploymentName(c, phase.phase, phase.windowInstance);
   if (phase.deploymentId !== `${phase.scope}/providers/Microsoft.Resources/deployments/${executionName}`) fail('DEPLOYMENT_NAME_INVALID');
   const name = `${phase.phase}-template.json`; await save(directory, name, phase.template);
@@ -896,12 +934,55 @@ export async function validateReadOnly(c, phase, receipts, directory, invoke = a
   await save(directory, `${phase.phase}-what-if-raw.json`, raw);
   await save(directory, `${phase.phase}-what-if.json`, whatif);
   if (now() >= deadline) fail('WINDOW_READ_DEADLINE');
-  const context = [...TOGGLE_PHASES, ...IMAGE_PHASES].includes(phase.phase) ? { config: c, ...resourceContext(c, receipts),
+  const context = [...TOGGLE_PHASES, ...IMAGE_PHASES, ...QUEUE_PHASES].includes(phase.phase) ? { config: c, ...resourceContext(c, receipts),
+    ...(options.queueTopology ? { queueTopology: options.queueTopology } : {}),
     ...(options.receiverCandidate ? { receiverCandidate: options.receiverCandidate } : {}),
     app: currentApp ?? receiverAnchor(c, receipts) } : undefined;
   const whatIfSha256 = verifyWhatIf(phase, whatif, known, context);
   if (now() >= deadline) fail('WINDOW_READ_DEADLINE');
   return { whatIfSha256, templateValidationOnly: true };
+}
+export function knownResourceIds(c, receipts) {
+  const known = Object.entries(receipts).filter(([name]) => PHASES.includes(name))
+    .flatMap(([, v]) => Object.keys(v.resources ?? {}))
+    .filter(id => !id.toLowerCase().includes('/providers/microsoft.storage/'));
+  if (receipts.queueRecords && Object.keys(receipts.queueRecords).length) {
+    const last = QUEUE_PHASES.filter(name => Object.hasOwn(receipts.queueRecords, name)).at(-1);
+    const topology = receipts.queueRecords[last]?.topology;
+    known.push(...Object.keys(qualifiedQueueRecords(c, receipts.queueRecords, topology, last)));
+  }
+  return [...new Set(known)];
+}
+export async function readQueueRecords(c, topology, records, arm) {
+  if (!Object.keys(records).length) return;
+  qualifiedQueueRecords(c, records, topology, QUEUE_PHASES.filter(name => Object.hasOwn(records, name)).at(-1));
+  await readBatch(Object.values(records), async record => {
+    const deployment = await arm('GET', record.phase.deploymentId, '2022-09-01');
+    verifyDeploymentIdentity(record.receipt.deployment, deployment);
+    await readBatch(record.phase.resources, async descriptor => {
+      const actual = await arm('GET', descriptor.id, descriptor.apiVersion), previous = record.receipt.resources[descriptor.id];
+      verifyQueueResource(c, topology, descriptor, actual);
+      if (actual.properties.creationTime !== previous.properties.creationTime ||
+          actual.properties.createdOn !== previous.properties.createdOn) fail('QUEUE_CREATION_IDENTITY_CHANGED');
+    });
+  });
+  const queues = await arm('GET', `${topology.ids.service}/queues`, '2025-01-01');
+  if (!Array.isArray(queues?.value) || queues.nextLink || queues.value.length !== 1 ||
+      !sameId(queues.value[0].id, topology.ids.queue)) fail('UNEXPECTED_QUEUE_RESOURCE');
+  await readQueuePrivacy(topology, arm);
+}
+export async function verifyPublishedQueueRecords(c, records, lookup = publishedSourceDigest) {
+  for (const record of Object.values(records)) {
+    verifyQueueRecord(c, record);
+    if (await lookup(record.publication.commitSha) !== record.publication.sourceSha256) fail('QUEUE_PUBLISHED_SOURCE_CHANGED');
+  }
+}
+export async function readQueuePrivacy(topology, arm) {
+  const diagnostics = Object.fromEntries(await readBatch([topology.ids.account, topology.ids.service],
+    async id => [id, await arm('GET', `${id}/providers/Microsoft.Insights/diagnosticSettings`, DIAGNOSTIC_API)]));
+  const value = { diagnostics };
+  verifyQueuePrivacy(topology, value);
+  return value;
 }
 export async function checkReadOnly(c, phase, origin, receipts, directory, evidenceFiles, invoke = az, lookup = publishedSourceDigest, transition, options = {}) {
   const now = options.now ?? Date.now, started = now(), deadline = Math.min(options.deadline ?? invokeDeadlines.get(invoke) ?? started + 120000, started + 120000);
@@ -914,27 +995,37 @@ export async function checkReadOnly(c, phase, origin, receipts, directory, evide
       throw error;
     }
   });
-  const arm = transport(c, phase, directory, invoke), r = ids(c);
+  const topology = evidenceFiles.queueTopology ?? evidenceFiles.receiverCandidate?.topology ?? receipts.receiverUpgrade?.candidate.topology;
+  const queuePhase = QUEUE_PHASES.includes(phase.phase);
+  const arm = transport(c, phase, directory, invoke, topology), r = ids(c);
   const foundation = verifyFoundationBudgets(c, evidenceFiles.foundationBudgets);
   if (evidenceFiles.reconciliation?.origins?.records.some(v => v.phase.phase === phase.phase)) fail('COMPLETED_PHASE_REQUIRES_RECONCILIATION');
   const source = await sourceDigest();
   const receiverCandidate = evidenceFiles.receiverCandidate ?? receipts.receiverUpgrade?.candidate;
   const imagePhase = IMAGE_PHASES.includes(phase.phase);
+  if (queuePhase || topology) {
+    verifyQueueReview(c, topology, evidenceFiles.queueReview, source, now());
+    const names = queuePhase ? phase.requiredReceipts : QUEUE_PHASES;
+    if (names.length) qualifiedQueueRecords(c, receipts.queueRecords, topology, names.at(-1));
+    else closed(receipts.queueRecords ?? {}, []);
+    await verifyPublishedQueueRecords(c, receipts.queueRecords ?? {}, lookup);
+  }
   if ((imagePhase || receipts.receiverUpgrade) && !receiverCandidate) fail('REVIEWED_RECEIVER_PROFILE_REQUIRED');
   if (receiverCandidate) {
     verifyReceiverCandidate(c, receiverCandidate);
     await verifyReceiverSource(receiverCandidate, options.sourceRun, lookup);
-    if (['disabled-image-upgrade', 'synthetic-admission'].includes(phase.phase) &&
+    if (['disabled-image-upgrade', 'disabled-queue-upgrade', 'synthetic-admission'].includes(phase.phase) &&
         receiverDatabaseInstant(receiverCandidate.profile.scan.databaseNextUpdate) <= now()) fail('RECEIVER_SCAN_EXPIRED');
   }
   if (transition && (!TOGGLE_PHASES.includes(phase.phase) || transition.source !== source)) fail('CURRENT_WINDOW_SOURCE_REQUIRED');
   let reconciled = {};
   if (evidenceFiles.reconciliation?.origins) {
-    if (receiverCandidate && (evidenceFiles.reconciliation.proposal?.version !== 4 ||
-        evidenceFiles.reconciliation.proposal.receiverCandidateSha256 !== digest(json(receiverCandidate)))) fail('VERSIONED_RECEIVER_RECONCILIATION_REQUIRED');
+    const historicalCandidate = evidenceFiles.reconciliation.proposal?.version === 4 && receiverCandidate?.version === 2 ? receiverCandidate.priorCandidate : receiverCandidate;
+    if (receiverCandidate && (![4, 5].includes(evidenceFiles.reconciliation.proposal?.version) ||
+        evidenceFiles.reconciliation.proposal.receiverCandidateSha256 !== digest(json(historicalCandidate)))) fail('VERSIONED_RECEIVER_RECONCILIATION_REQUIRED');
     reconciled = await reviewedReconciliationReceipts(c, foundation,
-      { ...evidenceFiles.reconciliation, ...(receiverCandidate ? { receiverCandidate } : {}) }, source, lookup, options);
-    if (!isDeepStrictEqual(phase.reconciliation, reconciliationBinding(evidenceFiles.reconciliation)) ||
+      { ...evidenceFiles.reconciliation, ...(historicalCandidate ? { receiverCandidate: historicalCandidate } : {}) }, source, lookup, options);
+    if ((!queuePhase && !isDeepStrictEqual(phase.reconciliation, reconciliationBinding(evidenceFiles.reconciliation))) ||
         Object.entries(reconciled).some(([name, value]) => !isDeepStrictEqual(receipts[name], value))) fail('RECONCILIATION_RECEIPTS_REQUIRED');
   }
   const account = await invoke(['account', 'show', '--subscription', c.subscriptionId, '--only-show-errors', '--output', 'json']);
@@ -943,6 +1034,8 @@ export async function checkReadOnly(c, phase, origin, receipts, directory, evide
     : receipts.receiverUpgrade ? receipts.receiverUpgrade.phase.resources[0] : undefined;
   if (imagePhase) imageDescriptor.expected.properties.template.containers[0].image =
     `${c.registryName}.azurecr.io/missionspec/telemetry-ingest@${phase.transition.fromDigest}`;
+  if (phase.phase === 'disabled-queue-upgrade') imageDescriptor.expected.properties.template.containers[0].env =
+    imageDescriptor.expected.properties.template.containers[0].env.filter(v => !Object.hasOwn(queueEnvironment(topology), v.name));
   const [, verifiedApp] = await readBatch([
     () => verifyOrigin(origin, arm, c, evidenceFiles.scannerAdoption),
     () => evidenceFiles.reconciliation?.origins
@@ -951,9 +1044,14 @@ export async function checkReadOnly(c, phase, origin, receipts, directory, evide
   ], read => read());
   if (imagePhase) {
     if (!evidenceFiles.reconciliation?.origins || !evidenceFiles.windowPredecessor) fail('IMAGE_HISTORY_REQUIRED');
-    await verifyPublishedWindowPredecessor(c, evidenceFiles.windowPredecessor, lookup);
+    await verifyPublishedWindowPredecessor(c, evidenceFiles.windowPredecessor, lookup, options.sourceRun);
     await readWindowPredecessor(c, evidenceFiles.windowPredecessor, directory, invoke, undefined, verifiedApp);
     if (await arm('GET', phase.deploymentId, '2022-09-01')) fail('IMAGE_DEPLOYMENT_ALREADY_EXISTS');
+  }
+  if (queuePhase) {
+    if (!evidenceFiles.reconciliation?.origins || !evidenceFiles.windowPredecessor || !receipts.receiverUpgrade) fail('QUEUE_DISABLED_PREPARED_RECEIVER_REQUIRED');
+    await verifyPublishedWindowPredecessor(c, evidenceFiles.windowPredecessor, lookup, options.sourceRun);
+    await readWindowPredecessor(c, evidenceFiles.windowPredecessor, directory, invoke, undefined, verifiedApp);
   }
   if (TOGGLE_PHASES.includes(phase.phase)) await checkWindowLineage(c, phase, evidenceFiles.windowPredecessor, directory, invoke, lookup, transition, verifiedApp);
   if (phase.phase !== 'project-budget') {
@@ -972,18 +1070,33 @@ export async function checkReadOnly(c, phase, origin, receipts, directory, evide
     evidence[name] = await arm('GET', id, api); await save(directory, `${phase.phase}-${name}.json`, evidence[name]);
   });
   if (!evidence.permissions?.value?.some(v => v.actions?.includes('*') && !v.notActions?.length) || evidence.denies?.value?.length) fail('PERMISSION_REVIEW_REQUIRED');
-  for (const ns of ['Microsoft.App', 'Microsoft.ContainerRegistry', 'Microsoft.ManagedIdentity', 'Microsoft.OperationalInsights', 'Microsoft.Insights', 'Microsoft.Consumption', 'Microsoft.Authorization']) {
+  for (const ns of ['Microsoft.App', 'Microsoft.ContainerRegistry', 'Microsoft.ManagedIdentity', 'Microsoft.OperationalInsights', 'Microsoft.Insights', 'Microsoft.Consumption', 'Microsoft.Authorization',
+    ...(topology ? ['Microsoft.Storage'] : [])]) {
     if (!evidence.providers.value.some(v => v.namespace?.toLowerCase() === ns.toLowerCase() && v.registrationState === 'Registered')) fail('PROVIDER_NOT_REGISTERED');
   }
   for (const [ns, type] of [['Microsoft.App', 'managedEnvironments'], ['Microsoft.App', 'containerApps'],
-    ['Microsoft.ContainerRegistry', 'registries'], ['Microsoft.OperationalInsights', 'workspaces'], ['Microsoft.Insights', 'dataCollectionRules']]) {
+    ['Microsoft.ContainerRegistry', 'registries'], ['Microsoft.OperationalInsights', 'workspaces'], ['Microsoft.Insights', 'dataCollectionRules'],
+    ...(topology ? [['Microsoft.Storage', 'storageAccounts']] : [])]) {
     const provider = evidence.providers.value.find(v => v.namespace.toLowerCase() === ns.toLowerCase());
     if (!provider.resourceTypes.some(v => v.resourceType === type && v.locations?.includes('Australia East'))) fail('REGION_NOT_SUPPORTED');
   }
+  if (topology) {
+    const storage = evidence.providers.value.find(v => v.namespace.toLowerCase() === 'microsoft.storage');
+    for (const type of ['storageAccounts', 'storageAccounts/queueServices', 'storageAccounts/queueServices/queues']) {
+      if (!storage.resourceTypes.some(v => v.resourceType?.toLowerCase() === type.toLowerCase() && v.apiVersions?.includes('2025-01-01'))) fail('QUEUE_API_NOT_REGISTERED');
+    }
+  }
   const baseline = digest(json({ policies: evidence.policies, defender: evidence.defender }));
   if (baseline !== origin.policyBaselineSha256) fail('POLICY_OR_SECURITY_DRIFT');
-  const known = Object.values(receipts).flatMap(v => Object.keys(v.resources ?? {}));
+  const known = knownResourceIds(c, receipts);
   if (evidence['telemetry-inventory'].value.some(v => !known.some(id => sameId(id, v.id)))) fail('UNEXPECTED_TELEMETRY_RESOURCE');
+  let providerOperationsSha256;
+  if (topology) {
+    const operations = await arm('GET', '/providers/Microsoft.Storage/operations', '2025-01-01');
+    providerOperationsSha256 = verifyQueueProviderOperations(operations);
+    await save(directory, 'queue-provider-operations.json', operations);
+    await readQueueRecords(c, topology, receipts.queueRecords ?? {}, arm);
+  }
   if (phase.phase === 'core') {
     const q = evidence.quota.value.find(v => v.name?.value === 'ManagedEnvironmentCount');
     if (!q || q.limit - q.currentValue < 1) fail('ENVIRONMENT_QUOTA_UNAVAILABLE');
@@ -1031,8 +1144,9 @@ export async function checkReadOnly(c, phase, origin, receipts, directory, evide
     roleDefinitionsSha256 = digest(json(definitions.roles));
     await save(directory, 'assignments-role-definitions.json', { checkedAt: new Date().toISOString(), ...definitions, roleDefinitionsSha256 });
   }
-  const { whatIfSha256 } = await validateReadOnly(c, phase, receipts, directory, invoke, currentApp, { ...options, deadline, receiverCandidate });
-  const cost = firstReleaseCost(receiverCandidate ? 2 : 1);
+  const { whatIfSha256 } = await validateReadOnly(c, phase, receipts, directory, invoke, currentApp,
+    { ...options, deadline, receiverCandidate, queueTopology: topology });
+  const cost = topology ? durableQueueCost() : firstReleaseCost(receiverCandidate ? 2 : 1);
   const verifiedSource = await sourceDigest();
   if (verifiedSource !== source) fail('CURRENT_POLICY_SOURCE_CHANGED');
   if (now() >= deadline) fail('WINDOW_READ_DEADLINE');
@@ -1042,9 +1156,16 @@ export async function checkReadOnly(c, phase, origin, receipts, directory, evide
     baselineSha256: roleDefinitionsSha256 ? digest(json({ foundationBaselineSha256: baseline, roleDefinitionsSha256 })) : baseline, whatIfSha256,
     ...(roleDefinitionsSha256 ? { foundationBaselineSha256: baseline, roleDefinitionsSha256 } : {}),
     ...(receiverCandidate ? { receiverScanExpiresAt: receiverCandidate.profile.scan.databaseNextUpdate } : {}),
+    ...(topology ? { topologyReviewSha256: digest(json(evidenceFiles.queueReview)), providerOperationsSha256, preservedIds: known } : {}),
     ...(currentApp ? { ...(imagePhase ? {} : { transitionSha256: syntheticTransitionHash(phase) }), observedFlag: admissionFlag(currentApp),
       appObservationSha256: digest(json(currentApp)) } : {}),
     cost, computedValuesReviewed: phase.computedReadbacksRequired.length === 0 };
+  if (queuePhase) {
+    proof.receiptsSha256 = digest(json(receipts.queueRecords ?? {}));
+    proof.foundationBaselineSha256 = baseline;
+    proof.baselineSha256 = digest(json({ foundationBaselineSha256: baseline, topologyReviewSha256: proof.topologyReviewSha256,
+      providerOperationsSha256, preservedIdsSha256: digest(json(known)) }));
+  }
   await save(directory, `${phase.phase}-preflight.json`, proof);
   if (now() >= deadline) {
     proof.qualified = false; proof.failureCode = 'WINDOW_READ_DEADLINE';
@@ -1059,7 +1180,7 @@ export class CollectorController {
   constructor(c, phase, io) { this.config = c; this.phase = phase; this.io = io; }
   async execute(approval) {
     const p = this.phase;
-    if ([...TOGGLE_PHASES, ...IMAGE_PHASES].includes(p.phase)) fail('PAIRED_SYNTHETIC_WINDOW_REQUIRED');
+    if ([...TOGGLE_PHASES, ...IMAGE_PHASES, ...QUEUE_PHASES].includes(p.phase)) fail('PAIRED_SYNTHETIC_WINDOW_REQUIRED');
     verifyApproval(approval, this.config, p, await this.io.sourceDigest(), this.io.now());
     if (await this.io.loadJournal()) fail('EXISTING_PHASE_INTENT_REQUIRES_RECONCILIATION');
     const checkStartedAt = this.io.now();
@@ -1303,6 +1424,8 @@ export class SyntheticWindowDriver {
     const run = { version: 1, windowSha256: digest(json(this.window)), startedAt: new Date(this.io.now()).toISOString(),
       stage: 'initial-disabled', requests: [], queries: [], enabledPosts: 0, disabledPosts: 0, healthGets: 0,
       outcome: 'in-progress', terminalFalseVerified: false };
+    const queueVerification = this.phases['synthetic-admission'].queueVerification;
+    if (queueVerification) run.queueObservations = [];
     await this.io.saveRun(run);
     let failure = null, rollbackFailure = null, terminalDeadline = null;
     const deadlines = this.toggle.deadlines;
@@ -1341,7 +1464,8 @@ export class SyntheticWindowDriver {
       entry.response = response;
       guard(); await persist();
       if (!disabled) admit();
-      const expected = method === 'POST' && disabled ? 503 : 204;
+      const queued = this.phases['synthetic-admission'].queueVerification !== undefined;
+      const expected = method === 'POST' ? disabled ? 503 : queued ? 202 : 204 : 204;
       return response.status === expected && response.bodyBytes === 0 && response.tlsVerified === true &&
         response.errorCode === null && response.durationMs <= SYNTHETIC_LIMITS.httpTimeoutMs &&
         response.headerPolicy?.noStore === true;
@@ -1394,7 +1518,22 @@ export class SyntheticWindowDriver {
         entry.result = result; entry.verification = verifySyntheticRows(result, queryStart, queryEnd);
         await persist();
         admit();
-        if (entry.verification.complete) { matched = true; break; }
+        if (entry.verification.complete) {
+          if (queueVerification) {
+            if (typeof this.io.queueDrain !== 'function') fail('QUEUE_DRAIN_EVIDENCE_REQUIRED');
+            guard();
+            const observation = await this.io.queueDrain(guard, queryDeadline);
+            guard(); run.queueObservations.push(observation);
+            const drained = verifyQueueDrain(queueVerification, observation);
+            if (canonicalInstant(observation.observedAt) < canonicalInstant(entry.startedAt) ||
+                canonicalInstant(observation.observedAt) > this.io.now()) fail('QUEUE_DRAIN_EVIDENCE_REQUIRED');
+            await persist(); admit();
+            if (!drained) continue;
+            run.queueAdmissionOnly = true;
+            run.queueDrainIsApproximate = true;
+          }
+          matched = true; break;
+        }
       }
       if (!matched) fail('SYNTHETIC_ROWS_NOT_CONFIRMED');
     } catch (error) {
@@ -1694,6 +1833,20 @@ export function syntheticWindowIO(c, phases, window, approvals, receipts, rawRec
     http: (method, path, event, guard, deadline) => syntheticHttp(window.anchorApp.properties.configuration.ingress.fqdn, method, path, event, guard, deadline),
     query: (start, end, guard, deadline, onDispatch) => readSyntheticQuery(c, receipts['workspace-access'].resources[r.workspace],
       window.sourceSha256, start, end, guard, deadline, invoke, sourceDigest, Date.now, onDispatch),
+    ...(phases['synthetic-admission'].queueVerification ? { queueDrain: async (guard, deadline) => {
+      const topology = receipts.receiverUpgrade.candidate.topology;
+      const arm = transport(c, phases['synthetic-disable'], directory, async (args, timeout) => {
+        guard(); return boundedInvoke(deadline, invoke)(args, timeout);
+      }, topology);
+      const actual = await arm('GET', topology.ids.queue, '2025-01-01');
+      guard();
+      const descriptor = receipts.queueRecords['queue-storage'].phase.resources.find(v => v.id === topology.ids.queue);
+      verifyQueueResource(c, topology, descriptor, actual);
+      const result = { version: 1, kind: 'owned-arm-approximate-queue-count', queueId: topology.ids.queue,
+        approximateMessageCount: actual.properties.approximateMessageCount, observedAt: new Date().toISOString() };
+      verifyQueueDrain(phases['synthetic-admission'].queueVerification, result);
+      return result;
+    } } : {}),
   };
 }
 
@@ -1710,7 +1863,8 @@ export function receiverUpgradeIO(c, phase, receipts, origin, evidence, director
       return result;
     };
   };
-  const armAt = deadline => transport(c, phase, directory, invokeAt(deadline));
+  const topology = evidence.queueTopology ?? candidate?.topology;
+  const armAt = deadline => transport(c, phase, directory, invokeAt(deadline), topology);
   const observe = async until => {
     const arm = armAt(until);
     const [ingest, pull, app, revisions] = await Promise.all([
@@ -1781,7 +1935,13 @@ export function receiverUpgradeIO(c, phase, receipts, origin, evidence, director
           id, type: id === r.workspace ? 'Microsoft.OperationalInsights/workspaces'
             : id === r.environment ? 'Microsoft.App/managedEnvironments' : 'Microsoft.App/containerApps',
         })) }, arm),
+        ...(topology ? [readQueueRecords(c, topology, receipts.queueRecords ?? {}, arm)] : []),
       ]);
+      if (topology) {
+        const inventory = await arm('GET', `${r.group}/resources`, '2021-04-01'), known = knownResourceIds(c, receipts);
+        if (!Array.isArray(inventory?.value) || inventory.nextLink ||
+            inventory.value.some(v => !known.some(id => sameId(id, v.id)))) fail('UNEXPECTED_TELEMETRY_RESOURCE');
+      }
     },
     privacy: until => readPrivacy(c, phase, armAt(until)),
     reserve: async () => {
@@ -1795,30 +1955,98 @@ export function receiverUpgradeIO(c, phase, receipts, origin, evidence, director
   };
 }
 
+export function queueTopologyIO(c, phase, receipts, origin, evidence, directory, invoke = az, options = {}) {
+  const topology = evidence.queueTopology, now = options.now ?? Date.now;
+  verifyQueueTopology(c, topology);
+  const identity = receipts.core.resources[ids(c).ingestIdentity];
+  const common = receiverUpgradeIO(c, phase, receipts, origin, evidence, directory, invoke, options);
+  const armAt = deadline => transport(c, phase, directory, limitReadConcurrency(boundedInvoke(deadline, invoke, now)), topology);
+  let proof;
+  return {
+    ...common,
+    check: async () => {
+      proof = await checkReadOnly(c, phase, origin, receipts, directory, evidence, invoke,
+        options.lookup ?? publishedSourceDigest, undefined, options);
+      return proof;
+    },
+    verifyCurrent: async deadline => {
+      if (!isDeepStrictEqual(phase, buildQueuePhase(c, phase.phase, topology, identity))) fail('QUEUE_PHASE_CHANGED');
+      verifyQueueReview(c, topology, evidence.queueReview, await sourceDigest(), now());
+      await common.security(deadline);
+      const arm = armAt(deadline);
+      const operations = await arm('GET', '/providers/Microsoft.Storage/operations', '2025-01-01');
+      if (verifyQueueProviderOperations(operations) !== proof.providerOperationsSha256) fail('QUEUE_PROVIDER_PERMISSION_MISMATCH');
+      const observation = await common.observe(deadline);
+      if (!receipts.receiverUpgrade || admissionFlag(observation.app) !== 'false') fail('QUEUE_DISABLED_PREPARED_RECEIVER_REQUIRED');
+      const prior = receipts.receiverUpgrade;
+      verifyResource(c, prior.phase, prior.phase.resources[0], observation.app, observation.context);
+      const anchor = prior.receipt.resources[ids(c).app];
+      if (!isDeepStrictEqual(executionIdentity(observation.app, 'Microsoft.App/containerApps'), executionIdentity(anchor, 'Microsoft.App/containerApps'))) fail('QUEUE_APP_IDENTITY_CHANGED');
+      // A failed terminal window may advance the revision without changing the disabled profile.
+      if (evidence.windowPredecessor) await readWindowPredecessor(c, evidence.windowPredecessor, directory,
+        boundedInvoke(deadline, invoke, now), undefined, observation);
+      const values = await readBatch([{ id: phase.deploymentId, apiVersion: '2022-09-01' }, ...phase.resources],
+        d => arm('GET', d.id, d.apiVersion));
+      if (values.some(Boolean)) fail('QUEUE_NEW_RESOURCE_OR_DEPLOYMENT_EXISTS');
+    },
+    arm: (method, id, api, body, guard, current, deadline) =>
+      armAt(deadline)(method, id, api, body, undefined, guard, undefined, current),
+    observe: async deadline => {
+      const arm = armAt(deadline), deployment = await arm('GET', phase.deploymentId, '2022-09-01');
+      if (deployment?.properties?.provisioningState !== 'Succeeded') return { deployment };
+      const resources = Object.fromEntries(await readBatch(phase.resources, async d => [d.id, await arm('GET', d.id, d.apiVersion)]));
+      const queues = await arm('GET', `${topology.ids.service}/queues`, '2025-01-01');
+      if (!Array.isArray(queues?.value) || queues.nextLink || queues.value.length !== 1 ||
+          !sameId(queues.value[0].id, topology.ids.queue)) fail('UNEXPECTED_QUEUE_RESOURCE');
+      return { deployment, resources, privacy: await readQueuePrivacy(topology, arm) };
+    },
+  };
+}
+
 async function main() {
   const [operation, phaseName, directoryArg, ...extra] = process.argv.slice(2);
   if (!['prepare', 'check', 'validate-preview', 'prepare-window', 'run-window', 'execute-disable',
     'reconcile', 'qualify-reconciliation', 'image-before-push', 'image-readback', 'execute',
-    'prepare-image', 'check-image', 'execute-image', 'preview-image-publication'].includes(operation) ||
-      ![...PHASES, ...IMAGE_PHASES].includes(phaseName) || !directoryArg || extra.length) fail('FIXED_PHASE_COMMAND_REQUIRED');
+    'prepare-image', 'check-image', 'execute-image', 'preview-image-publication',
+    'preview-queue', 'prepare-queue', 'check-queue', 'execute-queue'].includes(operation) ||
+      ![...PHASES, ...IMAGE_PHASES, ...QUEUE_PHASES].includes(phaseName) || !directoryArg || extra.length) fail('FIXED_PHASE_COMMAND_REQUIRED');
   const directory = await privateDirectory(directoryArg), c = validateConfig(await load(directory, 'config.json'));
   if (Object.entries(process.env).some(([key, value]) => value && /^(CI$|GITHUB_|ACTIONS_|RUNNER_)/u.test(key))) fail('UNTRUSTED_RUNNER_FORBIDDEN');
+  if (operation === 'preview-queue') {
+    if (phaseName !== 'queue-storage') fail('FIXED_QUEUE_PHASE_REQUIRED');
+    const input = await load(directory, 'queue-namespace.json'); closed(input, ['namespace']);
+    const topology = queueTopology(c, input.namespace);
+    await saveImmutable(directory, 'queue-topology.json', topology);
+    await saveImmutable(directory, 'queue-preview.json', { version: 1, kind: 'unapproved-durable-queue-preview',
+      topology, sourceSha256: await sourceDigest(), qualified: false, exactReviewRequired: true,
+      candidateManifestDigest: null, candidateBindingRequired: true, executionAuthorized: false,
+      phases: ['queue-storage', 'queue-role'].map(name => buildQueuePhase(c, name, topology)) });
+    console.log('UNAPPROVED_QUEUE_PREVIEW_NO_CLOUD_CALLS'); return;
+  }
   const origin = await load(directory, 'origin.json'), rawReceipts = await load(directory, 'receipts.json');
   const evidenceFiles = { scannerAdoption: await load(directory, 'scanner-adoption.json'),
     foundationBudgets: await load(directory, 'foundation-budgets.json'),
     windowInstance: await load(directory, 'window-instance.json', true),
     windowPredecessor: await load(directory, 'window-predecessor.json', true),
     receiverCandidate: await load(directory, 'receiver-candidate.json', true),
+    queueTopology: await load(directory, 'queue-topology.json', true),
+    queueReview: await load(directory, 'queue-review.json', true),
+    receiverUpgrade: await load(directory, 'receiver-upgrade.json', true),
+    queueRecords: await load(directory, 'queue-records.json', true),
     reconciliation: { origins: await load(directory, 'execution-origins-v3.json', true),
       proposal: await load(directory, 'reconciliation-proposal.json', true),
       review: await load(directory, 'reconciliation-review.json', true) } };
-  evidenceFiles.reconciliation.receiverCandidate = evidenceFiles.receiverCandidate;
+  evidenceFiles.reconciliation.receiverCandidate = evidenceFiles.reconciliation.proposal?.version === 4
+    ? evidenceFiles.receiverCandidate?.priorCandidate ?? evidenceFiles.receiverCandidate : evidenceFiles.receiverCandidate;
+  evidenceFiles.reconciliation.receiverUpgrade = evidenceFiles.receiverUpgrade;
+  evidenceFiles.reconciliation.queueRecords = evidenceFiles.queueRecords ?? {};
   if (!evidenceFiles.reconciliation.origins && await load(directory, 'execution-origins-v2.json', true)) fail('RECONCILIATION_REVISION_REQUIRED');
   verifyScannerAdoption(c, origin, evidenceFiles.scannerAdoption);
   verifyFoundationBudgets(c, evidenceFiles.foundationBudgets);
   if (operation === 'preview-image-publication') {
-    if (phaseName !== 'disabled-image-upgrade') fail('FIXED_DISABLED_IMAGE_PHASE_REQUIRED');
+    if (!['disabled-image-upgrade', 'disabled-queue-upgrade'].includes(phaseName)) fail('FIXED_DISABLED_IMAGE_PHASE_REQUIRED');
     const candidate = evidenceFiles.receiverCandidate;
+    if ((phaseName === 'disabled-queue-upgrade') !== (candidate?.version === 2)) fail('QUEUE_PROFILE_PHASE_REQUIRED');
     const inventory = await load(directory, 'receiver-publication-inventory.json');
     await verifyReceiverSource(candidate);
     const preview = prepareReceiverPublication(c, candidate, inventory, Date.now());
@@ -1851,11 +2079,58 @@ async function main() {
     // The raw ledger retains original receipts; never let its historical source replace an adopted readback.
     for (const name of Object.keys(adopted)) receipts[name] = adopted[name];
   }
-  const receiverUpgrade = await load(directory, 'receiver-upgrade.json', true);
+  const receiverUpgrade = evidenceFiles.receiverUpgrade;
   if (receiverUpgrade) {
     verifyDisabledImageRecord(c, receiverUpgrade);
     receipts = { ...receipts, receiverUpgrade };
   }
+  const queueRecords = evidenceFiles.queueRecords;
+  if (queueRecords) {
+    knownResourceIds(c, { queueRecords });
+    receipts = { ...receipts, queueRecords };
+  }
+  if (['prepare-queue', 'check-queue', 'execute-queue'].includes(operation)) {
+    if (!QUEUE_PHASES.includes(phaseName)) fail('FIXED_QUEUE_PHASE_REQUIRED');
+    const topology = verifyQueueTopology(c, evidenceFiles.queueTopology), source = await sourceDigest();
+    const identity = receipts.core.resources[ids(c).ingestIdentity];
+    const phase = buildQueuePhase(c, phaseName, topology, identity);
+    const priorRecords = receipts.queueRecords ?? {};
+    closed(priorRecords, phase.requiredReceipts);
+    if (phase.requiredReceipts.length) qualifiedQueueRecords(c, priorRecords, topology, phase.requiredReceipts.at(-1));
+    if (operation === 'prepare-queue') {
+      if (await load(directory, `${phaseName}-journal.json`, true) || await load(directory, `${phaseName}-approval.json`, true)) fail('PRESERVE_PHASE_HISTORY');
+      await saveImmutable(directory, `${phaseName}-plan.json`, { version: 1, phase, sourceSha256: source,
+        cost: durableQueueCost(), qualified: false, executionAuthorized: false, exactReviewRequired: true });
+      await saveImmutable(directory, `${phaseName}-template.json`, phase.template);
+      console.log('UNAPPROVED_QUEUE_PHASE_NO_CLOUD_CALLS'); return;
+    }
+    verifyQueueReview(c, topology, evidenceFiles.queueReview, source, Date.now());
+    const plan = await load(directory, `${phaseName}-plan.json`);
+    if (plan.sourceSha256 !== source || !isDeepStrictEqual(plan.phase, phase)) fail('PREPARED_PHASE_DRIFT');
+    if (operation === 'check-queue') {
+      await checkReadOnly(c, phase, origin, receipts, directory, evidenceFiles);
+      console.log('QUEUE_READONLY_CHECK_PASSED_NO_EXECUTION_AUTHORITY'); return;
+    }
+    const publication = await load(directory, 'queue-policy-publication.json');
+    closed(publication, ['commitSha', 'sourceSha256']);
+    if (publication.sourceSha256 !== source || await publishedSourceDigest(publication.commitSha) !== source) fail('QUEUE_SOURCE_NOT_PUBLISHED');
+    const approval = await load(directory, `${phaseName}-approval.json`);
+    const lockPath = resolve(here, '../../opentofu/telemetry/.operator-private/controller.lock'), lock = await open(lockPath, 'wx', 0o600);
+    try {
+      const controller = new QueueTopologyController(c, phase, topology, evidenceFiles.queueReview,
+        queueTopologyIO(c, phase, receipts, origin, evidenceFiles, directory));
+      const receipt = await controller.execute(approval);
+      const record = { version: 1, kind: 'reviewed-queue-phase', topology, review: evidenceFiles.queueReview,
+        publication, identity, priorRecords, phase, approval, preflight: await load(directory, `${phaseName}-preflight.json`),
+        providerOperations: await load(directory, 'queue-provider-operations.json'),
+        whatIf: await load(directory, `${phaseName}-what-if.json`), journal: await load(directory, `${phaseName}-journal.json`), receipt };
+      verifyQueueRecord(c, record);
+      await saveImmutable(directory, `${phaseName}-record.json`, record);
+      console.log('QUEUE_PHASE_QUALIFIED_RECEIVER_STILL_DISABLED');
+    } finally { await lock.close(); await rm(lockPath); }
+    return;
+  }
+  if (QUEUE_PHASES.includes(phaseName)) fail('FIXED_QUEUE_COMMAND_REQUIRED');
   if (['prepare-image', 'check-image', 'execute-image'].includes(operation)) {
     if (!IMAGE_PHASES.includes(phaseName)) fail('FIXED_DISABLED_IMAGE_PHASE_REQUIRED');
     const candidate = evidenceFiles.receiverCandidate, predecessor = evidenceFiles.windowPredecessor;
@@ -1872,7 +2147,7 @@ async function main() {
     if (operation === 'prepare-image') {
       if (await load(directory, `${phaseName}-journal.json`, true) || await load(directory, `${phaseName}-approval.json`, true)) fail('PRESERVE_PHASE_HISTORY');
       await saveImmutable(directory, `${phaseName}-plan.json`, { phase, sourceSha256: source, candidateSha256: digest(json(candidate)),
-        cost: firstReleaseCost(2), qualified: false, executionAuthorized: false });
+        cost: receiverCost(candidate), qualified: false, executionAuthorized: false });
       await saveImmutable(directory, `${phaseName}-template.json`, phase.template);
       console.log('DISABLED_IMAGE_PREVIEW_NO_CLOUD_CALLS'); return;
     }

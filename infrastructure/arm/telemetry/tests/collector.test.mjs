@@ -11,6 +11,8 @@ import { verifyWhatIf, assertBudget, permitFirstPush, verifyResource, executionI
 import { manifestJson, configJson } from './receiver-oci.fixture.mjs';
 import { candidateFixture, receiverSourceFixtureRun } from './receiver-upgrade.fixture.mjs';
 import { terminalReceiverWindow } from './receiver-window.fixture.mjs';
+import { queuePhaseFixture, queueCandidateFixture } from './durable-queue.fixture.mjs';
+import { queueTopology } from '../durable-queue.mjs';
 import { buildDisabledImagePhase, ReceiverUpgradeController, RECEIVER_SOURCE_INPUTS, verifyDisabledImageRecord } from '../receiver-upgrade.mjs';
 import { CollectorController, az, transport, validateReadOnly, verifyScannerAdoption, verifyOrigin, verifyProjectBudgetReceipt,
   checkReadOnly, load, saveImmutable, MAX_PRIVATE_ARTIFACT_BYTES, DIAGNOSTIC_API, privateDirectory, sourceDigest,
@@ -1150,7 +1152,8 @@ test('published source lookup uses immutable commit blobs and never evaluates hi
     if (args[0] === 'merge-base') { assert.deepEqual(args, ['merge-base', '--is-ancestor', commit, 'HEAD']); return { stdout: Buffer.alloc(0) }; }
     if (args[0] === 'ls-tree') {
       assert.deepEqual(args.slice(0, 4), ['ls-tree', '--name-only', commit, '--']);
-      assert(['infrastructure/arm/telemetry/arm-whatif.py', 'infrastructure/arm/telemetry/receiver-upgrade.mjs'].includes(args[4]));
+      assert(['infrastructure/arm/telemetry/arm-whatif.py', 'infrastructure/arm/telemetry/receiver-upgrade.mjs',
+        'infrastructure/arm/telemetry/durable-queue.mjs'].includes(args[4]));
       return { stdout: Buffer.alloc(0) };
     }
     assert.deepEqual(args.slice(0, 2), ['--no-pager', 'show']);
@@ -1159,9 +1162,9 @@ test('published source lookup uses immutable commit blobs and never evaluates hi
     return { stdout: Buffer.from(files[path]) };
   };
   assert.equal(await publishedSourceDigest(commit, run), expected.digest('hex'));
-  assert.equal(commands.length, 8);
+  assert.equal(commands.length, 9);
   for (const ref of ['HEAD', '--all', 'a'.repeat(39), 'g'.repeat(40)]) await assert.rejects(publishedSourceDigest(ref, run), /PUBLISHED_ORIGIN_INVALID/);
-  assert.equal(commands.length, 8);
+  assert.equal(commands.length, 9);
   const bridgePath = 'infrastructure/arm/telemetry/arm-whatif.py';
   files[bridgePath] = 'bounded historical bridge';
   const withBridge = createHash('sha256');
@@ -1861,7 +1864,7 @@ async function realReceiverUpgradeFixture(t, mode) {
     } };
   const io = receiverUpgradeIO(config, phase, receipts, adoption.origin, evidence, directory, invoke, options);
   const controller = new ReceiverUpgradeController(config, phase, candidate, predecessor.readback.app, io);
-  return { config, phase, candidate, predecessor, receipts, directory, approval, io, controller, calls, start, expiry, whatIf, source,
+  return { config, phase, candidate, predecessor, receipts, directory, approval, io, controller, calls, start, expiry, whatIf, source, reconciliation,
     foundationResources: adoption.origin.resources, foundationAbsences: adoption.origin.absent,
     get maximumReads() { return maximumReads; }, get whatIfRemainingMs() { return whatIfRemainingMs; }, get whatIfRequests() { return whatIfRequests; },
     get now() { return now; }, get writes() { return writes; }, get intentAt() { return intentAt; }, get app() { return app; } };
@@ -1891,6 +1894,45 @@ test('real receiverUpgradeIO completes a 100-second full preflight before separa
   for (const call of f.calls.filter(v => v.stage === 'rollout')) {
     assert(call.timeout <= Math.min(15000, receipt.operationDeadline - call.before));
   }
+});
+
+test('version-5 adoption binds runtime overlay and qualified queue records without reinterpreting v4 two-image history', async t => {
+  const f = await realReceiverUpgradeFixture(t, 'success'), receipt = await f.controller.execute(f.approval);
+  const record = { version: 1, kind: 'reviewed-disabled-image-change',
+    publication: { commitSha: 'c'.repeat(40), sourceSha256: f.source }, candidate: f.candidate,
+    predecessor: f.predecessor, prerequisiteReceipts: f.receipts, phase: f.phase, approval: f.approval,
+    preflight: await load(f.directory, `${f.phase.phase}-preflight.json`), whatIf: f.whatIf, journal: await f.io.loadJournal(), receipt };
+  verifyDisabledImageRecord(f.config, record);
+  const oldBytes = json(f.reconciliation.proposal), proposal = structuredClone(f.reconciliation.proposal);
+  const r = ids(f.config), overlay = { receiverUpgrade: record, queueRecords: {} };
+  Object.assign(proposal, { version: 5, receiverUpgradeSha256: digest(json(record)), queueRecordsSha256: digest(json({})),
+    checkedAt: new Date(f.now + 1).toISOString() });
+  proposal.results['disabled-app'].resources[r.app] = receipt.resources[r.app];
+  const verify = (p = proposal, candidate = f.candidate, o = overlay) =>
+    verifyReconciliation(f.config, f.reconciliation.foundation, f.reconciliation.origins, p, f.source, null, contract, candidate, o);
+  verify();
+  const missing = structuredClone(proposal); delete missing.receiverUpgradeSha256;
+  assert.throws(() => verify(missing));
+  const unknown = structuredClone(proposal);
+  const topology = queueTopology(f.config, 'unittest');
+  unknown.inventory.value.push({ id: topology.ids.account, createdTime: new Date(f.now).toISOString() });
+  assert.throws(() => verify(unknown), /UNEXPECTED_TELEMETRY_RESOURCE/);
+  const qf = { c: f.config, source: f.source, origin: { policyBaselineSha256: proposal.baselineSha256 },
+    topology, at: f.now, identity: f.receipts.core.resources[r.ingestIdentity], receipts: f.receipts };
+  const queue = queuePhaseFixture(qf, 'queue-storage');
+  await queue.controller.execute(queue.approval);
+  const withQueue = { ...overlay, queueRecords: { 'queue-storage': queue.record() } };
+  unknown.queueRecordsSha256 = digest(json(withQueue.queueRecords));
+  verify(unknown, f.candidate, withQueue);
+  const candidate = queueCandidateFixture(qf, f.candidate);
+  unknown.receiverCandidateSha256 = digest(json(candidate));
+  unknown.imagePublication.manifests = candidate.publication.manifests;
+  unknown.imagePublication.priorManifest = JSON.parse(f.candidate.profile.manifestJson);
+  unknown.imagePublication.candidateManifest = JSON.parse(candidate.profile.manifestJson);
+  verify(unknown, candidate, withQueue);
+  const withoutVersion = { ...unknown, version: 4 };
+  assert.throws(() => verify(withoutVersion, candidate, withQueue));
+  assert.equal(json(f.reconciliation.proposal), oldBytes);
 });
 
 test('real upgrade IO rejects late preflight/critical/body reads, mutable drift and post-intent observations beyond 120 seconds', async t => {
