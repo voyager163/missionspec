@@ -108,6 +108,46 @@ test('module imports are inert and startup fails with only a safe code', () => {
   assert.equal(started.stderr, 'CONFIG_MISSING\n');
 });
 
+test('production storage wiring stays inert while disabled and identity failures expose no raw errors', () => {
+  const script = `
+    import assert from 'node:assert/strict';
+    import { once } from 'node:events';
+    import { setImmediate as turn } from 'node:timers/promises';
+    import { ManagedIdentityCredential } from '@azure/identity';
+    import { createAzureStorage } from './dist/azure-storage.js';
+    import { createTelemetryServer } from './dist/server.js';
+    let tokens = 0;
+    ManagedIdentityCredential.prototype.getToken = async function () {
+      assert.equal(this.clientId, ${JSON.stringify(guid)});
+      tokens++;
+      throw new Error('PRIVATE_IDENTITY_TOKEN_ENV_RAW_ERROR');
+    };
+    const storage = await createAzureStorage(${JSON.stringify(parseConfig(environment).azure)});
+    assert.equal(tokens, 0);
+    const receiver = createTelemetryServer({ storage, enabled: false, limits: ${JSON.stringify(limits)} });
+    try {
+      assert.equal(tokens, 0);
+      receiver.server.listen(0, '127.0.0.1');
+      await once(receiver.server, 'listening');
+      const endpoint = 'http://127.0.0.1:' + receiver.server.address().port;
+      assert.equal((await fetch(endpoint + '/health/ready')).status, 204);
+      assert.equal((await fetch(endpoint + '/v1/events', { method: 'POST' })).status, 503);
+      assert.equal(tokens, 0);
+      receiver.setEnabled(true);
+      await turn();
+      assert.equal((await fetch(endpoint + '/health/ready')).status, 503);
+      assert.equal((await fetch(endpoint + '/health/live')).status, 204);
+      assert.equal((await fetch(endpoint + '/v1/events', { method: 'POST' })).status, 503);
+      assert.equal(tokens, 1);
+    } finally { receiver.stop(); }
+  `;
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    cwd: new URL('../', import.meta.url), env: {}, encoding: 'utf8', timeout: 5000,
+  });
+  assert.equal(child.status, 0, child.stderr);
+  assert.equal(child.stdout + child.stderr, '');
+});
+
 test('malformed requests and SDK failures cannot appear in service stdout/stderr', () => {
   const script = `
     import assert from 'node:assert/strict';

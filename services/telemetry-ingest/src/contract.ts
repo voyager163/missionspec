@@ -6,7 +6,14 @@ export type TelemetryRecord = Readonly<Record<string, string | number | null>> &
 };
 
 export interface Storage {
+  readonly readiness?: StorageReadiness;
   ingest(record: TelemetryRecord, signal: AbortSignal): Promise<void>;
+}
+
+export interface StorageReadiness {
+  setEnabled(enabled: boolean): void;
+  ready(): boolean;
+  stop(): void;
 }
 
 export function createProjector(): (value: unknown, receipt: Date) => TelemetryRecord | undefined {

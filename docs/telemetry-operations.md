@@ -147,6 +147,9 @@ no development-to-production destination fallback and no `.env` autoload. The
 embedding API is `createTelemetryServer({ storage, limits, enabled })`; local tests
 must inject storage rather than starting the production entrypoint with real Azure
 settings. No events are sent just by starting a configured service.
+An **enabled** listening receiver prepares its explicit managed-identity credential
+before accepting events. Disabled startup does not request a token or initialize
+identity over the network. Imports and constructors remain inert.
 
 Required environment:
 
@@ -208,7 +211,7 @@ work are bounded. Unsupported expectations/upgrades are rejected without reflect
 | 404 / 405 / 415 / 417 | Unknown route, wrong method, unsupported media/encoding, or expectation |
 | 408 / 413 / 431 | Body deadline, oversized body, or excessive header count |
 | 429 | Global in-memory request/upload-attempt budget exhausted |
-| 503 | Disabled admission, capacity exhausted, storage failure/timeout, or cancellation |
+| 503 | Disabled admission, identity not prepared, capacity exhausted, storage failure/timeout, or cancellation |
 
 Some parser, connection-limit, or disconnect conditions close the connection without
 a response. No error response echoes data, path, headers, or error details.
@@ -221,13 +224,46 @@ listeners/connections and bound process exit. A timeout can occur after Azure
 accepted a record: delivery is uncertain, not exactly-once. Neither sender nor server
 retries, queues, or replays it; do not manually resend uncertain events as a repair.
 
-`GET /health/live` is a status-only process check. `GET /health/ready` checks local
-admission capacity, not Azure authentication or stored-event visibility. A recent
-storage failure closes readiness for five seconds, then permits recovery without
-sending a synthetic probe. Stuck work stays unavailable. Disabled instances are
-**ready to reject events** so a disabled revision can deploy; events still get 503.
+`GET /health/live` is a status-only process check and remains 204 during identity
+preparation. For enabled production instances, `GET /health/ready` requires an
+actual, usable token obtained through the explicit `ManagedIdentityCredential`,
+as well as existing local admission/storage-health checks. Pending preparation
+returns empty/no-store 503 for readiness and events **before body/storage admission**;
+events are not held in a warmup queue. A recent storage failure still closes readiness
+for five seconds, then permits recovery without a synthetic upload. Stuck upload
+work retains its slot. Identity preparation does not clear these storage conditions.
+Disabled instances are **ready to reject events** so a disabled revision can deploy;
+events still get 503, with no token preparation.
+
+Identity preparation has one **20,000 ms** deadline, separate from the unchanged
+**650 ms event storage** and **1,000 ms client** budgets. This leaves a nominal ten
+seconds for process/listener startup within the existing 30-second startup probe
+window; neither that probe setting nor rollout budgets are extended. There is at most
+one outstanding preparation operation. On failure/deadline, readiness stays false
+until a controlled process restart; health checks, events and enable toggles cannot
+retry it. Abort is requested, but MI/MSAL work may continue: its slot remains occupied
+until settlement and a late token cannot turn a timed-out initialization into success.
+Disabling/shutdown aborts pending preparation with the same fail-closed behavior.
+Liveness does not claim identity success, cancellation or durable provider termination.
+
+Only actual SDK token results are held in memory and supplied to the ingestion SDK;
+the first admitted event does not repeat the identity HTTP request. Readiness is
+rechecked before storage admission. On the first enabled readiness/admission check at
+the earlier of SDK `refreshAfterTimestamp` or expiry minus **120,000 ms**, admission
+closes while the same singleflight preparation renews through the same credential.
+The two-minute margin matches the pinned bearer policy and falls inside MSAL's
+five-minute cache renewal window. There is no periodic poller or automatic event retry.
+Pinned MSAL can return its old cached token after awaiting a refresh-on renewal;
+one actual cache readback under the original deadline must supply a future freshness
+boundary, otherwise readiness fails closed. This is not a fabricated extension of
+token validity or a retry of a failed acquisition. Already-admitted uploads can still
+use a real unexpired token; closing admission does not revoke tokens or unsend events.
+
 Health endpoints perform no ingestion and are exempt from request quotas, but retain
-connection/header bounds. An initial 204 readiness result is not backend qualification.
+connection/header bounds. Enabled readiness proves **identity preparation**, not Azure
+Logs Ingestion connectivity, role authorization, successful upload or query visibility.
+An initial 204 readiness result is not backend qualification. Injected local test
+storage may omit the optional readiness lifecycle.
 
 The quotas apply across **all clients of one process**, without IP/user tracking.
 The module enforces one maximum replica and Single revision mode. Fixed windows are

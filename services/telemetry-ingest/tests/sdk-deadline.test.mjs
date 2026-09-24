@@ -14,8 +14,9 @@ import { LogsIngestionClient } from '@azure/monitor-ingestion';
 import { createDefaultHttpClient, createHttpHeaders } from '@azure/core-rest-pipeline';
 import { AzureLogger, setLogLevel } from '@azure/logger';
 import { createStorageAdapter, azureClientOptions } from '../dist/azure-storage.js';
+import { createIdentityReadiness, IDENTITY_PREPARATION_TIMEOUT_MS, IDENTITY_REFRESH_MARGIN_MS } from '../dist/identity-readiness.js';
 import { createTelemetryServer } from '../dist/server.js';
-import { event } from './helpers.mjs';
+import { event, post as receiverRequest, assertEmpty } from './helpers.mjs';
 
 const limits = { headersTimeoutMs: 150, bodyTimeoutMs: 150, storageTimeoutMs: 650,
   maxConnections: 128, maxConcurrentRequests: 32, maxConcurrentIngestions: 8,
@@ -23,7 +24,9 @@ const limits = { headersTimeoutMs: 150, bodyTimeoutMs: 150, storageTimeoutMs: 65
 const tokenMarker = 'SYNTHETIC_NONCREDENTIAL_NOT_FOR_LOGGING';
 const identityHeaderMarker = 'SYNTHETIC_IDENTITY_HEADER_NOT_FOR_LOGGING';
 const evidence = [];
-const cases = ['fast-control', 'slow-token', 'slow-upload', 'disconnect-token', 'disconnect-upload', 'eight-slot-quarantine'];
+const cases = ['fast-control', 'slow-token', 'slow-upload', 'disconnect-token', 'disconnect-upload', 'eight-slot-quarantine',
+  'prepared-disabled', 'prepared-slow-token', 'prepared-token-failure', 'prepared-token-deadline', 'prepared-expiry',
+  'prepared-refresh-after', 'prepared-slow-upload', 'prepared-disconnect-upload'];
 
 async function waitFor(condition, maximumMs = 1800) {
   const deadline = performance.now() + maximumMs;
@@ -32,12 +35,15 @@ async function waitFor(condition, maximumMs = 1800) {
     await delay(5);
   }
 }
-async function scenario(t, cert, key, name, { tokenDelayMs = 0, uploadDelayMs = 0 } = {}) {
+async function scenario(t, cert, key, name, {
+  tokenDelayMs = 0, uploadDelayMs = 0, prepared = false, enabled = true, tokenStatus = 200, tokenLifetimeSeconds = 3600,
+} = {}) {
   const started = performance.now(), observations = [], sockets = new Set(), timers = new Set();
   const stats = { identityRequests: 0, identityAbortEvents: 0, credentialStarts: 0, credentialEnds: 0,
     ingestionTransportEntries: 0, ingestionEntriesAlreadyAborted: 0, ingestionAbortEvents: 0,
     ingestionServerPosts: 0, ingestionServiceWorkCompleted: 0, adapterStarts: 0, adapterSettled: 0, unresolved: 0, maxUnresolved: 0, clientRequests: 0 };
   let clockOffset = 0, receiver;
+  let tokenClockMocked = false;
   const mark = (stage, fields = {}) => {
     const value = { stage, elapsedMs: performance.now() - started, ...fields }; observations.push(value); return value;
   };
@@ -72,8 +78,8 @@ async function scenario(t, cert, key, name, { tokenDelayMs = 0, uploadDelayMs = 
         request.abortSignal?.addEventListener('abort', () => { stats.identityAbortEvents++; mark('identity-transport-abort'); }, { once: true });
         await delay(tokenDelayMs);
         mark('identity-transport-resolve', { signalAborted: request.abortSignal?.aborted === true });
-        return { request, status: 200, headers: createHttpHeaders(),
-          bodyAsText: JSON.stringify({ access_token: tokenMarker, expires_on: String(Math.floor(Date.now() / 1000) + 3600),
+        return { request, status: tokenStatus, headers: createHttpHeaders(),
+          bodyAsText: tokenStatus !== 200 ? '{"error":"fixture_identity_failure"}' : JSON.stringify({ access_token: tokenMarker, expires_on: String(Math.floor(Date.now() / 1000) + tokenLifetimeSeconds),
             resource: 'https://monitor.azure.com', token_type: 'Bearer' }) };
       },
     },
@@ -85,7 +91,8 @@ async function scenario(t, cert, key, name, { tokenDelayMs = 0, uploadDelayMs = 
     try { return await getToken(scopes, options); }
     finally { stats.credentialEnds++; mark('credential-end'); }
   };
-  const client = new LogsIngestionClient(`https://127.0.0.1:${sink.address().port}`, credential, {
+  const identity = prepared ? createIdentityReadiness(credential) : undefined;
+  const client = new LogsIngestionClient(`https://127.0.0.1:${sink.address().port}`, identity?.credential ?? credential, {
     ...azureClientOptions,
     httpClient: {
       async sendRequest(request) {
@@ -103,10 +110,11 @@ async function scenario(t, cert, key, name, { tokenDelayMs = 0, uploadDelayMs = 
   });
   client.pipeline.removePolicy({ name: 'logPolicy' });
   client.pipeline.removePolicy({ name: 'tracingPolicy' });
-  const adapter = createStorageAdapter(client, 'dcr-' + 'a'.repeat(32));
+  const adapter = createStorageAdapter(client, 'dcr-' + 'a'.repeat(32), identity?.readiness);
   receiver = createTelemetryServer({
-    enabled: true, limits, monotonicNow: () => performance.now() + clockOffset,
+    enabled, limits, monotonicNow: () => performance.now() + clockOffset,
     storage: {
+      ...(identity ? { readiness: identity.readiness } : {}),
       async ingest(record, signal) {
         stats.adapterStarts++; stats.unresolved++; stats.maxUnresolved = Math.max(stats.maxUnresolved, stats.unresolved);
         mark('adapter-start');
@@ -151,8 +159,10 @@ async function scenario(t, cert, key, name, { tokenDelayMs = 0, uploadDelayMs = 
   }
   t.after(async () => {
     receiver.stop();
+    if (tokenClockMocked) t.mock.timers.reset();
     for (const timer of timers) clearTimeout(timer);
     await waitFor(() => stats.unresolved === 0);
+    await waitFor(() => stats.credentialStarts === stats.credentialEnds);
     const close = server => new Promise(resolve => {
       if (!server.listening) { resolve(); return; }
       server.close(resolve); server.closeAllConnections();
@@ -160,17 +170,23 @@ async function scenario(t, cert, key, name, { tokenDelayMs = 0, uploadDelayMs = 
     const closing = [close(receiver.server), close(sink)];
     for (const socket of sockets) socket.destroy();
     await Promise.all(closing);
-    const summary = { name, tokenDelayMs, uploadDelayMs, limits, stats: { ...stats }, counters: receiver.snapshot(),
+    const summary = { name, prepared, tokenDelayMs, uploadDelayMs, limits, stats: { ...stats }, counters: receiver.snapshot(),
       observations, maximumClientWallMs: 1000, cleanupComplete: true, network: 'MSI simulated in-memory; ingestion transport is real SDK over loopback TLS only' };
     const text = JSON.stringify(summary);
     for (const forbidden of [tokenMarker, identityHeaderMarker, clientId, '127.0.0.1', 'Authorization']) assert(!text.includes(forbidden));
     evidence.push(summary);
   });
   return { stats, observations, receiver, post, mark, untilSettled: () => waitFor(() => stats.unresolved === 0),
+    health: kind => receiverRequest(receiver.server.address().port, '', { method: 'GET', path: `/health/${kind ?? 'ready'}` }),
+    untilIdentitySettled: () => waitFor(() => stats.credentialStarts === stats.credentialEnds),
+    advanceTokenClock: ms => {
+      t.mock.timers.enable({ apis: ['Date'], now: Date.now() + ms });
+      tokenClockMocked = true;
+    },
     advanceQuarantine: () => { clockOffset += 5001; } };
 }
 
-test('pinned production SDK deadline, cancellation and drain faults stay local and bounded', { timeout: 20000 }, async t => {
+test('pinned production SDK readiness, deadline, cancellation and drain faults stay local and bounded', { timeout: 90000 }, async t => {
   const selected = process.env.MSR_LOCAL_FAULT_CASE;
   if (!selected) {
     for (const [name, expected] of [['@azure/identity', '4.13.3'], ['@azure/monitor-ingestion', '1.2.0'],
@@ -185,8 +201,9 @@ test('pinned production SDK deadline, cancellation and drain faults stay local a
       const env = { ...process.env, MSR_LOCAL_FAULT_CASE: name, ...(output ? { MSR_LOCAL_FAULT_EVIDENCE: output } : {}) };
       for (const key of Object.keys(env)) if (key.startsWith('NODE_TEST_')) delete env[key];
       try {
-        const result = await promisify(execFile)(process.execPath, ['--test', '--test-reporter=spec', fileURLToPath(import.meta.url)],
-          { env, timeout: 6000, maxBuffer: 65536 });
+        const result = await promisify(execFile)(process.execPath,
+          ['--no-turbofan', '--no-maglev', '--disable-sigusr1', '--test', '--test-reporter=spec', fileURLToPath(import.meta.url)],
+          { env, timeout: name === 'prepared-token-deadline' ? 28000 : 6000, maxBuffer: 65536 });
         if (output) {
           await writeFile(output.replace(/\.json$/u, '.log'), result.stdout + result.stderr, { mode: 0o600, flag: 'wx' });
           collected.push(...JSON.parse(await readFile(output, 'utf8')).cases);
@@ -216,7 +233,7 @@ test('pinned production SDK deadline, cancellation and drain faults stay local a
     for (const [name, value] of Object.entries(originalEnv)) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
     await rm(directory, { recursive: true });
     if (process.env.MSR_LOCAL_FAULT_EVIDENCE) {
-      assert.match(process.env.MSR_LOCAL_FAULT_EVIDENCE, /^infrastructure\/arm\/telemetry\/\.operator-private\/revision-[a-z0-9-]+\/sdk-fault-[a-z-]+\.json$/u);
+      assert.match(process.env.MSR_LOCAL_FAULT_EVIDENCE, /^(?:infrastructure\/arm\/telemetry\/\.operator-private\/revision-[a-z0-9-]+|services\/telemetry-ingest\/\.build-cache\/readiness-[a-z0-9-]+)\/sdk-fault-[a-z-]+\.json$/u);
       await writeFile(process.env.MSR_LOCAL_FAULT_EVIDENCE, JSON.stringify({ localOnly: true, cases: evidence }, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
     }
   });
@@ -299,4 +316,105 @@ test('pinned production SDK deadline, cancellation and drain faults stay local a
     assert.equal(f.receiver.snapshot().storage_timeout, 8); assert.equal(f.receiver.snapshot().busy, 2);
     assert.equal(f.receiver.snapshot().accepted, 1);
   });
+  await run('prepared-disabled', 'disabled receiver and real SDK constructors make zero token or upload requests', async t => {
+    const f = await scenario(t, cert, key, 'prepared-disabled', { prepared: true, enabled: false });
+    assertEmpty(assert, await f.health(), 204);
+    assertEmpty(assert, await f.health('live'), 204);
+    assert.equal((await f.post()).status, 503);
+    await delay(50);
+    assert.equal(f.stats.credentialStarts, 0);
+    assert.equal(f.stats.identityRequests, 0);
+    assert.equal(f.stats.ingestionTransportEntries, 0);
+  });
+  await run('prepared-slow-token', 'slow first identity acquisition is outside admission and the first event uses the prepared SDK token', async t => {
+    const f = await scenario(t, cert, key, 'prepared-slow-token', { prepared: true, tokenDelayMs: 900 });
+    assertEmpty(assert, await f.health(), 503);
+    assertEmpty(assert, await f.health('live'), 204);
+    for (let index = 0; index < 8; index++) assert.equal((await f.post()).status, 503);
+    assert.equal(f.stats.identityRequests, 1);
+    assert.equal(f.stats.adapterStarts, 0);
+    assert.equal(f.receiver.snapshot().storage_timeout, undefined);
+    await waitFor(() => f.receiver.ready());
+    f.mark('identity-prepared-ready');
+    assertEmpty(assert, await f.health(), 204);
+    const response = await f.post();
+    assert.equal(response.status, 204);
+    assert(response.elapsedMs < 650);
+    assert.equal(f.stats.credentialStarts, 1);
+    assert.equal(f.stats.identityRequests, 1);
+    assert.equal(f.stats.ingestionServerPosts, 1);
+    assert.equal(f.receiver.snapshot().accepted, 1);
+  });
+  await run('prepared-token-failure', 'actual SDK token failure remains unready without retries or uploads', async t => {
+    const f = await scenario(t, cert, key, 'prepared-token-failure', { prepared: true, tokenStatus: 400 });
+    await f.untilIdentitySettled();
+    for (let index = 0; index < 8; index++) {
+      assertEmpty(assert, await f.health(), 503);
+      assert.equal((await f.post()).status, 503);
+      f.receiver.setEnabled(true);
+    }
+    assertEmpty(assert, await f.health('live'), 204);
+    assert.equal(f.stats.identityRequests, 1);
+    assert.equal(f.stats.credentialStarts, 1);
+    assert.equal(f.stats.ingestionServerPosts, 0);
+  });
+  await run('prepared-token-deadline', '20s preparation deadline quarantines uncancelled MI work and ignores late token success', async t => {
+    const f = await scenario(t, cert, key, 'prepared-token-deadline',
+      { prepared: true, tokenDelayMs: IDENTITY_PREPARATION_TIMEOUT_MS + 1000 });
+    await waitFor(() => f.observations.some(v => v.stage === 'credential-caller-abort'), IDENTITY_PREPARATION_TIMEOUT_MS + 800);
+    f.mark('preparation-deadline-observed');
+    assert.equal(f.stats.credentialEnds, 0);
+    assert.equal(f.stats.identityAbortEvents, 0);
+    for (let index = 0; index < 8; index++) {
+      assertEmpty(assert, await f.health(), 503);
+      assert.equal((await f.post()).status, 503);
+      f.receiver.setEnabled(true);
+    }
+    await f.untilIdentitySettled();
+    assertEmpty(assert, await f.health(), 503);
+    assertEmpty(assert, await f.health('live'), 204);
+    assert.equal(f.stats.credentialStarts, 1);
+    assert.equal(f.stats.identityRequests, 1);
+    assert.equal(f.stats.ingestionServerPosts, 0);
+    assert.equal(f.receiver.snapshot().accepted, undefined);
+  });
+  for (const mode of ['expiry', 'refresh-after']) await run('prepared-' + mode, `SDK ${mode} metadata renews once outside admission and reuses the actual fresh result`, async t => {
+    const lifetime = mode === 'expiry' ? 3600 : 14400;
+    const f = await scenario(t, cert, key, 'prepared-' + mode,
+      { prepared: true, tokenDelayMs: 50, tokenLifetimeSeconds: lifetime });
+    await waitFor(() => f.receiver.ready());
+    assert.equal((await f.post()).status, 204);
+    assert.equal(f.stats.identityRequests, 1);
+    // MSAL derives refreshOn at half-life for MI tokens whose lifetime exceeds two hours.
+    f.advanceTokenClock(mode === 'expiry' ? lifetime * 1000 - IDENTITY_REFRESH_MARGIN_MS + 1000 : lifetime * 500 + 1000);
+    for (let index = 0; index < 20; index++) assert.equal(f.receiver.ready(), false);
+    assert.equal((await f.post()).status, 503);
+    assert.equal(f.stats.identityRequests, 2);
+    await waitFor(() => f.receiver.ready());
+    f.mark('identity-renewed-ready');
+    assert.equal((await f.post()).status, 204);
+    assert.equal(f.stats.identityRequests, 2);
+    assert.equal(f.stats.credentialStarts, mode === 'expiry' ? 2 : 3);
+    assert.equal(f.stats.ingestionServerPosts, 2);
+  });
+  for (const disconnect of [false, true]) {
+    const name = disconnect ? 'prepared-disconnect-upload' : 'prepared-slow-upload';
+    await run(name, 'prepared identity preserves upload deadline/disconnect cancellation without retry or a provider-stop claim', async t => {
+      const f = await scenario(t, cert, key, name, { prepared: true, uploadDelayMs: 900 });
+      await waitFor(() => f.receiver.ready());
+      const response = await f.post(disconnect ? { disconnectWhen: () => f.stats.ingestionServerPosts === 1 } : {});
+      if (disconnect) assert.equal(response.disconnected, true);
+      else {
+        assert.equal(response.status, 503);
+        assert(response.elapsedMs >= 640 && response.elapsedMs < 1000);
+      }
+      await f.untilSettled();
+      await waitFor(() => f.stats.ingestionServiceWorkCompleted === 1);
+      assert.equal(f.stats.identityRequests, 1);
+      assert.equal(f.stats.ingestionServerPosts, 1);
+      assert.equal(f.stats.ingestionAbortEvents, 1);
+      assert.equal(f.receiver.snapshot().accepted, undefined);
+      assert(f.observations.find(v => v.stage === 'ingestion-service-work-complete').connectionDestroyed);
+    });
+  }
 });

@@ -138,7 +138,7 @@ export function createTelemetryServer(options: ReceiverOptions) {
   function ready(): boolean {
     // A disabled receiver is ready to reject events, allowing a disabled revision to roll out.
     // After transient failure, reopen admission without sending a synthetic probe or replay.
-    return !stopping && (!enabled || (clock() >= storageUnavailableUntil &&
+    return !stopping && (!enabled || ((storage.readiness?.ready() ?? true) && clock() >= storageUnavailableUntil &&
       active.size < limits.maxConcurrentRequests && inflightStorage < limits.maxConcurrentIngestions &&
       (clock() - dayStart >= 86400000 || events < limits.eventsPerDay)));
   }
@@ -156,6 +156,7 @@ export function createTelemetryServer(options: ReceiverOptions) {
     if (request.url !== EVENT_ROUTE) return reject('not_found', 404);
     if (request.method !== 'POST') return reject('method', 405);
     if (!enabled || stopping) return reject('disabled', 503);
+    if (storage.readiness && !storage.readiness.ready()) return reject('busy', 503);
     if (active.size >= limits.maxConcurrentRequests) return reject('busy', 503);
     if (request.headers['content-type']?.toLowerCase() !== 'application/json' ||
         request.headers['content-encoding'] !== undefined) return reject('unsupported', 415);
@@ -179,6 +180,7 @@ export function createTelemetryServer(options: ReceiverOptions) {
       const record = project(value, now());
       if (!record) return reject('invalid', 400);
       if (controller.signal.aborted) return reject('cancelled', 503);
+      if (storage.readiness && !storage.readiness.ready()) return reject('busy', 503);
       if (inflightStorage >= limits.maxConcurrentIngestions) return reject('busy', 503);
       if (!quota('event')) return reject('quota', 429);
 
@@ -232,6 +234,9 @@ export function createTelemetryServer(options: ReceiverOptions) {
     void handle(request, response).catch(() => { count('http_error'); respond(response, 503); });
   });
   server.maxHeadersCount = MAX_HEADER_COUNT + 1;
+  server.once('listening', () => {
+    if (!stopping) storage.readiness?.setEnabled(enabled);
+  });
   server.maxConnections = limits.maxConnections;
   server.maxRequestsPerSocket = 1;
   // Node's automatic pipelining rejection lacks our response policy; close instead.
@@ -259,10 +264,12 @@ export function createTelemetryServer(options: ReceiverOptions) {
     snapshot: () => Object.freeze({ ...counters }),
     setEnabled(value: boolean) {
       enabled = value;
+      if (server.listening && !stopping) storage.readiness?.setEnabled(value);
       if (!value) for (const controller of active) controller.abort();
     },
     stop() {
       stopping = true;
+      storage.readiness?.stop();
       for (const controller of active) controller.abort();
       server.close();
       server.closeAllConnections();

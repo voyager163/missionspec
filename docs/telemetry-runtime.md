@@ -126,8 +126,8 @@ transport against loopback TLS. Each case runs in a separate process because
 MSAL caches its selected identity source. No Azure credential, token acquisition,
 remote ingestion, or receiver image build is performed.
 
-The bounded cases cover fast success, slow first token, slow ingestion,
-disconnect during either stage, and all eight unresolved production work slots.
+The bounded cases retain fast success, slow first token on the unprepared adapter,
+slow ingestion, disconnect during either stage, and all eight unresolved work slots.
 They retain the 650 ms storage timer and 1,000 ms local client ceiling. Timings
 include ordinary event-loop scheduling delay; they are not a claim that a
 JavaScript timer creates an atomic 650 ms provider stop.
@@ -139,7 +139,45 @@ ingestion HTTP transport rejects an already-aborted request before a late token
 can cause an ingestion POST. Once an ingestion request was already sent,
 cancellation is not proof of non-commit by a remote provider. These fault tests
 verify local safety/cleanup behavior, not the cause of a historical Azure timeout
-or justification for token warmup, retries, deadline changes or a new image.
+or a proof that Azure ingestion did not commit.
+
+### Identity readiness candidate
+
+Enabled startup now explicitly prepares the same UAMI credential before event
+admission. A separate **20-second**, singleflight preparation deadline leaves
+nominal startup headroom under the existing **30-second** startup probe setting.
+Liveness remains available; readiness and events are empty/no-store 503 while
+preparation is pending. Disabled startup remains ready to reject events and makes
+no token request. Constructors/imports remain inert. No HTTP limits, schema,
+retention, roles or production CLI endpoint are changed.
+
+The in-memory token supplied to the ingestion SDK is an actual credential result,
+not a boolean warmup hint. Enabled readiness/admission checks close admission at
+SDK `refreshAfterTimestamp` or expiry minus two minutes, whichever comes first,
+and renew singleflight through the same credential. No background polling loop is
+added. MSAL's old-result-after-refresh behavior requires at most one real cache
+readback under the same deadline. Failed/timed-out preparation remains unready
+until process restart, including after late completion. An abort request cannot
+prove that the platform identity operation stopped; the unresolved slot is never
+replaced. Existing storage-health/quarantine checks remain independently required.
+
+The pinned-SDK fixture additionally verifies disabled zero-network startup, a
+900 ms token preparation followed by an admitted event using that prepared token
+without another identity wire request, token failure, a real 20-second preparation
+deadline with late completion, SDK expiry/refresh-on renewal, and prepared-token
+upload timeout/disconnect behavior. These use in-memory noncredential identity
+responses and real loopback TLS ingestion only. Deterministic lifecycle tests also
+cover delayed timer dispatch, stale/invalid token results and disable/shutdown.
+No Azure calls are part of this qualification.
+
+Readiness now establishes identity preparation, **not** ingestion connectivity,
+authorization, delivery or stored-event visibility. The direct platform identity
+latency observation motivated removing first-use work from event admission; it did
+not measure the SDK cache path or prove upload latency. A new source-bearing image
+is needed to deploy this local source change. The published image, infrastructure
+pins and historical approvals remain unchanged. Source/notice delivery, exact-image
+scanner and native conditions, retained-digest cost/headroom and explicit parent
+rollout review are still required; these tests authorize no build, push or deployment.
 
 ### Native/bundled Node coverage is separate
 
