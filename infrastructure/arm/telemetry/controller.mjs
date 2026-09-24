@@ -11,7 +11,7 @@ import { IMAGE_PHASES, buildDisabledImagePhase, receiverAnchor, prepareReceiverP
   verifyReceiverCandidate, verifyDisabledImageRecord, verifyDisabledImageBefore, verifyImageRevision,
   ReceiverUpgradeController } from './receiver-upgrade.mjs';
 import { QUEUE_PHASES, durableQueueCost, buildQueuePhase, queueEnvironment, queueTopology,
-  qualifiedQueueRecords, verifyQueueTopology, verifyQueueReview, verifyQueueRecord, verifyQueueProviderOperations,
+  qualifiedQueueRecords, verifyQueueTopology, verifyQueueReview, verifyQueueRecord, verifyQueueProviderOperations, verifyQueueApiCatalog,
   verifyQueueResource, verifyQueuePrivacy, verifyQueueDrain, QueueTopologyController } from './durable-queue.mjs';
 import { PHASES, buildPhase, deploymentName, validateConfig, ids, digest, json, fail, sameId, storageContract, firstReleaseCost, assertOwned, RECEIVER_COMMAND,
   closed, budgetConfiguration, projectBudgetFilter, verifyFoundationBudgets, reconciliationBinding, assignmentRoleTargets,
@@ -1082,9 +1082,7 @@ export async function checkReadOnly(c, phase, origin, receipts, directory, evide
   }
   if (topology) {
     const storage = evidence.providers.value.find(v => v.namespace.toLowerCase() === 'microsoft.storage');
-    for (const type of ['storageAccounts', 'storageAccounts/queueServices', 'storageAccounts/queueServices/queues']) {
-      if (!storage.resourceTypes.some(v => v.resourceType?.toLowerCase() === type.toLowerCase() && v.apiVersions?.includes('2025-01-01'))) fail('QUEUE_API_NOT_REGISTERED');
-    }
+    verifyQueueApiCatalog(storage);
   }
   const baseline = digest(json({ policies: evidence.policies, defender: evidence.defender }));
   if (baseline !== origin.policyBaselineSha256) fail('POLICY_OR_SECURITY_DRIFT');

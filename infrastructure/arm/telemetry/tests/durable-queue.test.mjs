@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { buildPhase, deploymentName, digest, ids, json, firstReleaseCost, PHASES, SYNTHETIC_FIXTURES } from '../definition.mjs';
 import { buildQueuePhase, durableQueueCost, queueEnvironment, queueIds, queueTopology, QUEUE_AUTHORITY, QUEUE_PERMISSIONS,
   QUEUE_RUNTIME, verifyQueueReview, verifyQueueTopology, verifyQueueProviderOperations, verifyQueueResource, verifyQueueWhatIf,
-  verifyQueueRecord, qualifiedQueueRecords, verifyQueueDrain, verifyOfficialQueuePrices } from '../durable-queue.mjs';
+  verifyQueueRecord, qualifiedQueueRecords, verifyQueueDrain, verifyOfficialQueuePrices, verifyQueueApiCatalog } from '../durable-queue.mjs';
 import { QUEUE_SOURCE_INPUTS, RECEIVER_SOURCE_INPUTS, buildDisabledImagePhase, verifyReceiverCandidate, verifyReceiverProfile,
   prepareReceiverPublication, verifyReceiverInventory, verifyDisabledImageRecord } from '../receiver-upgrade.mjs';
 import { admissionFlag, verifyWhatIf, verifyWindowPredecessor, resourceContext } from '../policy.mjs';
@@ -72,13 +72,33 @@ test('minimal official queue permissions classify metadata as Action, add and re
   verifyQueueProviderOperations(catalog);
   const upper = structuredClone(catalog); upper.value.forEach(v => { v.name = v.name.toUpperCase(); });
   verifyQueueProviderOperations(upper);
+  const repeated = structuredClone(catalog);
+  repeated.value.push({ ...repeated.value[0], display: { provider: 'Microsoft Storage' } }, { ...repeated.value[0] });
+  verifyQueueProviderOperations(repeated);
   for (const mutate of [x => x.value.pop(), x => { x.value[0].isDataAction = true; },
-    x => { x.value[1].isDataAction = false; }, x => x.value.push(x.value[0]), x => { x.nextLink = 'more'; }]) {
+    x => { x.value[1].isDataAction = false; }, x => x.value.push({ ...x.value[0], isDataAction: true }), x => { x.nextLink = 'more'; }]) {
     const copy = structuredClone(catalog); mutate(copy); assert.throws(() => verifyQueueProviderOperations(copy));
   }
   const grant = buildQueuePhase(f.c, 'queue-assignment', f.topology, f.identity).resources[0];
   assert.equal(grant.expected.scope, f.topology.ids.queue); assert.equal(grant.expected.properties.principalId, f.identity.properties.principalId);
   assert.throws(() => buildQueuePhase(f.c, 'queue-assignment', f.topology), /IDENTITY_REQUIRED/);
+});
+
+test('Storage catalog may omit the documented queue child but cannot contradict its API version or parent registration', () => {
+  const provider = { namespace: 'Microsoft.Storage', registrationState: 'Registered', resourceTypes: [
+    { resourceType: 'storageAccounts', apiVersions: ['2025-01-01'] },
+    { resourceType: 'storageAccounts/queueServices', apiVersions: ['2025-01-01'] },
+  ] };
+  verifyQueueApiCatalog(provider);
+  verifyQueueApiCatalog({ ...provider, resourceTypes: [...provider.resourceTypes,
+    { resourceType: 'storageAccounts/queueServices/queues', apiVersions: ['2025-01-01'] }] });
+  for (const changed of [
+    { ...provider, registrationState: 'NotRegistered' },
+    { ...provider, resourceTypes: provider.resourceTypes.slice(0, 1) },
+    { ...provider, resourceTypes: [{ ...provider.resourceTypes[0], apiVersions: [] }, provider.resourceTypes[1]] },
+    { ...provider, resourceTypes: [...provider.resourceTypes,
+      { resourceType: 'storageAccounts/queueServices/queues', apiVersions: ['2024-01-01'] }] },
+  ]) assert.throws(() => verifyQueueApiCatalog(changed), /QUEUE_API_NOT_REGISTERED/);
 });
 
 test('unapproved topology, config swaps, expired/source-shifted review and namespace wildcards cannot authorize effects', async () => {

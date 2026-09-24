@@ -120,9 +120,19 @@ export function verifyQueueProviderOperations(value) {
   if (!Array.isArray(value?.value) || value.nextLink) fail('QUEUE_PROVIDER_OPERATIONS_REQUIRED');
   for (const [name, isDataAction] of [...QUEUE_PERMISSIONS.actions.map(v => [v, false]), ...QUEUE_PERMISSIONS.dataActions.map(v => [v, true])]) {
     const matches = value.value.filter(v => sameId(v.name, name));
-    if (matches.length !== 1 || matches[0].isDataAction !== isDataAction) fail('QUEUE_PROVIDER_PERMISSION_MISMATCH');
+    if (!matches.length || matches.some(v => v.isDataAction !== isDataAction)) fail('QUEUE_PROVIDER_PERMISSION_MISMATCH');
   }
   return digest(json(value));
+}
+export function verifyQueueApiCatalog(provider) {
+  if (!sameId(provider?.namespace, 'Microsoft.Storage') || provider.registrationState !== 'Registered' ||
+      !Array.isArray(provider.resourceTypes)) fail('QUEUE_API_NOT_REGISTERED');
+  for (const type of ['storageAccounts', 'storageAccounts/queueServices', 'storageAccounts/queueServices/queues']) {
+    const matches = provider.resourceTypes.filter(v => sameId(v.resourceType, type));
+    // The provider omits the documented child type; full template validation and what-if still verify it.
+    if ((!matches.length && type !== 'storageAccounts/queueServices/queues') ||
+        matches.some(v => !v.apiVersions?.includes(api))) fail('QUEUE_API_NOT_REGISTERED');
+  }
 }
 export function queueRoleProperties(c, topology) {
   verifyQueueTopology(c, topology);

@@ -66,6 +66,13 @@ not silently replace it with an account/group assignment.
 Fresh preflight also validates the exact three operations' `isDataAction`
 classifications from the fixed Storage provider catalog read; no keys/SAS
 operations are available.
+The actual catalog repeats metadata-read entries with the same classification.
+Every matching entry must agree; a missing or contradictory classification
+still fails. The registered account and queue-service API versions are required.
+The provider listing can omit the nested queue type documented in the
+[2025-01-01 queue resource contract](https://learn.microsoft.com/en-us/azure/templates/microsoft.storage/2025-01-01/storageaccounts/queueservices/queues);
+full template validation and exact child-resource what-if/readback remain
+mandatory. An advertised incompatible child API is not ignored.
 
 **Runtime binding.** The queued image receives only two additional values:
 `AZURE_QUEUE_URL` and `AZURE_QUEUE_RESOURCE_ID`. They must match the reviewed
