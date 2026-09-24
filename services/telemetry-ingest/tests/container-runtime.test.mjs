@@ -25,6 +25,10 @@ test('build and source handoff use fixed inputs without operator state or verifi
     assert(ignore.includes(`!services/telemetry-ingest/${file}`));
     assert(dockerfile.includes(`COPY services/telemetry-ingest/${file}`) || dockerfile.includes(` services/telemetry-ingest/${file}`));
   }
+  for (const file of ['licenses/external-service-licenses.json', 'licenses/external/nodable-entities-2.1.0/LICENSE.md']) {
+    assert(ignore.includes(`!${file}`));
+    assert(dockerfile.includes(`COPY ${file} `));
+  }
   assert(!ignore.includes('!.env'));
   assert(!ignore.includes('!.copilot/'));
   assert.doesNotMatch(dockerfile, /apt-get.*(?:upgrade|purge)|--ignore-unfixed|\.trivyignore/u);

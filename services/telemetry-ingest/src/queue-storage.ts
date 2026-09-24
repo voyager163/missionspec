@@ -1,7 +1,7 @@
 import type { QueueClient, DequeuedMessageItem } from '@azure/storage-queue';
 import type { UploadClient } from './azure-storage.js';
 import { STREAM_NAME } from './config.js';
-import { createQueuedRecordValidator } from './contract.js';
+import { createQueuedRecordValidator, encodeQueueMessage } from './contract.js';
 import type { Storage, StorageReadiness, TelemetryRecord } from './contract.js';
 
 export const QUEUE_TTL_SECONDS = 3600;
@@ -228,8 +228,8 @@ export function createQueueStorage(options: QueueStorageOptions): Storage & {
     snapshot: () => Object.freeze({ ...counters }),
     async ingest(record, signal) {
       signal.throwIfAborted();
-      const message = JSON.stringify(record);
-      if (!validate(message) || Buffer.byteLength(message) > 1024) throw new Error('QUEUE_RECORD_INVALID');
+      const message = encodeQueueMessage(record);
+      if (!validate(message)) throw new Error('QUEUE_RECORD_INVALID');
       if (!readiness.ready()) throw new Error('QUEUE_NOT_READY');
       enqueues++;
       admissions++;

@@ -1,7 +1,14 @@
 {
   "schemaVersion": 1,
-  "purpose": "Pinned legal-text evidence from the reviewed initial locked dependency sets; not a legal opinion. The --write inventory command must not update this file.",
+  "purpose": "Pinned legal-text evidence from reviewed locked dependency sets and the exact upstream service supplement; not a legal opinion. The --write inventory command must not update this file.",
   "reviewedFiles": [
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "750cb3fb6362804957ef52caaf9b5c824015be44d494637330d7cd8834d31d40",
+      "observedAt": [
+        "service:@nodable/entities@2.1.0:upstream-commit-f1c61a65e7b967c17b13822ef71e91bd25f17ce2/LICENSE (not shipped in npm tarball)"
+      ]
+    },
     {
       "licenseExpression": "MIT",
       "retainedSha256": "ed11982ff1ff5818970e943bf9aefc3909dbc65e5f0b3465a969c73a8bca5bb2",

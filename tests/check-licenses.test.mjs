@@ -7,8 +7,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import {
-  assertLicenseEvidence, assertMetadataExceptionPin, collectScope, packageNoticeProblems, runLicenseCheck, runtimeGraph,
-  verifyOutputs,
+  assertExternalServiceNoticePin, assertLicenseEvidence, assertMetadataExceptionPin, collectScope,
+  EXTERNAL_SERVICE_NOTICE_CATALOG, packageNoticeProblems, runLicenseCheck, runtimeGraph, verifyOutputs,
 } from '../scripts/check-licenses.mjs';
 
 const repository = fileURLToPath(new URL('../', import.meta.url));
@@ -87,6 +87,123 @@ function fixture(t, { scope = 'cli', name = 'alpha', version = '1.0.0', license 
   state.save();
   return state;
 }
+
+function entitiesFixture(t, scope = 'service') {
+  const catalog = JSON.parse(readFileSync(path.join(repository, EXTERNAL_SERVICE_NOTICE_CATALOG), 'utf8'));
+  const notice = catalog.notices[0];
+  const state = fixture(t, { scope, name: notice.name, version: notice.version });
+  const source = state.lock.packages['node_modules/@nodable/entities'];
+  source.resolved = notice.resolved;
+  source.integrity = notice.integrity;
+  rmSync(path.join(state.base, 'node_modules/@nodable/entities/LICENSE'));
+  writeJson(path.join(state.root, EXTERNAL_SERVICE_NOTICE_CATALOG), catalog);
+  mkdirSync(path.dirname(path.join(state.root, notice.retainedFile)), { recursive: true });
+  writeFileSync(path.join(state.root, notice.retainedFile), readFileSync(path.join(repository, notice.retainedFile)));
+  state.save();
+  return { ...state, source, catalog, notice };
+}
+
+test('exact upstream service supplement retains full bytes and does not pretend the npm tarball shipped a license', t => {
+  const state = entitiesFixture(t);
+  const first = collectScope(state.root, 'service');
+  assert.deepEqual(first, collectScope(state.root, 'service'));
+  const entry = first.inventory.runtimePackages[0], document = entry.legalFiles[0];
+  assert.equal(entry.name, '@nodable/entities');
+  assert.equal(document.path, state.notice.retainedFile);
+  assert.equal(document.sourceSha256, state.notice.sourceSha256);
+  assert.equal(document.retainedSha256, state.notice.retainedSha256);
+  assert.deepEqual(document.provenance, { ...state.notice, scope: 'service', pathBase: 'repository' });
+  const notices = first.outputs.get('licenses/TELEMETRY_THIRD_PARTY_NOTICES');
+  assert(notices.includes(readFileSync(path.join(repository, state.notice.retainedFile), 'utf8')));
+  assert.match(notices, /NOT shipped in the npm tarball/u);
+  assert(notices.includes(state.notice.sourceUrl));
+  assert(notices.includes(state.notice.sourceBlobSha1));
+  runLicenseCheck(state.root, { scope: 'service', write: true });
+  assert.doesNotThrow(() => runLicenseCheck(state.root, { scope: 'service' }));
+  assert.throws(() => readFileSync(path.join(state.base, 'node_modules/@nodable/entities/LICENSE')), /ENOENT/u);
+});
+
+test('upstream supplement cannot widen package/version/tarball/scope/expression or source metadata', t => {
+  const state = entitiesFixture(t);
+  const source = { ...state.source, name: '@nodable/entities' };
+  assert.doesNotThrow(() => assertExternalServiceNoticePin('service', source, 'MIT', state.catalog));
+  for (const change of [
+    { name: 'another-mit-package' }, { version: '2.2.0' }, { version: '3.0.0' },
+    { integrity }, { resolved: 'https://registry.npmjs.org/@nodable/entities/-/entities-3.0.0.tgz' },
+  ]) assert.throws(() => assertExternalServiceNoticePin('service', { ...source, ...change }, 'MIT', state.catalog), /exact reviewed/u);
+  assert.throws(() => assertExternalServiceNoticePin('cli', source, 'MIT', state.catalog), /exact reviewed/u);
+  assert.throws(() => assertExternalServiceNoticePin('service', source, 'ISC', state.catalog), /exact reviewed/u);
+  for (const change of [
+    { gitHead: '0'.repeat(40) }, { sourceBlobSha1: '0'.repeat(40) }, { sourceSha256: '0'.repeat(64) },
+    { retainedSha256: '0'.repeat(64) }, { repository: 'https://github.com/other/repository' },
+    { sourcePath: 'different/LICENSE' }, { sourceUrl: state.notice.sourceUrl.replace(state.notice.gitHead, 'main') },
+    { shippedInPackage: true }, { retainedFile: '../outside/LICENSE' }, { extra: 'waiver' }, { extra: undefined },
+  ]) {
+    const catalog = { ...state.catalog, notices: [{ ...state.notice, ...change }] };
+    assert.throws(() => assertExternalServiceNoticePin('service', source, 'MIT', catalog), /exact reviewed/u);
+  }
+  assert.throws(() => assertExternalServiceNoticePin('service', source, 'MIT', {
+    ...state.catalog, notices: [state.notice, state.notice],
+  }), /exact reviewed/u);
+  assert.throws(() => collectScope(entitiesFixture(t, 'cli').root, 'cli'), /exact reviewed/u);
+});
+
+test('external notice missing/changed bytes or unreviewed fingerprint fail before regeneration', t => {
+  const state = entitiesFixture(t), file = path.join(state.root, state.notice.retainedFile);
+  const bytes = readFileSync(file);
+  const changed = Buffer.from(bytes);
+  changed[0] ^= 1;
+  writeFileSync(file, changed);
+  assert.throws(() => collectScope(state.root, 'service'), /source bytes\/hash/u);
+  writeFileSync(file, Buffer.concat([bytes, Buffer.from('Changed terms.\n')]));
+  assert.throws(() => runLicenseCheck(state.root, { scope: 'service', write: true }), /source bytes\/hash/u);
+  writeFileSync(file, bytes.toString('utf8').replace(/\n/g, '\r\n'));
+  assert.throws(() => collectScope(state.root, 'service'), /source bytes\/hash/u);
+  rmSync(file);
+  assert.throws(() => collectScope(state.root, 'service'), /ENOENT/u);
+  writeFileSync(file, bytes);
+  const reviewedPath = path.join(state.root, 'licenses/reviewed-texts.json');
+  const reviewed = JSON.parse(readFileSync(reviewedPath, 'utf8'));
+  reviewed.reviewedFiles = reviewed.reviewedFiles.filter(v => v.retainedSha256 !== state.notice.retainedSha256);
+  writeJson(reviewedPath, reviewed);
+  assert.throws(() => runLicenseCheck(state.root, { scope: 'service', write: true }), /Unreviewed legal-file fingerprint/u);
+  assert.throws(() => readFileSync(path.join(state.root, 'licenses/telemetry-runtime.json')), /ENOENT/u);
+});
+
+test('missing or broadened external catalog cannot be repaired implicitly by --write', t => {
+  const state = entitiesFixture(t);
+  const file = path.join(state.root, EXTERNAL_SERVICE_NOTICE_CATALOG);
+  rmSync(file);
+  assert.throws(() => runLicenseCheck(state.root, { scope: 'service', write: true }), /ENOENT/u);
+  writeJson(file, { ...state.catalog, notices: [{ ...state.notice, version: '3.0.0' }] });
+  assert.throws(() => runLicenseCheck(state.root, { scope: 'service', write: true }), /exact reviewed/u);
+  assert.throws(() => readFileSync(path.join(state.root, 'licenses/telemetry-runtime.json')), /ENOENT/u);
+});
+
+test('the supplement rejects an injected node_modules license and is not a general missing-MIT allowance', t => {
+  const state = entitiesFixture(t);
+  writeFileSync(path.join(state.base, 'node_modules/@nodable/entities/LICENSE'),
+    readFileSync(path.join(state.root, state.notice.retainedFile)));
+  assert.throws(() => collectScope(state.root, 'service'), /Do not inject a license into node_modules/u);
+  const unrelated = fixture(t, { scope: 'service' });
+  rmSync(path.join(unrelated.base, 'node_modules/alpha/LICENSE'));
+  writeJson(path.join(unrelated.root, EXTERNAL_SERVICE_NOTICE_CATALOG), state.catalog);
+  assert.throws(() => collectScope(unrelated.root, 'service'), /No retained license file/u);
+});
+
+test('external notice path symlinks fail closed', t => {
+  const state = entitiesFixture(t), file = path.join(state.root, state.notice.retainedFile);
+  rmSync(file);
+  try { symlinkSync(path.join(repository, state.notice.retainedFile), file); }
+  catch (error) {
+    if (process.platform === 'win32' && error.code === 'EPERM') {
+      t.diagnostic('Windows runner disallows symlink creation; exact retained-path pin tested separately.');
+      return;
+    }
+    throw error;
+  }
+  assert.throws(() => collectScope(state.root, 'service'), /Refusing symlink/u);
+});
 
 test('runtime inventory is deterministic, retains exact legal content, and detects drift', (t) => {
   const state = fixture(t);
@@ -273,7 +390,8 @@ test('npm preview must ship checked notices and must exclude service material', 
   assert.deepEqual(packageNoticeProblems({ [name]: { name, files } }, name, 42), []);
   assert.match(packageNoticeProblems([{ name, files: files.slice(0, 2) }], name, 42).join(), /not shipped/);
   assert.match(packageNoticeProblems([{ name, files }], name, 43).join(), /byte|size/);
-  for (const path of ['licenses/telemetry-runtime.json', 'licenses/TELEMETRY_THIRD_PARTY_NOTICES', 'services/telemetry-ingest/package.json']) {
+  for (const path of ['licenses/telemetry-runtime.json', 'licenses/TELEMETRY_THIRD_PARTY_NOTICES', 'services/telemetry-ingest/package.json',
+    EXTERNAL_SERVICE_NOTICE_CATALOG, 'licenses/external/nodable-entities-2.1.0/LICENSE.md']) {
     assert.match(packageNoticeProblems([{ name, files: [...files, { path, size: 1 }] }], name, 42).join(), /leaked/);
   }
   assert.match(packageNoticeProblems([{ name, files: [{ path: '../THIRD_PARTY_NOTICES' }] }], name, 42).join(), /Unsafe/);

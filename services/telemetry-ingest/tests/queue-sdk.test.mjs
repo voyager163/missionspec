@@ -6,14 +6,15 @@ import { once } from 'node:events';
 import { readFile, writeFile } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { gunzipSync } from 'node:zlib';
-import { QueueClient } from '@azure/storage-queue';
+import { QueueClient, newPipeline } from '@azure/storage-queue';
 import { LogsIngestionClient } from '@azure/monitor-ingestion';
 import { createDefaultHttpClient, createPipelineRequest, createHttpHeaders } from '@azure/core-rest-pipeline';
 import { toCompatResponse } from '@azure/core-http-compat';
 import { AzureLogger, setLogLevel } from '@azure/logger';
 import { createIdentityReadiness, STORAGE_SCOPE, INGESTION_SCOPE } from '../dist/identity-readiness.js';
 import { createQueueStorage } from '../dist/queue-storage.js';
-import { azureClientOptions, queueClientOptions } from '../dist/azure-storage.js';
+import { azureClientOptions, queueClientOptions, queueXmlSafetyPolicy } from '../dist/azure-storage.js';
+import { createProjector, encodeQueueMessage } from '../dist/contract.js';
 import { createTelemetryServer } from '../dist/server.js';
 import { event, post, assertEmpty } from './helpers.mjs';
 
@@ -27,10 +28,15 @@ async function until(condition, maximum = 5000) {
   while (!condition()) { assert(performance.now() < deadline, 'LOCAL_QUEUE_FIXTURE_WAIT'); await delay(5); }
 }
 const evidence = [];
-async function fixture(t, { enabled = true, sendStatus = 201, sendDelay = 0, uploadDelay = 0, metadataCount, monitorFail = false } = {}) {
+async function fixture(t, { enabled = true, sendStatus = 201, sendDelay = 0, uploadDelay = 0, metadataCount,
+  monitorFail = false, preloadRecords = [], metadataBody = '' } = {}) {
   setLogLevel(undefined); AzureLogger.log = () => {};
   const { key, cert } = JSON.parse(await readFile(new URL('loopback-tls.json', import.meta.url), 'utf8'));
   const items = [], stats = { metadata: 0, send: 0, receive: 0, deletes: 0, upload: 0, completedUpload: 0, tokens: [] };
+  for (const [index, record] of preloadRecords.entries()) {
+    items.push({ id: `preloaded-${index}`, receipt: 'receipt', inserted: new Date(),
+      expires: new Date(Date.now() + 3600000), visible: new Date(), attempts: 0, text: encodeQueueMessage(record) });
+  }
   const timers = new Set(), sockets = new Set();
   const later = (callback, ms) => {
     const timer = setTimeout(() => { timers.delete(timer); callback(); }, ms);
@@ -60,7 +66,7 @@ async function fixture(t, { enabled = true, sendStatus = 201, sendDelay = 0, upl
       if (url.searchParams.get('comp') === 'metadata') {
         assert.equal(request.method, 'GET');
         stats.metadata++;
-        reply(200, '', { 'x-ms-approximate-messages-count': String(metadataCount ?? items.length) });
+        reply(200, metadataBody, { 'x-ms-approximate-messages-count': String(metadataCount ?? items.length) });
       } else if (request.method === 'POST') {
         stats.send++;
         assert.equal(url.searchParams.get('messagettl'), '3600');
@@ -68,6 +74,10 @@ async function fixture(t, { enabled = true, sendStatus = 201, sendDelay = 0, upl
         assert.equal(request.headers['content-type'], 'application/xml');
         const text = xmlDecode(/<MessageText>([\s\S]*?)<\/MessageText>/.exec(body.toString())[1]);
         assert(Buffer.byteLength(text) <= 1024);
+        const decoded = Buffer.from(text, 'base64');
+        assert.equal(decoded.toString('base64'), text);
+        assert(decoded.byteLength <= 1024);
+        assert.equal(Object.keys(JSON.parse(decoded.toString('utf8'))).length, 9);
         const item = { id: `message-${stats.send}`, receipt: 'receipt', inserted: new Date(),
           expires: new Date(Date.now() + 3600000), visible: new Date(), attempts: 0, text };
         // Persistence occurs before replying; a lost reply leaves an uncertain but durable message.
@@ -113,7 +123,7 @@ async function fixture(t, { enabled = true, sendStatus = 201, sendDelay = 0, upl
     if (monitorFail) throw new Error('PRIVATE_MONITOR_FAILURE');
     return { token: 'fixture-monitor-token', expiresOnTimestamp: Date.now() + 3600000 };
   } });
-  const queue = new QueueClient(`${endpoint}/account/events`, storageIdentity.credential, {
+  const pipeline = newPipeline(storageIdentity.credential, {
     ...queueClientOptions, httpClient: { async sendRequest(request) {
       assert.equal(new URL(request.url).origin, endpoint);
       const core = createPipelineRequest({ url: request.url, method: request.method,
@@ -122,6 +132,8 @@ async function fixture(t, { enabled = true, sendStatus = 201, sendDelay = 0, upl
       return toCompatResponse(await transport.sendRequest(core));
     } },
   });
+  pipeline.factories.push(queueXmlSafetyPolicy);
+  const queue = new QueueClient(`${endpoint}/account/events`, pipeline);
   const upload = new LogsIngestionClient(endpoint, monitorIdentity.credential, {
     ...azureClientOptions, httpClient: { sendRequest(request) {
       assert.equal(new URL(request.url).origin, endpoint);
@@ -156,7 +168,7 @@ test('actual pinned Queue SDK: durable XML send/TTL/auth ACK yields 202; >4.8s L
   assert.equal(f.items.length, 1);
   assert.equal(f.storage.snapshot().queued, 1);
   assert.equal(f.storage.snapshot().logs_delivered, undefined);
-  const persisted = JSON.parse(f.items[0].text);
+  const persisted = JSON.parse(Buffer.from(f.items[0].text, 'base64').toString('utf8'));
   assert.deepEqual(Object.keys(persisted).sort(), [...Object.keys(event), 'TimeGenerated'].sort());
   await until(() => f.stats.upload === 1);
   assert.equal(f.stats.deletes, 0);
@@ -168,6 +180,48 @@ test('actual pinned Queue SDK: durable XML send/TTL/auth ACK yields 202; >4.8s L
   assert.deepEqual(f.stats.tokens.sort(), ['monitor', 'storage']);
   evidence.push({ case: 'slow-logs', enqueueMs: response.elapsedMs, logsDelayMs: 5200,
     queued: f.storage.snapshot().queued, delivered: f.storage.snapshot().logs_delivered, sendRequests: f.stats.send, uploads: f.stats.upload });
+});
+
+test('actual Queue SDK receives all 32 quote-escaped XML messages with Base64 projections and unchanged timestamps', { timeout: 10000 }, async t => {
+  const project = createProjector();
+  const records = Array.from({ length: 32 }, (_, index) => project({
+    ...event, cliVersion: '999999.999999.999999-alpha.999999',
+    operation: index % 2 ? 'principles' : 'implement',
+  }, new Date(Date.now() - (index + 1) * 1000)));
+  const plainQuoteCount = records.reduce((sum, record) => sum + (xmlEscape(JSON.stringify(record)).match(/&quot;/g) ?? []).length, 0);
+  assert(plainQuoteCount >= 1024, 'The test must cover the previously failing full-size quote-heavy batch.');
+  for (const record of records) {
+    const encoded = encodeQueueMessage(record);
+    assert.equal(xmlEscape(encoded), encoded);
+    assert(Buffer.byteLength(encoded) <= 1024);
+  }
+  const f = await fixture(t, { preloadRecords: records });
+  await f.ready();
+  await until(() => f.stats.deletes === 32, 6000);
+  assert.equal(f.stats.receive, 1);
+  assert.equal(f.stats.upload, 1);
+  assert.equal(f.stats.lastBatch.length, 32);
+  assert.deepEqual(f.stats.lastBatch, records);
+  assert.equal(f.items.length, 0);
+  assert.equal(f.storage.snapshot().logs_delivered, 32);
+  assert.equal(f.storage.snapshot().queue_receive_unknown, undefined);
+  evidence.push({ case: 'base64-32-escaped-xml', sourceQuoteEntitiesWithoutCodec: plainQuoteCount,
+    received: 32, uploaded: 32, deleted: 32, uploadRequests: 1, messageCodec: 'base64-json-v1' });
+});
+
+test('actual Queue pipeline retains finite entity and DTD protections before SDK XML parsing', { timeout: 10000 }, async t => {
+  for (const body of [
+    `<Messages>${'&quot;'.repeat(1001)}</Messages>`,
+    '<!DOCTYPE Messages [<!ENTITY test "value">]><Messages>&test;</Messages>',
+  ]) await t.test('rejects unsafe metadata XML', async t => {
+    const f = await fixture(t, { metadataBody: body });
+    await until(() => f.storage.snapshot().queue_properties_failed === 1);
+    assertEmpty(assert, await f.health(), 503);
+    assertEmpty(assert, await f.post(), 503);
+    assert.equal(f.stats.metadata, 1);
+    assert.equal(f.stats.send, 0);
+    assert.equal(f.stats.receive, 0);
+  });
 });
 
 test('actual Queue SDK never retries failed/redirected sends; timeout after persistence stays unknown', { timeout: 16000 }, async t => {

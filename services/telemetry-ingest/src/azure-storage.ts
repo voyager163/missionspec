@@ -1,5 +1,5 @@
 import type { LogsIngestionClientOptions } from '@azure/monitor-ingestion';
-import type { StoragePipelineOptions } from '@azure/storage-queue';
+import type { RequestPolicyFactory, StoragePipelineOptions } from '@azure/storage-queue';
 import type { Debugger } from '@azure/logger';
 import type { AzureConfig } from './config.js';
 import { STREAM_NAME } from './config.js';
@@ -36,6 +36,30 @@ export const queueClientOptions: StoragePipelineOptions & Pick<LogsIngestionClie
   audience: STORAGE_SCOPE,
 };
 
+export const MAX_QUEUE_XML_BYTES = 100000;
+export const MAX_QUEUE_XML_ENTITIES = 1000;
+
+// Parser 5.7 delegates entity handling with different defaults. Retain the bounded Queue
+// response contract without disabling entities or allowing DTD expansion.
+export const queueXmlSafetyPolicy: RequestPolicyFactory = {
+  create(next) {
+    return {
+      async sendRequest(request) {
+        const response = await next.sendRequest(request);
+        const text = response.bodyAsText;
+        if (typeof text === 'string') {
+          if (Buffer.byteLength(text, 'utf8') > MAX_QUEUE_XML_BYTES || /<!DOCTYPE/i.test(text)) throw new Error('QUEUE_XML_UNSAFE');
+          let entities = 0;
+          for (const _ of text.matchAll(/&(?:#[0-9]+|#x[0-9a-f]+|[a-z_][a-z0-9_.:-]*);/gi)) {
+            if (++entities > MAX_QUEUE_XML_ENTITIES) throw new Error('QUEUE_XML_UNSAFE');
+          }
+        }
+        return response;
+      },
+    };
+  },
+};
+
 /** The client is injected so all behavior can be exercised without Azure credentials. */
 export function createStorageAdapter(client: UploadClient, ruleId: string, readiness?: StorageReadiness): Storage {
   return {
@@ -53,7 +77,7 @@ export async function createAzureStorage(config: AzureConfig): Promise<Storage> 
   const { AzureLogger, setLogLevel } = await import('@azure/logger');
   setLogLevel(undefined);
   AzureLogger.log = () => {};
-  const [{ ManagedIdentityCredential }, { LogsIngestionClient }, { QueueClient }] = await Promise.all([
+  const [{ ManagedIdentityCredential }, { LogsIngestionClient }, { QueueClient, newPipeline }] = await Promise.all([
     import('@azure/identity'),
     import('@azure/monitor-ingestion'),
     import('@azure/storage-queue'),
@@ -68,7 +92,9 @@ export async function createAzureStorage(config: AzureConfig): Promise<Storage> 
   const client = new LogsIngestionClient(config.endpoint, consumer.credential, azureClientOptions);
   client.pipeline.removePolicy({ name: 'logPolicy' });
   client.pipeline.removePolicy({ name: 'tracingPolicy' });
-  const queue = new QueueClient(config.queueUrl, producer.credential, queueClientOptions);
+  const pipeline = newPipeline(producer.credential, queueClientOptions);
+  pipeline.factories.push(queueXmlSafetyPolicy);
+  const queue = new QueueClient(config.queueUrl, pipeline);
   return createQueueStorage({
     queue, upload: client, ruleId: config.ruleId,
     producerIdentity: producer.readiness, consumerIdentity: consumer.readiness,

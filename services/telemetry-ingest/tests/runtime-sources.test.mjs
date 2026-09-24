@@ -65,6 +65,7 @@ async function fixture(root) {
   const snapshotFiles = [
     'LICENSE', '.dockerignore', 'assets/schemas/telemetry-event.schema.json',
     'scripts/check-licenses.mjs', 'licenses/reviewed-texts.json', 'licenses/telemetry-runtime.json', 'licenses/TELEMETRY_THIRD_PARTY_NOTICES',
+    'licenses/external-service-licenses.json', 'licenses/external/nodable-entities-2.1.0/LICENSE.md',
     ...['Dockerfile', 'package.json', 'package-lock.json', 'tsconfig.json', 'scripts/schema.mjs', 'scripts/runtime-sources.mjs',
       'scripts/container-smoke.mjs', 'scripts/container-qualification.mjs',
       'src/main.ts', 'schema/provenance.json', 'tests/runtime-sources.test.mjs'].map(f => `services/telemetry-ingest/${f}`),
@@ -228,10 +229,22 @@ test('offline end-to-end assembly ships sources, manifest, notices and service s
   assert.ok(manifest.files.some(f => f.path.endsWith('/src/main.ts')));
   assert.ok(manifest.files.some(f => f.path.endsWith('/Dockerfile')));
   assert.ok(manifest.files.some(f => f.path === 'service/services/telemetry-ingest/runtime-sources.lock.json'));
+  for (const file of ['licenses/external-service-licenses.json', 'licenses/external/nodable-entities-2.1.0/LICENSE.md']) {
+    assert.ok(manifest.files.some(f => f.path === `service/${file}`));
+  }
   assert.ok(!manifest.files.some(f => f.path.endsWith('linux-x64.tar.gz')));
   assert.ok(!manifest.files.some(f => f.path.includes('node_modules')));
   assert.match(await fs.readFile(path.join(f.output, 'runtime-notices/NOTICE'), 'utf8'), /not.*\n.*a future source offer/);
   await assert.rejects(assemble(f), /must not already exist/);
+});
+
+test('corresponding-source assembly requires the reviewed external service license inputs', async t => {
+  for (const file of ['licenses/external-service-licenses.json', 'licenses/external/nodable-entities-2.1.0/LICENSE.md']) {
+    const f = await fixture(await scratch(t));
+    await fs.rm(path.join(f.projectRoot, file));
+    await assert.rejects(assemble(f), /ENOENT/);
+    await assert.rejects(fs.stat(f.output), /ENOENT/);
+  }
 });
 
 test('source snapshots fail closed on missing build scripts and private/symlink additions', async t => {

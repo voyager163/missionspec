@@ -340,6 +340,7 @@ const SNAPSHOT_FILES = [
   'LICENSE', '.dockerignore', 'assets/schemas/telemetry-event.schema.json',
   'scripts/check-licenses.mjs', 'licenses/reviewed-texts.json',
   'licenses/telemetry-runtime.json', 'licenses/TELEMETRY_THIRD_PARTY_NOTICES',
+  'licenses/external-service-licenses.json', 'licenses/external/nodable-entities-2.1.0/LICENSE.md',
   ...['Dockerfile', 'package.json', 'package-lock.json', 'tsconfig.json', 'scripts/schema.mjs', 'scripts/runtime-sources.mjs',
     'scripts/container-smoke.mjs', 'scripts/container-qualification.mjs']
     .map(name => `services/telemetry-ingest/${name}`),

@@ -59,9 +59,22 @@ headers, or request metadata are stored in the custom event columns. The Analyti
 table uses strings for enum columns; Azure may represent a null duration as an empty
 string. Both mean unknown, never zero elapsed time. Duration includes possible user
 waiting; it is not a model benchmark.
-The queue stores exactly that projection as UTF-8 JSON, at most 1 KiB per message,
-with an explicit **3,600-second TTL**. The consumer validates it without replacing
-`TimeGenerated`. Azure Queue message IDs, insertion/expiry/visibility times,
+The queue codec is **`base64-json-v1`**: canonical Base64 of the unchanged compact
+nine-field UTF-8 JSON projection. Both the encoded Queue message and the decoded
+JSON are bounded to **1,024 bytes**; the encoded bound can be stricter than the
+decoded bound. Even the longest legal field values fit. Every message has an
+explicit **3,600-second TTL**. The consumer accepts only canonical Base64, then
+strict UTF-8 and the closed record schema, without replacing `TimeGenerated`.
+Legacy plaintext, noncanonical padding/whitespace, invalid UTF-8 and invalid records
+are discarded through the existing bounded invalid-message path. There is no
+migration, plaintext fallback or extra per-message codec field. The immutable
+runtime profile must bind `messageEncoding: "base64-json-v1"`, `canonicalBase64: true`
+and `plaintextFallback: false` before deployment.
+The client still sends ordinary JSON, not Base64.
+
+Base64 is **not encryption**; Entra authorization, TLS and the approved storage
+encryption/privacy controls remain required. Encoding avoids JSON quote entities
+in Queue XML even when all quotes are escaped by the service. Azure Queue message IDs, insertion/expiry/visibility times,
 dequeue counts and pop receipts are operational metadata only: they are not
 analytics columns, logged identifiers or a new event envelope.
 
@@ -201,6 +214,14 @@ are rejected rather than leaking payloads or silently changing destination behav
 Container Apps' platform-managed identity endpoint variables remain platform-owned.
 Do not inject tracing agents, startup wrappers, or payload-capturing sidecars.
 
+The patched XML dependency changes its default entity handling. The Queue pipeline
+therefore rejects DTDs, XML responses over **100,000 UTF-8 bytes**, and more than
+**1,000 entity references** before SDK XML deserialization. This is an explicit
+bounded response guard, not disabled entity processing or an increased entity
+budget. Canonical Base64 messages avoid the former 32-message quote-entity
+expansion failure. These transport guards do not change the 1 KiB client or Queue
+message limits, enqueue deadlines, retry policy, permissions or analytics schema.
+
 Missing/invalid/unsafe configuration exits visibly with `CONFIG_MISSING`,
 `CONFIG_INVALID`, `CONFIG_UNSAFE_ENVIRONMENT` or `CONFIG_UNSAFE_RUNTIME`, without
 application-supplied values or exceptions. The image disables SIGUSR1 inspector
@@ -331,6 +352,9 @@ the same bounded logic for local tests. Its `ingest(record, signal)` resolves on
 after a real successful Queue send result, with `acknowledgement: 'queued'` so
 `createTelemetryServer` replies 202. `readiness.setEnabled`, `ready` and `stop`
 control the lifecycle; constructing either object starts no network.
+`encodeQueueMessage(record)` produces the canonical bounded Base64 representation;
+`createQueuedRecordValidator()` decodes that codec only and validates the original
+nine-field projection. Neither is a plaintext migration API.
 
 `receiver.snapshot()` counts HTTP `queued` separately from legacy `accepted`.
 `queueStorage.snapshot()` contains only bounded static counters: `queued`,

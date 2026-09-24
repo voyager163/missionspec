@@ -5,6 +5,7 @@ import {
 } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 
 export const SCOPES = Object.freeze({
   cli: {
@@ -54,6 +55,33 @@ function canonical(value) {
 
 const json = (value) => `${JSON.stringify(value, null, 2)}\n`;
 const equivalent = (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
+
+export const EXTERNAL_SERVICE_NOTICE_CATALOG = 'licenses/external-service-licenses.json';
+const entitiesNotice = Object.freeze({
+  name: '@nodable/entities',
+  version: '2.1.0',
+  licenseExpression: 'MIT',
+  resolved: 'https://registry.npmjs.org/@nodable/entities/-/entities-2.1.0.tgz',
+  integrity: 'sha512-nyT7T3nbMyBI/lvr6L5TyWbFJAI9FTgVRakNoBqCD+PmID8DzFrrNdLLtHMwMszOtqZa8PAOV24ZqDnQrhQINA==',
+  origin: 'upstream-commit-supplement',
+  shippedInPackage: false,
+  repository: 'https://github.com/nodable/val-parsers',
+  gitHead: 'f1c61a65e7b967c17b13822ef71e91bd25f17ce2',
+  sourcePath: 'LICENSE',
+  sourceUrl: 'https://raw.githubusercontent.com/nodable/val-parsers/f1c61a65e7b967c17b13822ef71e91bd25f17ce2/LICENSE',
+  sourceBlobSha1: '561468f111a66df52cc0f1934642bb9fdd22a212',
+  sourceSha256: '750cb3fb6362804957ef52caaf9b5c824015be44d494637330d7cd8834d31d40',
+  retainedFile: 'licenses/external/nodable-entities-2.1.0/LICENSE.md',
+  retainedSha256: '750cb3fb6362804957ef52caaf9b5c824015be44d494637330d7cd8834d31d40',
+});
+
+export function assertExternalServiceNoticePin(scope, source, expression, catalog) {
+  if (scope !== 'service' || expression !== entitiesNotice.licenseExpression ||
+      ['name', 'version', 'resolved', 'integrity'].some(key => source[key] !== entitiesNotice[key]) ||
+      !isDeepStrictEqual(catalog, { schemaVersion: 1, scope: 'service', notices: [entitiesNotice] })) {
+    throw new Error('The external service notice requires the exact reviewed @nodable/entities 2.1.0 tarball, upstream commit and license artifact; no generic missing-license exception is allowed.');
+  }
+}
 
 function relativePath(value) {
   if (typeof value !== 'string' || !value || path.posix.isAbsolute(value) || path.win32.isAbsolute(value) ||
@@ -228,7 +256,27 @@ export function assertLicenseEvidence(expression, documents, identity) {
   }
 }
 
-function legalDocuments(scopeRoot, location, name, version, expression, reviewed) {
+function externalServiceNotice(root, scope, source, expression, packagedPaths) {
+  const catalog = readJson(root, EXTERNAL_SERVICE_NOTICE_CATALOG);
+  assertExternalServiceNoticePin(scope, source, expression, catalog);
+  if (packagedPaths.length) {
+    throw new Error('Unexpected packaged legal files for @nodable/entities 2.1.0; the reviewed tarball contains none. Do not inject a license into node_modules.');
+  }
+  const bytes = readFileSync(inside(root, entitiesNotice.retainedFile));
+  const blobSha1 = createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+  if (bytes.length !== 1064 || sha256(bytes) !== entitiesNotice.sourceSha256 || blobSha1 !== entitiesNotice.sourceBlobSha1) {
+    throw new Error('External service notice source bytes/hash differ from the exact reviewed upstream license.');
+  }
+  const text = normalize(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  if (sha256(text) !== entitiesNotice.retainedSha256) throw new Error('External service notice retained hash mismatch.');
+  return {
+    path: entitiesNotice.retainedFile, sourceSha256: sha256(bytes), retainedSha256: sha256(text), text,
+    provenance: { ...entitiesNotice, scope: 'service', pathBase: 'repository' },
+  };
+}
+
+function legalDocuments(root, scope, scopeRoot, source, expression, reviewed) {
+  const { location, name, version } = source;
   const packageRoot = inside(scopeRoot, location);
   const paths = discoverLegalFiles(packageRoot);
   // Pako's MIT file does not contain its separately applicable zlib terms.
@@ -238,7 +286,8 @@ function legalDocuments(scopeRoot, location, name, version, expression, reviewed
     }
     paths.push('lib/zlib/README');
   }
-  if (!paths.some((file) => primaryLicense.test(path.posix.basename(file)))) {
+  const supplement = name === '@nodable/entities' ? externalServiceNotice(root, scope, source, expression, paths) : undefined;
+  if (!supplement && !paths.some((file) => primaryLicense.test(path.posix.basename(file)))) {
     throw new Error(`No retained license file in ${location}`);
   }
   const documents = [...new Set(paths)].sort(compare).map((file) => {
@@ -249,6 +298,7 @@ function legalDocuments(scopeRoot, location, name, version, expression, reviewed
     if (!text.trim()) throw new Error(`Empty license text: ${location}/${file}`);
     return { path: file, sourceSha256: sha256(source), retainedSha256: sha256(text), text };
   });
+  if (supplement) documents.push(supplement);
   assertLicenseEvidence(expression, documents, `${name}@${version}`);
   for (const document of documents) {
     if (!reviewed.has(`${expression}:${document.retainedSha256}`)) {
@@ -287,6 +337,19 @@ function noticesFor(scope, packages, documentSets) {
       '',
     ].join('\n');
     for (const document of documentSets.get(record.location)) {
+      if (document.provenance) {
+        const provenance = document.provenance;
+        output += [
+          '\nOrigin: upstream-commit supplement; NOT shipped in the npm tarball.',
+          `Retained repository file: ${provenance.retainedFile}`,
+          `Upstream: ${provenance.sourceUrl}`,
+          `Published npm gitHead: ${provenance.gitHead}`,
+          `Upstream Git blob SHA-1: ${provenance.sourceBlobSha1}`,
+          `Upstream license SHA-256: ${provenance.sourceSha256}`,
+          'The default checker validates retained bytes offline; it does not fetch or modify node_modules.',
+          '',
+        ].join('\n');
+      }
       output += `\n--- ${document.path} (retained SHA-256: ${document.retainedSha256}) ---\n`;
       output += document.text;
       if (!document.text.endsWith('\n')) output += '\n';
@@ -342,7 +405,7 @@ export function collectScope(repositoryRoot, scope) {
     if ((installed.bundleDependencies?.length ?? 0) || (installed.bundledDependencies?.length ?? 0)) {
       throw new Error(`Unreviewed bundled dependencies in ${location}`);
     }
-    const retained = legalDocuments(scopeRoot, location, source.name, source.version, locked.license, reviewed);
+    const retained = legalDocuments(root, scope, scopeRoot, source, locked.license, reviewed);
     assertMetadataExceptionPin(source, locked.license, retained);
     documents.set(location, retained);
     return {
@@ -420,7 +483,8 @@ export function packageNoticeProblems(preview, packageName, noticeBytes) {
     problems.push('Shipped notice size differs from the checked THIRD_PARTY_NOTICES');
   }
   for (const file of files.keys()) {
-    if (file.startsWith('services/') || file === SCOPES.service.inventory || file === SCOPES.service.notices) {
+    if (file.startsWith('services/') || file === SCOPES.service.inventory || file === SCOPES.service.notices ||
+        file === EXTERNAL_SERVICE_NOTICE_CATALOG || file === entitiesNotice.retainedFile) {
       problems.push(`Service-only licensing/source asset leaked into CLI package: ${file}`);
     }
   }

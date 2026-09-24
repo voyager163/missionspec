@@ -6,6 +6,10 @@
 !licenses/reviewed-texts.json
 !licenses/telemetry-runtime.json
 !licenses/TELEMETRY_THIRD_PARTY_NOTICES
+!licenses/external-service-licenses.json
+!licenses/external/
+!licenses/external/nodable-entities-2.1.0/
+!licenses/external/nodable-entities-2.1.0/LICENSE.md
 !scripts/
 !scripts/check-licenses.mjs
 !services/

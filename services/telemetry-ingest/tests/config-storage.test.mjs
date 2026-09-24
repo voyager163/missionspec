@@ -1,11 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 import { gunzipSync } from 'node:zlib';
 import { LogsIngestionClient } from '@azure/monitor-ingestion';
 import { createHttpHeaders } from '@azure/core-rest-pipeline';
 import { parseConfig, limitEnvironment, STREAM_NAME, validateRuntimeArguments } from '../dist/config.js';
-import { createStorageAdapter, azureClientOptions } from '../dist/azure-storage.js';
+import { createStorageAdapter, azureClientOptions, queueXmlSafetyPolicy, MAX_QUEUE_XML_BYTES,
+  MAX_QUEUE_XML_ENTITIES } from '../dist/azure-storage.js';
 import { createProjector } from '../dist/contract.js';
 import { event, limits } from './helpers.mjs';
 
@@ -103,6 +107,41 @@ test('adapter cancellation is checked before and after the injected uploader', a
   await assert.rejects(storage.ingest({ ...event, TimeGenerated: new Date().toISOString() }, controller.signal));
   await assert.rejects(storage.ingest({ ...event, TimeGenerated: new Date().toISOString() }, controller.signal));
   assert.equal(calls, 1);
+});
+
+test('patched parser/builder prevents the CVE-2026-41650 comment and CDATA delimiter breakout witnesses', () => {
+  const requireQueue = createRequire(new URL('../node_modules/@azure/storage-queue/package.json', import.meta.url));
+  const { XMLBuilder, XMLParser, XMLValidator } = requireQueue('fast-xml-parser');
+  const parserManifest = new URL('../package.json', pathToFileURL(requireQueue.resolve('fast-xml-parser')));
+  assert.equal(JSON.parse(readFileSync(parserManifest, 'utf8')).version, '5.7.0');
+  for (const [field, payload, prefix, suffix, options] of [
+    ['#comment', '--><unexpected/> <!--', '<!--', '-->', { commentPropName: '#comment' }],
+    ['#cdata', ']]><unexpected/><![CDATA[', '<![CDATA[', ']]>', { cdataPropName: '#cdata' }],
+  ]) {
+    // This is the unsafe delimiter-interpolation witness, not a claim about old-image exploitability.
+    const unsafe = `<root>${prefix}${payload}${suffix}</root>`;
+    assert.equal(XMLValidator.validate(unsafe), true);
+    assert(Object.hasOwn(new XMLParser().parse(unsafe).root, 'unexpected'));
+    const protectedXml = new XMLBuilder(options).build({ root: { [field]: payload } });
+    assert.equal(XMLValidator.validate(protectedXml), true);
+    const root = new XMLParser().parse(protectedXml).root;
+    assert(typeof root !== 'object' || !Object.hasOwn(root, 'unexpected'));
+  }
+});
+
+test('Queue XML safety retains finite reference/byte limits and forbids DTDs without disabling entity parsing', async () => {
+  assert.equal(MAX_QUEUE_XML_ENTITIES, 1000);
+  assert.equal(MAX_QUEUE_XML_BYTES, 100000);
+  const policy = bodyAsText => queueXmlSafetyPolicy.create({
+    async sendRequest() { return { bodyAsText }; },
+  });
+  for (const body of ['', `<root>${'&quot;'.repeat(1000)}</root>`, 'x'.repeat(100000)]) {
+    assert.equal((await policy(body).sendRequest({})).bodyAsText, body);
+  }
+  for (const body of [`<root>${'&quot;'.repeat(1001)}</root>`, 'x'.repeat(100001),
+    '<!DOCTYPE root [<!ENTITY value "text">]><root>&value;</root>']) {
+    await assert.rejects(policy(body).sendRequest({}), /QUEUE_XML_UNSAFE/);
+  }
 });
 
 test('module imports are inert and startup fails with only a safe code', () => {

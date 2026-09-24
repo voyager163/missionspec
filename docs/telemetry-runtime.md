@@ -154,8 +154,14 @@ This source change is **not** a rollout or permission to reopen ingestion.
 
 Production replies empty/no-store **202 only after Queue ACK**, with a maximum
 650 ms enqueue budget. The same closed projection, including original receipt
-`TimeGenerated`, is persisted as at most 1 KiB UTF-8 JSON with explicit 3,600-second
-TTL. A timed-out enqueue can already exist remotely; no automatic resend or
+`TimeGenerated`, is compact UTF-8 JSON encoded as canonical Base64 with immutable
+profile marker **`messageEncoding: "base64-json-v1"`**, with canonical Base64 required
+and plaintext fallback disabled. Both encoded and decoded
+lengths are at most 1 KiB, with explicit 3,600-second TTL. Base64 is not encryption;
+Entra/TLS and storage encryption/privacy requirements remain. Invalid Base64,
+legacy plaintext and invalid decoded records are discarded without migration or
+fallback. The incoming client JSON and nine analytics fields are unchanged.
+A timed-out enqueue can already exist remotely; no automatic resend or
 optimistic acceptance occurs. Eight unresolved sends remain bounded.
 
 Producer readiness depends on its explicit Storage token, fresh queue properties
@@ -178,7 +184,9 @@ Operational queue IDs/pop receipts are never analytics fields or logs.
 
 `queue-sdk.test.mjs` exercises the real pinned Queue SDK's XML serialization,
 bearer policies, TTL, metadata, visibility and delete receipts through actual
-loopback TLS. A 5.2-second Logs ACK does not delay the HTTP 202. Failure, redirect,
+loopback TLS. All 32 response messages are processed even with full XML quote
+escaping, preserving their original nine fields and timestamps. A 5.2-second Logs
+ACK does not delay the HTTP 202. Failure, redirect,
 late durable send/unknown ACK, full queue, invalid input and disabled zero-network
 cases are covered. `queue-storage.test.mjs` additionally checks all eight stalled
 enqueue slots, a single 32-message batch, late-upload quarantine, bounded attempts,
@@ -186,17 +194,33 @@ expiry/discards, freshness, circuit backoff and disable behavior. The original
 identity/upload deadline regression fixtures remain; they are not the production
 direct-delivery route. All use synthetic local data without Azure calls.
 
-The exact new runtime dependency is `@azure/storage-queue@12.32.0`, selected from
-public package metadata. Its compatible XML parser is explicitly pinned by an
-override scoped only to `@azure/storage-queue` to `fast-xml-parser@5.5.9`: the initially selected newer parser brought a
-transitive package with no shipped license file and failed the existing gate.
-No missing-notice waiver or JSON-schema license exception was broadened.
-The new locked closure contains **62 runtime packages** (previously 51), with full
-MIT/other existing notices and a narrowly updated reviewed-text catalog. Existing
-Node, Identity, MSAL, Monitor Ingestion and Core Pipeline versions did not change.
-No service SDK enters the root CLI package. This compatibility/license pin still
-requires the parent's new exact-image vulnerability review; it is not scanner
-clearance or a native patch claim.
+The Queue SDK remains **12.32.0**. Its scoped parser override is now patched
+**`fast-xml-parser@5.7.0`**, with exact transitive **`@nodable/entities@2.1.0`**.
+The rejected 5.5.9 image's CVE-2026-41650 finding and entity-heavy XML failure are
+retained as historical evidence, not accepted release exceptions. Regression tests
+cover comment/CDATA delimiter breakout witnesses with the patched builder.
+Because 5.7 changes entity defaults, the Queue response policy preserves finite
+guards: 100,000 UTF-8 bytes, 1,000 entity references, no DTDs. No parser safeguard
+is disabled to make the Base64 batch test pass.
+
+The locked service closure contains **63 runtime packages**. Existing Node,
+Identity, MSAL, Monitor Ingestion and Core Pipeline versions did not change, and
+no service SDK enters the root CLI package. **The licensing gate is still a
+release prerequisite:** the entities npm tarball declares MIT but contains no
+legal file. All eight tarball files match `Entity/` at its published upstream
+commit `f1c61a65e7b967c17b13822ef71e91bd25f17ce2`; that repository's root MIT license
+retains “Copyright (c) 2026 Nodable,” SHA-256
+`750cb3fb6362804957ef52caaf9b5c824015be44d494637330d7cd8834d31d40`.
+The exact upstream supplement is retained at
+`licenses/external/nodable-entities-2.1.0/LICENSE.md`, with the closed
+`licenses/external-service-licenses.json` provenance catalog. The offline checker
+pins the exact service package/version/tarball/commit/blob and original bytes;
+generated notices explicitly label it **not shipped in the npm tarball**.
+Both inputs are included by the Docker context and corresponding-source snapshot,
+and the full text appears in readable service notices. Nothing is injected into
+`node_modules`; no generic legal gate or JSON-schema exception is waived.
+The changed checker, notices, source/codec profile and exact image still require
+parent review before a replacement image is built or published.
 
 A fresh source-bearing image must include this code, lockfile and updated
 service notices. Existing images, original archives, source pins and approvals

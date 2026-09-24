@@ -3,7 +3,8 @@ import test from 'node:test';
 import { setImmediate as turn } from 'node:timers/promises';
 import { createQueueStorage, QUEUE_CAPACITY, QUEUE_TTL_SECONDS, QUEUE_PROPERTIES_INTERVAL_MS,
   WORKER_UPLOAD_TIMEOUT_MS, QUEUE_TRANSACTION_TIMEOUT_MS } from '../dist/queue-storage.js';
-import { createProjector, createQueuedRecordValidator } from '../dist/contract.js';
+import { createProjector, createQueuedRecordValidator, encodeQueueMessage, QUEUE_MESSAGE_CODEC,
+  MAX_ENCODED_MESSAGE_BYTES, MAX_DECODED_MESSAGE_BYTES } from '../dist/contract.js';
 import { assertEmpty, event, post, start } from './helpers.mjs';
 
 const deferred = () => {
@@ -12,6 +13,7 @@ const deferred = () => {
   return { resolve, reject, promise };
 };
 const response = status => ({ _response: { status } });
+const base64Json = value => Buffer.from(JSON.stringify(value), 'utf8').toString('base64');
 function fixture(t, overrides = {}) {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   let clock = 0;
@@ -30,6 +32,8 @@ function fixture(t, overrides = {}) {
       assert.equal(options.messageTimeToLive, 3600);
       assert.equal(options.visibilityTimeout, 0);
       assert(Buffer.byteLength(text) <= 1024);
+      assert.equal(Buffer.from(text, 'base64').toString('base64'), text);
+      assert(Buffer.from(text, 'base64').byteLength <= 1024);
       messages.push({ messageId: `message-${calls.sends}`, popReceipt: 'receipt', messageText: text,
         insertedOn: new Date(now()), expiresOn: new Date(now() + 3600000), dequeueCount: 1, nextVisibleOn: new Date(now() + 60000) });
       return { ...response(201), messageId: 'accepted', popReceipt: 'receipt' };
@@ -162,19 +166,70 @@ test('malformed late worker results cannot replace unresolved receive/delete wor
 test('queue TTL, payload and original TimeGenerated survive validation without re-projection', async t => {
   const f = fixture(t);
   const validate = createQueuedRecordValidator();
-  assert.deepEqual(validate(JSON.stringify(f.record)), f.record);
+  assert.deepEqual(validate(encodeQueueMessage(f.record)), f.record);
   for (const bad of [{ ...f.record, ip: 'forbidden' }, { ...f.record, TimeGenerated: 'invalid' },
-    { ...f.record, TimeGenerated: '2026-09-24' }, { ...f.record, host: null }]) assert.equal(validate(JSON.stringify(bad)), undefined);
+    { ...f.record, TimeGenerated: '2026-09-24' }, { ...f.record, host: null }]) assert.equal(validate(base64Json(bad)), undefined);
   assert.equal(validate(' '.repeat(1025)), undefined);
   await f.enable();
   await f.send();
   assert.equal(f.storage.acknowledgement, 'queued');
   assert.equal(f.storage.snapshot().queued, 1);
-  assert.deepEqual(JSON.parse(f.messages[0].messageText), f.record);
+  assert.deepEqual(JSON.parse(Buffer.from(f.messages[0].messageText, 'base64').toString('utf8')), f.record);
   await f.step(1000);
   assert.equal(f.messages.length, 0);
   assert.deepEqual(f.batches[0], [f.record]);
   assert.equal(f.storage.snapshot().logs_delivered, 1);
+});
+
+test('base64-json-v1 accepts only canonical bounded Base64 and strict UTF-8/record data', () => {
+  const validate = createQueuedRecordValidator();
+  const record = createProjector()(event, new Date('2026-09-24T00:00:00.000Z'));
+  const encoded = encodeQueueMessage(record);
+  assert.equal(QUEUE_MESSAGE_CODEC, 'base64-json-v1');
+  assert.equal(MAX_ENCODED_MESSAGE_BYTES, 1024);
+  assert.equal(MAX_DECODED_MESSAGE_BYTES, 1024);
+  assert.equal(encoded, base64Json(record));
+  assert(!/[<>&"'\s]/.test(encoded));
+  assert.deepEqual(validate(encoded), record);
+  for (const invalid of [
+    JSON.stringify(record), '', 'null', '{}', 'not base64', encoded + '\n', ' ' + encoded,
+    encoded + '=', 'Zg', 'Zh==', 'Zg===', 'AAAA-AAA', 'AAAA_AAA',
+    Buffer.from([0xff, 0xfe]).toString('base64'),
+    Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(JSON.stringify(record))]).toString('base64'),
+    base64Json({ ...record, secret: 'discard' }),
+    base64Json({ ...record, TimeGenerated: null }),
+    Buffer.from(JSON.stringify(record).padEnd(1024)).toString('base64'),
+    Buffer.alloc(1025).toString('base64'),
+  ]) assert.equal(validate(invalid), undefined);
+  assert.throws(() => encodeQueueMessage({ ...record, cliVersion: 'x'.repeat(1025) }), /QUEUE_RECORD_INVALID/);
+  assert.throws(() => encodeQueueMessage({ ...record, cliVersion: 'x'.repeat(700) }), /QUEUE_RECORD_INVALID/);
+});
+
+test('the maximum valid CLI version and longest legal labels fit both one-KiB queue bounds', () => {
+  const value = { ...event, cliVersion: '999999.999999.999999-alpha.999999', operation: 'principles',
+    outcome: 'cancelled', host: 'multiple', os: 'windows', durationBucket: '1h-or-more' };
+  const record = createProjector()(value, new Date('2026-09-24T00:00:00.000Z'));
+  assert(record);
+  const encoded = encodeQueueMessage(record);
+  assert(Buffer.byteLength(encoded) <= MAX_ENCODED_MESSAGE_BYTES);
+  assert(Buffer.from(encoded, 'base64').byteLength <= MAX_DECODED_MESSAGE_BYTES);
+  assert.equal(Buffer.from(encoded, 'base64').toString('utf8'), JSON.stringify(record));
+  assert.deepEqual(createQueuedRecordValidator()(encoded), record);
+});
+
+test('plaintext, malformed Base64 and invalid decoded records are discarded without migration or upload', async t => {
+  const f = fixture(t);
+  await f.enable();
+  for (let i = 0; i < 3; i++) await f.send();
+  f.messages[0].messageText = JSON.stringify(f.record);
+  f.messages[1].messageText = 'Zh==';
+  f.messages[2].messageText = base64Json({ ...f.record, extra: 'forbidden' });
+  await f.step(1000);
+  assert.equal(f.calls.upload, 0);
+  assert.equal(f.calls.deletes, 3);
+  assert.equal(f.messages.length, 0);
+  assert.equal(f.storage.snapshot().dropped_invalid, 3);
+  assert.equal(f.storage.snapshot().logs_delivered, undefined);
 });
 
 test('disabled constructors/start have no token/queue/worker operations; Monitor failure does not block producer', async t => {
@@ -315,7 +370,7 @@ test('invalid, expired and exhausted messages are disposed without upload or dea
   await f.enable();
   for (let index = 0; index < 3; index++) await f.send();
   f.messages[0].messageText = '{"extra":"PRIVATE_INVALID"}';
-  f.messages[1].messageText = JSON.stringify({ ...f.record, TimeGenerated: new Date(f.now() - QUEUE_TTL_SECONDS * 1000).toISOString() });
+  f.messages[1].messageText = base64Json({ ...f.record, TimeGenerated: new Date(f.now() - QUEUE_TTL_SECONDS * 1000).toISOString() });
   f.messages[2].dequeueCount = 4;
   await f.step(1000);
   assert.equal(f.calls.upload, 0);

@@ -23,7 +23,8 @@ Its Anthropic copyright notice is retained as supplied; that does not turn it
 into the commercial Claude SDK or establish native host qualification.
 
 Third-party license and notice texts are reproduced from installed dependency
-packages for attribution and compliance. This is the exception to the
+packages, plus the narrowly reviewed upstream service supplement described below,
+for attribution and compliance. This is the exception to the
 project-original prose declaration, not copied implementation source.
 Contributors must disclose any new incorporated material and preserve its terms;
 the current inventory is not permission to copy other upstream work.
@@ -46,7 +47,9 @@ in the separate image.
 The current direct CLI pins include `@modelcontextprotocol/sdk@1.30.0`,
 `ajv@8.20.0`, `mdast-util-from-markdown@2.0.3`, `yaml@2.9.1`, and `zod@4.6.5`.
 The isolated service pins `@azure/identity@4.13.3`, `@azure/logger@1.3.0`,
-`@azure/monitor-ingestion@1.2.0`, and `ajv@8.20.0`.
+`@azure/monitor-ingestion@1.2.0`, `@azure/storage-queue@12.32.0`, and `ajv@8.20.0`.
+Its Queue-scoped overrides select `fast-xml-parser@5.7.0` and
+`@nodable/entities@2.1.0`.
 
 The inventories cover the entire locked runtime dependency, optional-dependency,
 and peer-dependency graph, including nested versions. They do not list only the
@@ -59,6 +62,10 @@ registry tarball URL, npm integrity value, declared license expression, resolved
 dependency edges, and source/retained hashes for its legal files. The lockfile
 data hash uses canonical JSON, independent of formatting and key order. There
 are no timestamps, machine paths, or registry lookups in generated output.
+The external service notice's legal-file record additionally has explicit
+`provenance`, including `origin`, `shippedInPackage: false`, upstream commit/blob
+and URL, and `pathBase: "repository"`. Ordinary packaged legal-file records retain
+their existing package-relative paths and hashes.
 These are project-specific machine-readable inventories, not a claim of
 CycloneDX or SPDX document-format conformance.
 
@@ -138,6 +145,46 @@ Text evidence checks are guardrails, not a general legal-text classifier.
 Review newly added packages for supplemental or embedded notices that filename
 discovery cannot establish. A distribution change, vendored source, new license
 expression, or unusual license location requires deliberate review.
+
+### Exact upstream service notice: entities 2.1.0
+
+The published `@nodable/entities@2.1.0` npm tarball declares MIT but contains **no
+license file**. Its eight distributed files were compared byte-for-byte with
+`Entity/` at the npm metadata's exact published `gitHead`,
+`f1c61a65e7b967c17b13822ef71e91bd25f17ce2`, in `nodable/val-parsers`.
+The repository-root
+[LICENSE at that commit](https://github.com/nodable/val-parsers/blob/f1c61a65e7b967c17b13822ef71e91bd25f17ce2/LICENSE)
+is MIT and retains **Copyright (c) 2026 Nodable**.
+
+The source checkout retains those original 1,064 bytes in
+`licenses/external/nodable-entities-2.1.0/LICENSE.md`; the `.md` suffix uses the
+existing LF checkout rule without altering the upstream text. Its Git blob SHA-1
+is `561468f111a66df52cc0f1934642bb9fdd22a212`; source and retained SHA-256 are both
+`750cb3fb6362804957ef52caaf9b5c824015be44d494637330d7cd8834d31d40`.
+`licenses/external-service-licenses.json` records the exact package, registry URL,
+npm SHA-512 integrity, upstream repository/commit/path, artifact hashes and
+retained location.
+
+This is an **upstream-commit supplement, not a file shipped in the npm tarball**.
+The generated service notices label that distinction and reproduce the complete
+license and copyright. No file is inserted into `node_modules`. The source archive
+includes the catalog and retained artifact, and the runtime's service notice file
+contains the full text and attribution. They remain outside the CLI package.
+
+The checker permits only this exact service-scoped name/version/tarball, commit,
+source blob and retained artifact. The catalog must match the checker’s reviewed
+pin, not a caller-selected URL or version range. Wrong scope, version, integrity,
+source hash, extra catalog fields, missing/changed/symlinked text, unreviewed text
+fingerprints, and a newly injected package-local license fail closed. Checks and
+`--write` are offline and never fetch an upstream file or approve new terms.
+All other missing-license cases and the separate JSON-schema metadata exception
+retain their original policy.
+
+The original package/commit correspondence is review evidence, not a signed
+publisher attestation. Normal package-source trust still relies on the locked
+`npm ci`; the default checker independently verifies the retained legal artifact,
+not a newly downloaded Git checkout. A different entities version needs its own
+package and legal-source review and an intentional pin change.
 
 ## Shipped notices and check integration
 

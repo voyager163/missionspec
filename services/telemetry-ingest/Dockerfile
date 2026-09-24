@@ -15,6 +15,8 @@ COPY services/telemetry-ingest/scripts/container-qualification.mjs ./scripts/con
 COPY services/telemetry-ingest/tests ./tests
 COPY scripts/check-licenses.mjs /app/scripts/check-licenses.mjs
 COPY licenses/reviewed-texts.json licenses/telemetry-runtime.json licenses/TELEMETRY_THIRD_PARTY_NOTICES /app/licenses/
+COPY licenses/external-service-licenses.json /app/licenses/
+COPY licenses/external/nodable-entities-2.1.0/LICENSE.md /app/licenses/external/nodable-entities-2.1.0/LICENSE.md
 RUN npm test
 RUN node /app/scripts/check-licenses.mjs --scope service
 RUN --mount=type=cache,id=missionspec-runtime-sources,target=/app/runtime-source-cache \

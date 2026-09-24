@@ -4,7 +4,7 @@
   "packageName": "@msn-control/missionspec-telemetry-ingest",
   "packageVersion": "0.0.0",
   "lockfile": "services/telemetry-ingest/package-lock.json",
-  "lockfileDataSha256": "6f02483734ebffaec065c2f20918a5c5eccd8c2e6b6061259c955190d3d70eb9",
+  "lockfileDataSha256": "0ce79c57429df112d2e5ee0b1e9a39377c78fea2fb235e854fec49a22986c289",
   "selection": "Complete locked runtime dependency/optional/peer closure; not a bundle or reachability analysis of executable code.",
   "provenanceLimit": "Tarball integrity is recorded from the lockfile; trust restoration via npm ci. This check does not independently authenticate installed source bytes.",
   "directDependencies": {
@@ -461,7 +461,7 @@
         "@azure/core-util": "node_modules/@azure/core-util",
         "@azure/logger": "node_modules/@azure/logger",
         "@azure/storage-common": "node_modules/@azure/storage-common",
-        "fast-xml-parser": "node_modules/@azure/storage-queue/node_modules/fast-xml-parser",
+        "fast-xml-parser": "node_modules/fast-xml-parser",
         "tslib": "node_modules/tslib"
       },
       "omittedOptional": [],
@@ -474,26 +474,41 @@
       ]
     },
     {
-      "location": "node_modules/@azure/storage-queue/node_modules/fast-xml-parser",
-      "name": "fast-xml-parser",
-      "version": "5.5.9",
-      "resolved": "https://registry.npmjs.org/fast-xml-parser/-/fast-xml-parser-5.5.9.tgz",
-      "integrity": "sha512-jldvxr1MC6rtiZKgrFnDSvT8xuH+eJqxqOBThUVjYrxssYTo1avZLGql5l0a0BAERR01CadYzZ83kVEkbyDg+g==",
+      "location": "node_modules/@nodable/entities",
+      "name": "@nodable/entities",
+      "version": "2.1.0",
+      "resolved": "https://registry.npmjs.org/@nodable/entities/-/entities-2.1.0.tgz",
+      "integrity": "sha512-nyT7T3nbMyBI/lvr6L5TyWbFJAI9FTgVRakNoBqCD+PmID8DzFrrNdLLtHMwMszOtqZa8PAOV24ZqDnQrhQINA==",
       "relationship": "transitive",
       "alsoDirectDevelopmentDependency": false,
       "licenseExpression": "MIT",
       "optional": false,
-      "dependencies": {
-        "fast-xml-builder": "node_modules/fast-xml-builder",
-        "path-expression-matcher": "node_modules/path-expression-matcher",
-        "strnum": "node_modules/strnum"
-      },
+      "dependencies": {},
       "omittedOptional": [],
       "legalFiles": [
         {
-          "path": "LICENSE",
-          "sourceSha256": "7883225d5e84a6bbb9b170c3d891b4bf6d6259cee869c86bd86381a927071745",
-          "retainedSha256": "7883225d5e84a6bbb9b170c3d891b4bf6d6259cee869c86bd86381a927071745"
+          "path": "licenses/external/nodable-entities-2.1.0/LICENSE.md",
+          "sourceSha256": "750cb3fb6362804957ef52caaf9b5c824015be44d494637330d7cd8834d31d40",
+          "retainedSha256": "750cb3fb6362804957ef52caaf9b5c824015be44d494637330d7cd8834d31d40",
+          "provenance": {
+            "name": "@nodable/entities",
+            "version": "2.1.0",
+            "licenseExpression": "MIT",
+            "resolved": "https://registry.npmjs.org/@nodable/entities/-/entities-2.1.0.tgz",
+            "integrity": "sha512-nyT7T3nbMyBI/lvr6L5TyWbFJAI9FTgVRakNoBqCD+PmID8DzFrrNdLLtHMwMszOtqZa8PAOV24ZqDnQrhQINA==",
+            "origin": "upstream-commit-supplement",
+            "shippedInPackage": false,
+            "repository": "https://github.com/nodable/val-parsers",
+            "gitHead": "f1c61a65e7b967c17b13822ef71e91bd25f17ce2",
+            "sourcePath": "LICENSE",
+            "sourceUrl": "https://raw.githubusercontent.com/nodable/val-parsers/f1c61a65e7b967c17b13822ef71e91bd25f17ce2/LICENSE",
+            "sourceBlobSha1": "561468f111a66df52cc0f1934642bb9fdd22a212",
+            "sourceSha256": "750cb3fb6362804957ef52caaf9b5c824015be44d494637330d7cd8834d31d40",
+            "retainedFile": "licenses/external/nodable-entities-2.1.0/LICENSE.md",
+            "retainedSha256": "750cb3fb6362804957ef52caaf9b5c824015be44d494637330d7cd8834d31d40",
+            "scope": "service",
+            "pathBase": "repository"
+          }
         }
       ]
     },
@@ -815,6 +830,31 @@
           "path": "LICENSE",
           "sourceSha256": "8e75fc0e776c62ccadb8178ece8d3daa9ba7601fb0a49b2dfb0ea9a7a5c0aa07",
           "retainedSha256": "8e75fc0e776c62ccadb8178ece8d3daa9ba7601fb0a49b2dfb0ea9a7a5c0aa07"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/fast-xml-parser",
+      "name": "fast-xml-parser",
+      "version": "5.7.0",
+      "resolved": "https://registry.npmjs.org/fast-xml-parser/-/fast-xml-parser-5.7.0.tgz",
+      "integrity": "sha512-MTcrUoRQ1GSQ9iG3QJzBGquYYYeA7piZaJoIWbPFGbRn6Jj6z7xgoAyi4DrZX4y2ZIQQBF59gc/zmvvejjgoFQ==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "@nodable/entities": "node_modules/@nodable/entities",
+        "fast-xml-builder": "node_modules/fast-xml-builder",
+        "path-expression-matcher": "node_modules/path-expression-matcher",
+        "strnum": "node_modules/strnum"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "7883225d5e84a6bbb9b170c3d891b4bf6d6259cee869c86bd86381a927071745",
+          "retainedSha256": "7883225d5e84a6bbb9b170c3d891b4bf6d6259cee869c86bd86381a927071745"
         }
       ]
     },
