@@ -79,7 +79,8 @@ mandatory. An advertised incompatible child API is not ignored.
 account/queue IDs exactly. There is no runtime-configurable arbitrary endpoint
 or fallback to direct Logs admission. Its source-bound profile pins the
 20-second Storage credential preparation, separate Monitor consumer scope,
-650 ms enqueue, 1 KiB record, 3,600-second per-message TTL, approximate-count
+650 ms enqueue, 1 KiB encoded message and 1 KiB decoded JSON bounds,
+3,600-second per-message TTL, approximate-count
 10,000 admission threshold, eight concurrent enqueues, batch size 32, one
 15-second Logs upload at a time, 60-second visibility and three deliveries.
 The bounded implementation additionally records five-second queue operations,
@@ -90,6 +91,27 @@ These distinct budgets are explicit review inputs, not
 extensions of the CLI timeout. Disabled operation makes zero network requests.
 Counters reset on restart and queue count is approximate: neither is an exact
 global backlog limit or a spend meter.
+
+The new queued contract explicitly pins `messageEncoding: "base64-json-v1"`,
+`maxEncodedMessageBytes: 1024`, `canonicalBase64: true`, and
+`plaintextFallback: false`; `maxPayloadBytes: 1024` bounds decoded JSON.
+The service constant `QUEUE_MESSAGE_CODEC` maps to this one profile field;
+`messageCodec` is not a second accepted profile alias.
+The queue wire contains canonical Base64 of the unchanged compact UTF-8 JSON:
+the original eight event fields plus the original server `TimeGenerated`.
+Both byte bounds apply independently. Base64 is transport encoding, **not
+encryption**, and adds no analytics field or environment selector. Consumers
+reject plaintext/noncanonical encodings rather than migrate or fall back.
+There is no deployed plaintext queue data to preserve or convert.
+
+This prevents structural JSON quotes from multiplying XML entities in a
+32-message response. The batch remains 32 and parser entity limits remain
+unchanged; the fix does not waive a parser failure or a fixable dependency
+advisory. A previously rejected plaintext local image cannot qualify by
+editing its reported runtime marker. A new source-bound image and measured
+codec qualification are required. The new queued profile also rejects the
+unfixed `CVE-2026-41650` finding explicitly; patched dependency/license/source
+provenance and a fresh unsuppressed scan remain required.
 
 **Local and live phases.** `preview-queue queue-storage <private-revision>`
 requires only `config.json` and `queue-namespace.json` (`{"namespace":"..."}`).
@@ -102,6 +124,51 @@ prepares one fixed template locally; the fixed order is:
 3. `queue-assignment`: only the existing ingest UAMI at the queue scope.
 4. `disabled-queue-upgrade`: only the separately published third image and
    the two queue environment values, with `MSR_INGESTION_ENABLED=false`.
+
+**Requested fields that ARM does not predict.** A full CREATE what-if may
+omit exactly these requested fields:
+
+| Exact new resource type | Permitted omitted path |
+| --- | --- |
+| `Microsoft.Storage/storageAccounts` | `properties.networkAcls.ipRules` |
+| `Microsoft.Storage/storageAccounts` | `properties.networkAcls.virtualNetworkRules` |
+| `Microsoft.Storage/storageAccounts` | `properties.networkAcls.resourceAccessRules` |
+| `Microsoft.Storage/storageAccounts` | `properties.encryption.services` |
+| `Microsoft.Storage/storageAccounts/queueServices` | `properties` (requested empty CORS configuration) |
+| `Microsoft.Storage/storageAccounts/queueServices/queues` | `properties` (requested empty metadata) |
+
+This is a fixed **CREATE-preview omission contract**, not normalization of
+resource state. The raw `after` is never filled with the requested values.
+`queue-storage-preview-uncertainty.json` returns
+`requestedButNotPredicted`, with `omittedFieldsVerified: false` and
+`actualPostCreateReadbackVerified: false`. An omitted nonempty
+`encryption.services` prediction does **not** establish queue encryption.
+If services are returned, they must include the requested queue
+`enabled: true` / `keyType: Account` without contradiction. A returned
+nonempty ACL, subnet/IP/resource-access rule, CORS rule or metadata, any
+unlisted security omission or changed field, errors/pagination, unknown
+resource or existing-resource modification still fails closed. Entire
+account ACL/encryption objects and encryption `keySource` are not omittable.
+
+`queue-storage.computedReadbacksRequired` is generated from the fixed topology,
+not a user-controlled waiver. Its eight actual-GET requirements are the three
+empty ACL arrays, encryption `keySource: Microsoft.Storage`, queue encryption
+`enabled: true` and `keyType: Account`, empty `cors.corsRules` and empty
+metadata. The phase hash binds this list; preflight additionally binds the
+full preview-uncertainty hash, requirement hash and validated-template hash
+into the existing parent approval's `baselineSha256`. The raw validation
+response/hash is preserved, but its transient correlation ID is not treated
+as a stable approval input. Full ARM validation and exact fixed-template
+matching remain mandatory before a preview can be accepted.
+
+Actual GET verification is **not relaxed**. All requested security/resource
+settings remain strict, including those absent from the prediction. A
+qualified queue receipt must contain the actual post-create observations;
+missing/contradictory actual values stop qualification and preserve the
+resource for review. Subsequent role/receiver phases require that qualified
+record, so omission acceptance cannot authorize enqueue or bypass the
+postcondition. The earlier failed preview/read-only evidence stays immutable;
+new policy requires a fresh reviewed-source context rather than resetting it.
 
 `queue-review.json` is a closed `accept-exact-durable-queue-topology` review
 binding config, topology and current policy source, canonical approval/expiry
@@ -130,10 +197,28 @@ must be supplied by the future real build; null/placeholders/`qualified: true`
 are not publishable evidence. It retains notices, scan/database freshness,
 source archive, Linux/amd64/UID/command restrictions and native caveats. Only
 this kind adds `src/queue-storage.ts`, `tests/queue-storage.test.mjs`, and
-`tests/queue-sdk.test.mjs` to the original 35-file closure (38 total). Typed
+`tests/queue-sdk.test.mjs` plus the queued-only build/source inputs
+`licenses/external-service-licenses.json` and
+`licenses/external/nodable-entities-2.1.0/LICENSE.md` to the original 35-file
+closure (**40 total**). These two root license inputs bind the exact service-only
+upstream supplement and its public provenance; they are not inserted into
+legacy source archives or a generic license exception. Typed
 SDK proof binds the source file map and runtime-source manifest, explicit
 fixture pass/fail counts, zero-network disabled behavior, durable ACK,
 restart/TTL/overflow/retry/visibility/worker bounds and no implicit creation.
+Its closed `encoding` evidence contains `version: 1`,
+`kind: "base64-json-v1"`, the actually observed `encodedMessage` and
+`decodedJson`, and measured integer `encodedBytes`/`decodedBytes`. The verifier
+checks canonical Base64 re-encoding, exact UTF-8 roundtrip, both byte limits,
+compact JSON and the unchanged closed nine-field record schema (including
+nullable `durationBucket`). The exported `QUEUE_SDK_FIXTURES` list now requires
+the original eleven groups plus `canonical-base64-wire`, `base64-size-bounds`,
+`base64-no-plaintext-fallback`, and `base64-entity-heavy-batch`. Each group must
+bind an actual retained case report and actual pass/fail counts. Source-only
+tests or a claimed encoding flag cannot replace exact-image SDK evidence.
+The batch case exercises 32 records whose plaintext JSON quotes would expand
+into excessive XML entities; their actual Base64 wire avoids that expansion.
+It does not waive the parser's limits for arbitrary entity-expanded XML.
 Unit-generated artifacts are not real publication or qualification evidence.
 
 Publication preview requires exactly the two existing manifests/tags and empty

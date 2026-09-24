@@ -106,13 +106,41 @@ with published policy, current-source topology review, exact phase approval,
 fresh bounded what-if, original-history/current-role checks and one journaled
 120-second submission. Unknown submissions cannot be replayed.
 
+CREATE previews retain explicit uncertainty rather than filling ARM's missing
+properties. Only three empty account ACL arrays, account
+`properties.encryption.services`, and whole empty service/queue `properties`
+may be absent for their exact new resource types. Every returned field must
+match the fixed template; contradictions, other omissions, extra resources,
+errors, pagination and existing-resource modifications fail closed.
+
+`queue-storage-preview-uncertainty.json` lists each requested-but-not-predicted
+field and eight fixed actual-GET postconditions. Those conditions are generated
+in the phase, hashed into the preflight/approval baseline, and verified against
+literal GET values before a qualified receipt. In particular, omitted
+encryption predictions **do not prove encryption**: actual queue encryption
+must be enabled with `keyType: Account` and `keySource: Microsoft.Storage`.
+Actual ACL/CORS/metadata readback checks remain strict. A missing actual value
+blocks the receipt and later roles/receiver use. The raw what-if is unchanged.
+
 After actual separate publication, `prepare-image disabled-queue-upgrade`
 binds the failed prepared-identity window's terminal false/503 predecessor,
 all three qualified queue-phase records, and the exact third manifest. Only
 the image and `AZURE_QUEUE_URL` / `AZURE_QUEUE_RESOURCE_ID` may change; admission
 remains false. Both prior digests/tags and their archived 35-file profiles remain
-unchanged. Only the new profile has the 38-file source closure and typed
-source-bound queue SDK qualification.
+unchanged. Only the new profile has the 40-file source closure and typed
+source-bound queue SDK qualification. The queued build/source inputs also bind
+`licenses/external-service-licenses.json` and
+`licenses/external/nodable-entities-2.1.0/LICENSE.md`; neither is added to legacy
+archives or treated as a generic license waiver.
+
+The queued contract pins `messageEncoding: "base64-json-v1"`: canonical
+Base64 of the unchanged compact nine-field UTF-8 JSON record. Encoded queue
+message **and** decoded JSON are each capped at 1 KiB. Base64 is neither
+encryption nor an analytics field. No plaintext fallback/migration is supported;
+no plaintext queue was deployed. The new profile proof must include a measured
+encoded/decoded sample and the Base64 roundtrip, size-boundary, no-fallback and
+32-message entity-heavy XML fixture groups. Parser limits and batch32 stay
+unchanged. Prior plaintext local candidates cannot qualify by adding a marker.
 
 Version-5 reconciliation explicitly binds the receiver execution overlay and
 queue records, permitting current-profile observations and the additional

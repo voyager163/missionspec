@@ -12,7 +12,7 @@ import { IMAGE_PHASES, buildDisabledImagePhase, receiverAnchor, prepareReceiverP
   ReceiverUpgradeController } from './receiver-upgrade.mjs';
 import { QUEUE_PHASES, durableQueueCost, buildQueuePhase, queueEnvironment, queueTopology,
   qualifiedQueueRecords, verifyQueueTopology, verifyQueueReview, verifyQueueRecord, verifyQueueProviderOperations, verifyQueueApiCatalog,
-  verifyQueueResource, verifyQueuePrivacy, verifyQueueDrain, QueueTopologyController } from './durable-queue.mjs';
+  verifyQueueResource, verifyQueuePrivacy, verifyQueueDrain, verifyQueueWhatIf, queuePreflightBaseline, QueueTopologyController } from './durable-queue.mjs';
 import { PHASES, buildPhase, deploymentName, validateConfig, ids, digest, json, fail, sameId, storageContract, firstReleaseCost, assertOwned, RECEIVER_COMMAND,
   closed, budgetConfiguration, projectBudgetFilter, verifyFoundationBudgets, reconciliationBinding, assignmentRoleTargets,
   TOGGLE_PHASES, SYNTHETIC_LIMITS, SYNTHETIC_FIXTURES, requireAccess, validateWindowInstance } from './definition.mjs';
@@ -422,6 +422,7 @@ export async function asyncWhatIf(c, phase, directory, options = {}) {
       if (response.statusCode === 200 && status === 'Succeeded') {
         if (!response.body.properties || !Array.isArray(response.body.properties.changes) ||
             response.body.properties.nextLink || response.body.nextLink) fail('WHAT_IF_RESULT_INCOMPLETE');
+        if (QUEUE_PHASES.includes(phase.phase) && response.body.properties.error) fail('WHAT_IF_OPERATION_FAILED');
         await record({ ...trace, outcome: 'succeeded', completedAt: new Date(now()).toISOString() }); guard();
         return { raw: response.body, result: { status, changes: response.body.properties.changes } };
       }
@@ -929,7 +930,8 @@ export async function validateReadOnly(c, phase, receipts, directory, invoke = a
     '--name', executionName, '--template-file', resolve(directory, name), '--only-show-errors', '--output', 'json'];
   const validation = await invoke(['deployment', level, 'validate', ...args], 180000);
   await save(directory, `${phase.phase}-validation.json`, validation);
-  if (validation?.properties?.provisioningState !== 'Succeeded' || validation.error) fail('TEMPLATE_NOT_VALIDATED');
+  if (validation?.properties?.provisioningState !== 'Succeeded' || validation.error ||
+      (QUEUE_PHASES.includes(phase.phase) && (validation.nextLink || validation.properties.error))) fail('TEMPLATE_NOT_VALIDATED');
   const { result: whatif, raw } = await asyncWhatIf(c, phase, directory, { ...options, deadline });
   await save(directory, `${phase.phase}-what-if-raw.json`, raw);
   await save(directory, `${phase.phase}-what-if.json`, whatif);
@@ -938,9 +940,16 @@ export async function validateReadOnly(c, phase, receipts, directory, invoke = a
     ...(options.queueTopology ? { queueTopology: options.queueTopology } : {}),
     ...(options.receiverCandidate ? { receiverCandidate: options.receiverCandidate } : {}),
     app: currentApp ?? receiverAnchor(c, receipts) } : undefined;
-  const whatIfSha256 = verifyWhatIf(phase, whatif, known, context);
+  const queuePreview = QUEUE_PHASES.includes(phase.phase)
+    ? verifyQueueWhatIf(c, phase, options.queueTopology, whatif, known, context.identities[r.ingestIdentity]) : undefined;
+  const whatIfSha256 = queuePreview?.whatIfSha256 ?? verifyWhatIf(phase, whatif, known, context);
+  if (queuePreview) await save(directory, `${phase.phase}-preview-uncertainty.json`, queuePreview);
   if (now() >= deadline) fail('WINDOW_READ_DEADLINE');
-  return { whatIfSha256, templateValidationOnly: true };
+  return { whatIfSha256, templateValidationOnly: true, ...(queuePreview ? {
+    queuePreview, queuePreviewSha256: digest(json(queuePreview)),
+    requiredPostCreateReadbacksSha256: queuePreview.requiredPostCreateReadbacksSha256,
+    armValidationSha256: digest(json(validation)), validatedTemplateSha256: digest(json(phase.template)),
+  } : {}) };
 }
 export function knownResourceIds(c, receipts) {
   const known = Object.entries(receipts).filter(([name]) => PHASES.includes(name))
@@ -1142,8 +1151,9 @@ export async function checkReadOnly(c, phase, origin, receipts, directory, evide
     roleDefinitionsSha256 = digest(json(definitions.roles));
     await save(directory, 'assignments-role-definitions.json', { checkedAt: new Date().toISOString(), ...definitions, roleDefinitionsSha256 });
   }
-  const { whatIfSha256 } = await validateReadOnly(c, phase, receipts, directory, invoke, currentApp,
+  const validationProof = await validateReadOnly(c, phase, receipts, directory, invoke, currentApp,
     { ...options, deadline, receiverCandidate, queueTopology: topology });
+  const { whatIfSha256 } = validationProof;
   const cost = topology ? durableQueueCost() : firstReleaseCost(receiverCandidate ? 2 : 1);
   const verifiedSource = await sourceDigest();
   if (verifiedSource !== source) fail('CURRENT_POLICY_SOURCE_CHANGED');
@@ -1161,8 +1171,8 @@ export async function checkReadOnly(c, phase, origin, receipts, directory, evide
   if (queuePhase) {
     proof.receiptsSha256 = digest(json(receipts.queueRecords ?? {}));
     proof.foundationBaselineSha256 = baseline;
-    proof.baselineSha256 = digest(json({ foundationBaselineSha256: baseline, topologyReviewSha256: proof.topologyReviewSha256,
-      providerOperationsSha256, preservedIdsSha256: digest(json(known)) }));
+    for (const key of ['queuePreview', 'queuePreviewSha256', 'requiredPostCreateReadbacksSha256', 'armValidationSha256', 'validatedTemplateSha256']) proof[key] = validationProof[key];
+    proof.baselineSha256 = queuePreflightBaseline(proof);
   }
   await save(directory, `${phase.phase}-preflight.json`, proof);
   if (now() >= deadline) {
@@ -2120,6 +2130,7 @@ async function main() {
       const receipt = await controller.execute(approval);
       const record = { version: 1, kind: 'reviewed-queue-phase', topology, review: evidenceFiles.queueReview,
         publication, identity, priorRecords, phase, approval, preflight: await load(directory, `${phaseName}-preflight.json`),
+        validation: await load(directory, `${phaseName}-validation.json`),
         providerOperations: await load(directory, 'queue-provider-operations.json'),
         whatIf: await load(directory, `${phaseName}-what-if.json`), journal: await load(directory, `${phaseName}-journal.json`), receipt };
       verifyQueueRecord(c, record);

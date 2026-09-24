@@ -1,9 +1,9 @@
-import { BUDGET, buildPhase, digest, ids, json, ownerTags, RECEIVER_COMMAND, RECEIVER_DIGEST } from '../definition.mjs';
+import { BUDGET, buildPhase, digest, ids, json, ownerTags, RECEIVER_COMMAND, RECEIVER_DIGEST, SYNTHETIC_FIXTURES } from '../definition.mjs';
 import { resourceContext, predecessorInstanceIds, verifyWindowPredecessor } from '../policy.mjs';
 import { buildDisabledImagePhase, verifyDisabledImageRecord, verifyReceiverCandidate,
-  QUEUE_SOURCE_INPUTS, receiverCost, ReceiverUpgradeController } from '../receiver-upgrade.mjs';
+  QUEUE_SOURCE_INPUTS, QUEUE_SDK_FIXTURES, receiverCost, ReceiverUpgradeController } from '../receiver-upgrade.mjs';
 import { buildQueuePhase, durableQueueCost, queueTopology, QUEUE_AUTHORITY, QUEUE_PERMISSIONS, QUEUE_PROFILE_KIND, QUEUE_RUNTIME,
-  verifyQueueProviderOperations, verifyQueueRecord, QueueTopologyController } from '../durable-queue.mjs';
+  verifyQueueProviderOperations, verifyQueueRecord, verifyQueueWhatIf, queuePreflightBaseline, QueueTopologyController } from '../durable-queue.mjs';
 import { candidateFixture } from './receiver-upgrade.fixture.mjs';
 import { terminalReceiverWindow } from './receiver-window.fixture.mjs';
 
@@ -63,13 +63,15 @@ export function queueCandidateFixture(f, priorCandidate) {
   p.scan.reportJson = json(scan); p.scan.reportSha256 = digest(p.scan.reportJson);
   const qualification = JSON.parse(p.qualification.reportJson);
   qualification.artifact.manifest = p.manifestDigest; qualification.artifact.config = p.configDigest;
+  const decodedJson = JSON.stringify({ ...SYNTHETIC_FIXTURES[0], TimeGenerated: new Date(f.at).toISOString() });
+  const encodedMessage = Buffer.from(decodedJson, 'utf8').toString('base64');
   qualification.durableQueue = { version: 1, kind: 'source-bound-local-queue-sdk-proof',
     sourceFilesSha256: digest(json(p.source.files)), sdkSourceManifestSha256: p.source.files['services/telemetry-ingest/runtime-sources.lock.json'],
     runtime: QUEUE_RUNTIME, disabledNetworkRequests: 0, producerStatus: 202, producerElapsedMs: 30,
     storageScope: QUEUE_RUNTIME.producerScope, consumerScope: QUEUE_RUNTIME.consumerScope, cloudPublication: false, azureEffects: false,
-    fixtures: Object.fromEntries(['slow-monitor-fast-durable-ack', 'failed-producer-readiness', 'restart-preserves-queued-message',
-      'queue-overflow', 'ttl-expiration', 'three-delivery-attempts', 'visibility-retry', 'single-worker', 'ambiguous-send-no-retry',
-      'disabled-zero-network', 'no-implicit-queue-creation'].map(name => [name,
+    encoding: { version: 1, kind: QUEUE_RUNTIME.messageEncoding, encodedMessage, decodedJson,
+      encodedBytes: Buffer.byteLength(encodedMessage, 'utf8'), decodedBytes: Buffer.byteLength(decodedJson, 'utf8') },
+    fixtures: Object.fromEntries(QUEUE_SDK_FIXTURES.map(name => [name,
       { result: 'LOCAL_QUEUE_SDK_FIXTURE_PASSED', reportSha256: digest(`UNIT fixture ${name}`), passed: 2, failed: 0 }])) };
   p.qualification.reportJson = json(qualification); p.qualification.reportSha256 = digest(p.qualification.reportJson);
   Object.assign(candidate.review, { version: 2, action: 'publish-one-reviewed-queue-receiver',
@@ -95,14 +97,20 @@ export function queuePhaseFixture(f, name, priorRecords = {}) {
     ...QUEUE_PERMISSIONS.actions.map(name => ({ name, isDataAction: false })),
     ...QUEUE_PERMISSIONS.dataActions.map(name => ({ name, isDataAction: true })),
   ] };
+  const validation = { properties: { provisioningState: 'Succeeded', templateHash: digest(json(phase.template)) } };
+  const preview = verifyQueueWhatIf(c, phase, topology, whatIf, [], identity);
   const binding = { foundationBaselineSha256: f.origin.policyBaselineSha256, topologyReviewSha256: digest(json(review)),
-    providerOperationsSha256: verifyQueueProviderOperations(providerOperations), preservedIdsSha256: digest(json([])) };
+    providerOperationsSha256: verifyQueueProviderOperations(providerOperations), preservedIds: [],
+    queuePreview: preview, queuePreviewSha256: digest(json(preview)),
+    requiredPostCreateReadbacksSha256: preview.requiredPostCreateReadbacksSha256,
+    armValidationSha256: digest(json(validation)), validatedTemplateSha256: digest(json(phase.template)) };
   const approval = { action: `direct-arm-${name}`, configSha256: digest(json(c)), phaseSha256: digest(json(phase)),
     sourceSha256: source, originSha256: c.originSha256, receiptsSha256: digest(json(priorRecords)),
-    baselineSha256: digest(json(binding)), whatIfSha256: digest(json(whatIf)),
+    baselineSha256: queuePreflightBaseline(binding), whatIfSha256: digest(json(whatIf)),
     approvedAt: review.approvedAt, expiresAt: review.expiresAt };
   const proof = { ...Object.fromEntries(Object.entries(approval).filter(([k]) => k.endsWith('Sha256'))), ...binding,
-    preservedIds: [], qualified: true, startedAt: now, completedAt: now, cost: durableQueueCost() };
+    preservedIds: [], qualified: true, startedAt: now, completedAt: now, cost: durableQueueCost(),
+    computedValuesReviewed: phase.computedReadbacksRequired.length === 0 };
   const resources = Object.fromEntries(phase.resources.map(d => {
     const actual = { ...structuredClone(d.expected), id: d.id };
     if (d.type === 'Microsoft.Storage/storageAccounts') Object.assign(actual.properties, { provisioningState: 'Succeeded',
@@ -125,7 +133,7 @@ export function queuePhaseFixture(f, name, priorRecords = {}) {
   const controller = new QueueTopologyController(c, phase, topology, review, io);
   const record = () => ({ version: 1, kind: 'reviewed-queue-phase', topology, review,
     publication: { commitSha: 'c'.repeat(40), sourceSha256: source }, identity, priorRecords, phase, approval,
-    preflight: proof, providerOperations, whatIf, journal, receipt });
+    preflight: proof, providerOperations, validation, whatIf, journal, receipt });
   return { phase, io, review, approval, proof, controller, record, resources, whatIf,
     get dispatched() { return dispatched; }, advance: ms => { now += ms; } };
 }

@@ -413,7 +413,8 @@ function budgetWhatIfConfiguration(value) {
   return configuration;
 }
 export function verifyWhatIf(phase, result, preservedIds = [], context) {
-  if (QUEUE_PHASES.includes(phase.phase)) return verifyQueueWhatIf(context?.config, phase, context?.queueTopology, result, preservedIds);
+  if (QUEUE_PHASES.includes(phase.phase)) return verifyQueueWhatIf(context?.config, phase, context?.queueTopology, result, preservedIds,
+    context?.identities?.[ids(context.config).ingestIdentity]).whatIfSha256;
   if (result?.status !== 'Succeeded' || !Array.isArray(result.changes)) fail('WHAT_IF_INCOMPLETE');
   const target = new Map(phase.resources.map(v => [v.id.toLowerCase(), v]));
   const preserved = new Set(preservedIds.map(v => v.toLowerCase()));

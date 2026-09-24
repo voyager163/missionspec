@@ -5,7 +5,8 @@ import { buildPhase, deploymentName, digest, ids, json, firstReleaseCost, PHASES
 import { buildQueuePhase, durableQueueCost, queueEnvironment, queueIds, queueTopology, QUEUE_AUTHORITY, QUEUE_PERMISSIONS,
   QUEUE_RUNTIME, verifyQueueReview, verifyQueueTopology, verifyQueueProviderOperations, verifyQueueResource, verifyQueueWhatIf,
   verifyQueueRecord, qualifiedQueueRecords, verifyQueueDrain, verifyOfficialQueuePrices, verifyQueueApiCatalog } from '../durable-queue.mjs';
-import { QUEUE_SOURCE_INPUTS, RECEIVER_SOURCE_INPUTS, buildDisabledImagePhase, verifyReceiverCandidate, verifyReceiverProfile,
+import { QUEUE_BUILD_INPUTS, QUEUE_SOURCE_INPUTS, QUEUE_SDK_FIXTURES, RECEIVER_BUILD_INPUTS, RECEIVER_SOURCE_INPUTS, PREPARED_IDENTITY_RUNTIME,
+  buildDisabledImagePhase, verifyReceiverCandidate, verifyReceiverProfile, verifyQueueEncodingProof,
   prepareReceiverPublication, verifyReceiverInventory, verifyDisabledImageRecord } from '../receiver-upgrade.mjs';
 import { admissionFlag, verifyWhatIf, verifyWindowPredecessor, resourceContext } from '../policy.mjs';
 import { emptyAcrReferrers, knownResourceIds, readPublishedImage, readQueueRecords, whatIfRequestContext, transport, verifyPublishedQueueRecords,
@@ -54,6 +55,14 @@ test('new namespace is explicit/bounded and topology binds config, queue URL, id
   assert.equal(JSON.stringify(phase).includes('Microsoft.Security'), false);
   assert.equal(JSON.stringify(phase).includes('listKeys'), false);
   assert.equal(phase.template.resources.filter(v => v.type.endsWith('/queues')).length, 1);
+  assert.equal(q.runtime.messageEncoding, 'base64-json-v1');
+  assert.equal(q.runtime.maxEncodedMessageBytes, 1024);
+  assert.equal(q.runtime.maxPayloadBytes, 1024);
+  assert.equal(q.runtime.canonicalBase64, true);
+  assert.equal(q.runtime.plaintextFallback, false);
+  assert.equal(Object.hasOwn(PREPARED_IDENTITY_RUNTIME, 'messageEncoding'), false);
+  assert.equal(Object.hasOwn(q.runtime, 'messageCodec'), false);
+  assert.equal(Object.hasOwn(q.runtime, 'maxDecodedMessageBytes'), false);
 });
 
 test('minimal official queue permissions classify metadata as Action, add and receive/delete as DataActions', () => {
@@ -187,13 +196,17 @@ test('queue controller anchors one durable intent, bounded final checks and 120s
 test('three-image admission preserves old candidate/publication tags and requires queue-specific typed SDK/source qualification', async t => {
   const f = await queueUpgradeFixture(), original = json(f.priorCandidate);
   verifyReceiverCandidate(f.c, f.candidate); assert.equal(json(f.candidate.priorCandidate), original);
-  assert.equal(RECEIVER_SOURCE_INPUTS.length, 35); assert.equal(QUEUE_SOURCE_INPUTS.length, 38);
+  assert.equal(RECEIVER_SOURCE_INPUTS.length, 35); assert.equal(QUEUE_SOURCE_INPUTS.length, 40);
+  assert.equal(RECEIVER_BUILD_INPUTS.length, 9); assert.equal(QUEUE_BUILD_INPUTS.length, 11);
   const pending = structuredClone(f.candidate); pending.publication = null;
   const preview = prepareReceiverPublication(f.c, pending, f.priorCandidate.publication, f.at);
   assert.equal(preview.recentDigestCount, 3); assert.equal(preview.pushExecuted, false); assert.equal(preview.cost.total, 349.37);
   for (const [label, mutate] of [
     ['bare qualified profile', x => { x.profile = { qualified: true }; }],
     ['legacy closure', x => { delete x.profile.source.files['services/telemetry-ingest/src/queue-storage.ts']; }],
+    ['external license manifest missing', x => { delete x.profile.source.files['licenses/external-service-licenses.json']; }],
+    ['external license text missing', x => { delete x.profile.source.files['licenses/external/nodable-entities-2.1.0/LICENSE.md']; }],
+    ['external license text hash changed', x => { x.profile.source.files['licenses/external/nodable-entities-2.1.0/LICENSE.md'] = digest('other license'); }],
     ['unbound SDK source', x => { const p = JSON.parse(x.profile.qualification.reportJson); p.durableQueue.sdkSourceManifestSha256 = digest('other'); x.profile.qualification.reportJson = json(p); x.profile.qualification.reportSha256 = digest(json(p)); }],
     ['missing typed fixture counts', x => { const p = JSON.parse(x.profile.qualification.reportJson); delete p.durableQueue.fixtures['single-worker'].failed; x.profile.qualification.reportJson = json(p); x.profile.qualification.reportSha256 = digest(json(p)); }],
     ['direct approval for queue profile', x => { x.version = 1; }],
@@ -204,6 +217,100 @@ test('three-image admission preserves old candidate/publication tags and require
     ['old cost reused', x => { x.review.cost = firstReleaseCost(2); }],
     ['changed old source', x => { x.priorCandidate.review.sourceSha256 = digest('other'); }],
   ]) await t.test(label, () => { const copy = structuredClone(f.candidate); mutate(copy); assert.throws(() => verifyReceiverCandidate(f.c, copy)); });
+});
+
+function encodingFixture(record = { ...SYNTHETIC_FIXTURES[0], TimeGenerated: '2026-09-23T08:10:00.000Z' }) {
+  const decodedJson = JSON.stringify(record), encodedMessage = Buffer.from(decodedJson, 'utf8').toString('base64');
+  return { version: 1, kind: 'base64-json-v1', encodedMessage, decodedJson,
+    encodedBytes: Buffer.byteLength(encodedMessage, 'utf8'), decodedBytes: Buffer.byteLength(decodedJson, 'utf8') };
+}
+
+test('queued encoding proof binds canonical Base64 and exact compact unchanged nine-field UTF-8 JSON', () => {
+  const proof = encodingFixture();
+  verifyQueueEncodingProof(proof);
+  const record = JSON.parse(proof.decodedJson); record.durationBucket = null;
+  verifyQueueEncodingProof(encodingFixture(record));
+  assert.equal(Object.keys(record).length, 9);
+  assert(!Object.hasOwn(record, 'messageEncoding'));
+  assert.deepEqual(JSON.parse(Buffer.from(proof.encodedMessage, 'base64').toString('utf8')), JSON.parse(proof.decodedJson));
+  assert(proof.encodedBytes <= 1024 && proof.decodedBytes <= 1024);
+  assert.equal(QUEUE_SDK_FIXTURES.length, 15);
+});
+
+test('Base64 qualification rejects plaintext fallback, noncanonical wire, invalid UTF-8, size/count and analytics drift', async t => {
+  for (const [name, mutate] of [
+    ['plaintext', x => { x.encodedMessage = x.decodedJson; x.encodedBytes = Buffer.byteLength(x.encodedMessage); }],
+    ['whitespace', x => { x.encodedMessage += '\n'; x.encodedBytes++; }],
+    ['base64url alphabet', x => { x.encodedMessage = '-' + x.encodedMessage.slice(1); }],
+    ['wire byte count', x => { x.encodedBytes++; }],
+    ['JSON byte count', x => { x.decodedBytes++; }],
+    ['encoded ceiling', x => { x.encodedMessage = 'A'.repeat(1028); x.encodedBytes = 1028; }],
+    ['decoded ceiling', x => { x.decodedJson = 'A'.repeat(1025); x.decodedBytes = 1025; }],
+    ['different decoded bytes', x => { x.decodedJson = x.decodedJson.replace('draft', 'wrong'); }],
+    ['invalid UTF8', x => {
+      const bytes = Buffer.from(x.decodedJson); bytes[bytes.indexOf('draft')] = 255;
+      x.encodedMessage = bytes.toString('base64'); x.encodedBytes = x.encodedMessage.length;
+      x.decodedJson = bytes.toString('utf8'); x.decodedBytes = Buffer.byteLength(x.decodedJson);
+    }],
+    ['not compact', x => {
+      x.decodedJson = JSON.stringify(JSON.parse(x.decodedJson), null, 2);
+      x.encodedMessage = Buffer.from(x.decodedJson).toString('base64');
+      x.encodedBytes = x.encodedMessage.length; x.decodedBytes = Buffer.byteLength(x.decodedJson);
+    }],
+    ['extra analytics marker', x => Object.assign(x, encodingFixture({ ...JSON.parse(x.decodedJson), messageEncoding: 'base64-json-v1' }))],
+    ['invalid analytics enum', x => Object.assign(x, encodingFixture({ ...JSON.parse(x.decodedJson), operation: 'unknown-command' }))],
+    ['wrong kind', x => { x.kind = 'plaintext-json-v1'; }],
+  ]) await t.test(name, () => {
+    const proof = encodingFixture(); mutate(proof);
+    assert.throws(() => verifyQueueEncodingProof(proof));
+  });
+  const padded = ['0.0.0', '0.0.10', '0.0.100'].map(cliVersion =>
+    encodingFixture({ ...SYNTHETIC_FIXTURES[0], cliVersion, TimeGenerated: '2026-09-23T08:10:00.000Z' }))
+    .find(v => v.encodedMessage.endsWith('=='));
+  assert(padded);
+  const unpadded = { ...padded, encodedMessage: padded.encodedMessage.replace(/=+$/u, '') };
+  unpadded.encodedBytes = unpadded.encodedMessage.length;
+  assert.throws(() => verifyQueueEncodingProof(unpadded), /QUEUE_BASE64_PROOF_INVALID/);
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  const index = padded.encodedMessage.length - 3;
+  const nonzeroPadding = { ...padded, encodedMessage: padded.encodedMessage.slice(0, index) +
+    alphabet[alphabet.indexOf(padded.encodedMessage[index]) + 1] + '==' };
+  assert.throws(() => verifyQueueEncodingProof(nonzeroPadding), /QUEUE_BASE64_PROOF_INVALID/);
+});
+
+test('new queued profile requires measured codec sample and all four codec report groups; old profiles stay unchanged', async () => {
+  const f = await queueUpgradeFixture();
+  const oldProfileBytes = json(f.priorCandidate.profile);
+  verifyReceiverProfile(f.priorCandidate.profile);
+  for (const path of ['licenses/external-service-licenses.json', 'licenses/external/nodable-entities-2.1.0/LICENSE.md']) {
+    assert(QUEUE_BUILD_INPUTS.includes(path)); assert(QUEUE_SOURCE_INPUTS.includes(path));
+    assert(!RECEIVER_BUILD_INPUTS.includes(path)); assert(!RECEIVER_SOURCE_INPUTS.includes(path));
+    assert.equal(Object.hasOwn(f.priorCandidate.profile.source.files, path), false);
+  }
+  for (const field of ['messageEncoding', 'maxEncodedMessageBytes', 'maxPayloadBytes', 'canonicalBase64', 'plaintextFallback']) {
+    const profile = structuredClone(f.candidate.profile); delete profile.runtime[field];
+    assert.throws(() => verifyReceiverProfile(profile), /RECEIVER_PROFILE_INVALID/);
+  }
+  const alias = structuredClone(f.candidate.profile);
+  alias.runtime.messageCodec = alias.runtime.messageEncoding; delete alias.runtime.messageEncoding;
+  assert.throws(() => verifyReceiverProfile(alias), /RECEIVER_PROFILE_INVALID/);
+  for (const name of ['encoding', ...QUEUE_SDK_FIXTURES.slice(11)]) {
+    const profile = structuredClone(f.candidate.profile), report = JSON.parse(profile.qualification.reportJson);
+    if (name === 'encoding') delete report.durableQueue.encoding;
+    else delete report.durableQueue.fixtures[name];
+    profile.qualification.reportJson = json(report); profile.qualification.reportSha256 = digest(profile.qualification.reportJson);
+    assert.throws(() => verifyReceiverProfile(profile));
+  }
+  const profile = structuredClone(f.candidate.profile), report = JSON.parse(profile.qualification.reportJson);
+  report.durableQueue.encoding.encodedMessage = report.durableQueue.encoding.decodedJson;
+  report.durableQueue.encoding.encodedBytes = Buffer.byteLength(report.durableQueue.encoding.encodedMessage);
+  profile.qualification.reportJson = json(report); profile.qualification.reportSha256 = digest(profile.qualification.reportJson);
+  assert.throws(() => verifyReceiverProfile(profile), /QUEUE_BASE64_PROOF_INVALID/);
+  const vulnerable = structuredClone(f.candidate.profile), scan = JSON.parse(vulnerable.scan.reportJson);
+  scan.Results[0].Vulnerabilities[0].VulnerabilityID = 'CVE-2026-41650';
+  vulnerable.scan.reportJson = json(scan); vulnerable.scan.reportSha256 = digest(vulnerable.scan.reportJson);
+  assert.throws(() => verifyReceiverProfile(vulnerable), /QUEUE_XML_PATCH_REQUIRED/);
+  assert.equal(json(f.priorCandidate.profile), oldProfileBytes);
 });
 
 test('third-image registry reader checks all three full manifests/referrers and rejects unknown images', async () => {

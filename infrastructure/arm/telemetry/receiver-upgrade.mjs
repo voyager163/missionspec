@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
+import { readFileSync } from 'node:fs';
 import { buildPhase, closed, digest, fail, firstReleaseCost, ids, json, RECEIVER_COMMAND, RECEIVER_DIGEST,
   sameId, validateConfig, validateWindowInstance } from './definition.mjs';
 import { admissionFlag, canonicalAppWrite, canonicalInstant, executionIdentity, resourceContext,
@@ -28,9 +29,20 @@ export const RECEIVER_SOURCE_INPUTS = Object.freeze([...RECEIVER_BUILD_INPUTS, .
   'tests/config-storage.test.mjs', 'tests/container-runtime.test.mjs', 'tests/helpers.mjs', 'tests/http.test.mjs',
   'tests/identity-readiness.test.mjs', 'tests/loopback-tls.json', 'tests/runtime-sources.test.mjs', 'tests/sdk-deadline.test.mjs',
 ].map(path => `services/telemetry-ingest/${path}`)]);
+const QUEUE_LICENSE_INPUTS = Object.freeze([
+  'licenses/external-service-licenses.json', 'licenses/external/nodable-entities-2.1.0/LICENSE.md',
+]);
+export const QUEUE_BUILD_INPUTS = Object.freeze([...RECEIVER_BUILD_INPUTS, ...QUEUE_LICENSE_INPUTS]);
 export const QUEUE_SOURCE_INPUTS = Object.freeze([...RECEIVER_SOURCE_INPUTS,
   'services/telemetry-ingest/src/queue-storage.ts',
   'services/telemetry-ingest/tests/queue-storage.test.mjs', 'services/telemetry-ingest/tests/queue-sdk.test.mjs',
+  ...QUEUE_LICENSE_INPUTS,
+]);
+export const QUEUE_SDK_FIXTURES = Object.freeze([
+  'slow-monitor-fast-durable-ack', 'failed-producer-readiness', 'restart-preserves-queued-message',
+  'queue-overflow', 'ttl-expiration', 'three-delivery-attempts', 'visibility-retry', 'single-worker',
+  'ambiguous-send-no-retry', 'disabled-zero-network', 'no-implicit-queue-creation',
+  'canonical-base64-wire', 'base64-size-bounds', 'base64-no-plaintext-fallback', 'base64-entity-heavy-batch',
 ]);
 export const receiverSourceInputs = profile => profile?.kind === QUEUE_PROFILE_KIND ? QUEUE_SOURCE_INPUTS : RECEIVER_SOURCE_INPUTS;
 export const receiverCost = candidate => candidate?.version === 2 ? durableQueueCost() : firstReleaseCost(2);
@@ -43,6 +55,7 @@ const hash = value => typeof value === 'string' && /^[0-9a-f]{64}$/u.test(value)
 const imageHash = value => typeof value === 'string' && /^sha256:[0-9a-f]{64}$/u.test(value);
 const repository = 'missionspec/telemetry-ingest';
 const clearance = 'CONDITIONAL_DISABLED_OR_SYNTHETIC_ONLY';
+const wireSchema = JSON.parse(readFileSync(new URL('../../../assets/schemas/telemetry-event.schema.json', import.meta.url), 'utf8'));
 
 function parseArtifact(bytes) {
   if (typeof bytes !== 'string' || bytes.length > 64 * 1024 * 1024) fail('RECEIVER_ARTIFACT_INVALID');
@@ -127,6 +140,7 @@ export function verifyReceiverProfile(profile) {
     if (result.Vulnerabilities !== undefined && !Array.isArray(result.Vulnerabilities)) fail('RECEIVER_SCAN_FINDINGS_INVALID');
     for (const finding of result.Vulnerabilities ?? []) {
       if (!Object.hasOwn(counts, finding.Severity) || typeof finding.VulnerabilityID !== 'string') fail('RECEIVER_SCAN_FINDINGS_INVALID');
+      if (queued && finding.VulnerabilityID === 'CVE-2026-41650') fail('QUEUE_XML_PATCH_REQUIRED');
       counts[finding.Severity]++;
     }
   }
@@ -169,15 +183,38 @@ export function verifyReceiverProfile(profile) {
     ...(queued ? { queueRuntime: QUEUE_RUNTIME } : {}) };
 }
 
+export function verifyQueueEncodingProof(proof) {
+  closed(proof, ['version', 'kind', 'encodedMessage', 'decodedJson', 'encodedBytes', 'decodedBytes']);
+  if (proof.version !== 1 || proof.kind !== QUEUE_RUNTIME.messageEncoding ||
+      typeof proof.encodedMessage !== 'string' || typeof proof.decodedJson !== 'string' ||
+      !Number.isSafeInteger(proof.encodedBytes) || proof.encodedBytes < 1 || proof.encodedBytes > QUEUE_RUNTIME.maxEncodedMessageBytes ||
+      !Number.isSafeInteger(proof.decodedBytes) || proof.decodedBytes < 1 || proof.decodedBytes > QUEUE_RUNTIME.maxPayloadBytes ||
+      Buffer.byteLength(proof.encodedMessage, 'utf8') !== proof.encodedBytes ||
+      Buffer.byteLength(proof.decodedJson, 'utf8') !== proof.decodedBytes) fail('QUEUE_BASE64_PROOF_INVALID');
+  const decoded = Buffer.from(proof.encodedMessage, 'base64');
+  if (decoded.toString('base64') !== proof.encodedMessage || decoded.length !== proof.decodedBytes ||
+      !decoded.equals(Buffer.from(proof.decodedJson, 'utf8'))) fail('QUEUE_BASE64_PROOF_INVALID');
+  let record;
+  try { record = JSON.parse(proof.decodedJson); } catch { fail('QUEUE_BASE64_PROOF_INVALID'); }
+  closed(record, ['TimeGenerated', 'schemaVersion', 'event', 'operation', 'cliVersion', 'outcome', 'host', 'os', 'durationBucket']);
+  if (JSON.stringify(record) !== proof.decodedJson) fail('QUEUE_BASE64_PROOF_INVALID');
+  for (const [name, rule] of Object.entries(wireSchema.properties)) {
+    const value = record[name];
+    if ((Object.hasOwn(rule, 'const') && value !== rule.const) ||
+        (rule.enum && !rule.enum.includes(value)) ||
+        (rule.type === 'string' && (typeof value !== 'string' || value.length > rule.maxLength ||
+          !new RegExp(rule.pattern, 'u').test(value)))) fail('QUEUE_BASE64_PROOF_INVALID');
+  }
+  canonicalInstant(record.TimeGenerated);
+}
+
 function verifyQueueQualification(profile, qualification) {
   const proof = qualification.durableQueue;
   closed(proof, ['version', 'kind', 'sourceFilesSha256', 'sdkSourceManifestSha256', 'runtime',
     'disabledNetworkRequests', 'producerStatus', 'producerElapsedMs', 'storageScope', 'consumerScope',
-    'fixtures', 'cloudPublication', 'azureEffects']);
-  const fixtures = ['slow-monitor-fast-durable-ack', 'failed-producer-readiness', 'restart-preserves-queued-message',
-    'queue-overflow', 'ttl-expiration', 'three-delivery-attempts', 'visibility-retry', 'single-worker',
-    'ambiguous-send-no-retry', 'disabled-zero-network', 'no-implicit-queue-creation'];
-  closed(proof.fixtures, fixtures);
+    'fixtures', 'encoding', 'cloudPublication', 'azureEffects']);
+  closed(proof.fixtures, QUEUE_SDK_FIXTURES);
+  verifyQueueEncodingProof(proof.encoding);
   if (proof.version !== 1 || proof.kind !== 'source-bound-local-queue-sdk-proof' ||
       proof.sourceFilesSha256 !== digest(json(profile.source.files)) ||
       proof.sdkSourceManifestSha256 !== profile.source.files['services/telemetry-ingest/runtime-sources.lock.json'] ||
@@ -185,7 +222,7 @@ function verifyQueueQualification(profile, qualification) {
       proof.producerStatus !== 202 || !Number.isFinite(proof.producerElapsedMs) || proof.producerElapsedMs < 0 ||
       proof.producerElapsedMs > 1000 || proof.storageScope !== QUEUE_RUNTIME.producerScope ||
       proof.consumerScope !== QUEUE_RUNTIME.consumerScope || proof.cloudPublication !== false || proof.azureEffects !== false) fail('QUEUE_SDK_QUALIFICATION_REQUIRED');
-  for (const name of fixtures) {
+  for (const name of QUEUE_SDK_FIXTURES) {
     const value = proof.fixtures[name];
     closed(value, ['result', 'reportSha256', 'passed', 'failed']);
     if (value.result !== 'LOCAL_QUEUE_SDK_FIXTURE_PASSED' || !hash(value.reportSha256) ||
