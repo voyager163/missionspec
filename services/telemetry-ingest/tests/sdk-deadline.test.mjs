@@ -5,7 +5,7 @@ import https from 'node:https';
 import { once } from 'node:events';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -219,8 +219,6 @@ test('pinned production SDK readiness, deadline, cancellation and drain faults s
   }
   assert(cases.includes(selected));
   const run = (name, title, callback) => name === selected ? t.test(title, callback) : Promise.resolve();
-  const directory = fileURLToPath(new URL(`.sdk-fault-${randomUUID()}`, import.meta.url));
-  await mkdir(directory, { mode: 0o700 });
   const variables = ['IDENTITY_ENDPOINT', 'IDENTITY_HEADER', 'MSI_ENDPOINT', 'MSI_SECRET', 'IMDS_ENDPOINT',
     'IDENTITY_SERVER_THUMBPRINT', 'AZURE_FEDERATED_TOKEN_FILE', 'AZURE_CLIENT_ID', 'AZURE_TENANT_ID',
     'AZURE_AUTHORITY_HOST', 'AZURE_LOG_LEVEL', 'DEBUG'];
@@ -231,16 +229,13 @@ test('pinned production SDK readiness, deadline, cancellation and drain faults s
   setLogLevel(undefined); AzureLogger.log = () => {};
   t.after(async () => {
     for (const [name, value] of Object.entries(originalEnv)) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
-    await rm(directory, { recursive: true });
     if (process.env.MSR_LOCAL_FAULT_EVIDENCE) {
       assert.match(process.env.MSR_LOCAL_FAULT_EVIDENCE, /^(?:infrastructure\/arm\/telemetry\/\.operator-private\/revision-[a-z0-9-]+|services\/telemetry-ingest\/\.build-cache\/readiness-[a-z0-9-]+)\/sdk-fault-[a-z-]+\.json$/u);
       await writeFile(process.env.MSR_LOCAL_FAULT_EVIDENCE, JSON.stringify({ localOnly: true, cases: evidence }, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
     }
   });
-  await promisify(execFile)('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', `${directory}/key.pem`,
-    '-out', `${directory}/cert.pem`, '-days', '1', '-subj', '/CN=localhost', '-addext', 'subjectAltName=IP:127.0.0.1'],
-  { timeout: 10000, maxBuffer: 16384 });
-  const [key, cert] = await Promise.all([readFile(`${directory}/key.pem`), readFile(`${directory}/cert.pem`)]);
+  // Public test-only material avoids requiring the OpenSSL CLI in the pinned slim builder.
+  const { key, cert } = JSON.parse(await readFile(new URL('loopback-tls.json', import.meta.url), 'utf8'));
   await run('fast-control', 'fast token and upload control uses the actual identity, bearer, ingestion and HTTP layers', async t => {
     const f = await scenario(t, cert, key, 'fast-control');
     const response = await f.post();

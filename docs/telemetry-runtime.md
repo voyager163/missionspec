@@ -125,6 +125,10 @@ HTTP responses are synthetic and in-memory; ingestion uses the real SDK HTTP
 transport against loopback TLS. Each case runs in a separate process because
 MSAL caches its selected identity source. No Azure credential, token acquisition,
 remote ingestion, or receiver image build is performed.
+The loopback-only certificate/key in `tests/loopback-tls.json` is public test
+material, never an operator credential or a production trust root. It avoids an
+OpenSSL CLI dependency in the pinned slim build stage; tests still use the real
+SDK TLS transport with verification enabled and explicit fixture trust.
 
 The bounded cases retain fast success, slow first token on the unprepared adapter,
 slow ingestion, disconnect during either stage, and all eight unresolved work slots.
