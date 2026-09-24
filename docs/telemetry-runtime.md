@@ -117,6 +117,30 @@ Run a non-uploading scanner on the saved exact image without suppressions,
 scanner/database versions and all remaining findings, not merely a zero exit
 code. Source archives are not a reason to conceal the real runtime inventory.
 
+### Local SDK deadline and cancellation faults
+
+`services/telemetry-ingest/tests/sdk-deadline.test.mjs` runs the installed pinned
+identity/ingestion SDKs with the production storage adapter and receiver. Token
+HTTP responses are synthetic and in-memory; ingestion uses the real SDK HTTP
+transport against loopback TLS. Each case runs in a separate process because
+MSAL caches its selected identity source. No Azure credential, token acquisition,
+remote ingestion, or receiver image build is performed.
+
+The bounded cases cover fast success, slow first token, slow ingestion,
+disconnect during either stage, and all eight unresolved production work slots.
+They retain the 650 ms storage timer and 1,000 ms local client ceiling. Timings
+include ordinary event-loop scheduling delay; they are not a claim that a
+JavaScript timer creates an atomic 650 ms provider stop.
+
+In the current pinned MI/MSAL path, caller cancellation does not interrupt the
+synthetic token request: that SDK task can outlive the receiver's 503 or client
+disconnect. The receiver keeps its work slot until settlement, and the real
+ingestion HTTP transport rejects an already-aborted request before a late token
+can cause an ingestion POST. Once an ingestion request was already sent,
+cancellation is not proof of non-commit by a remote provider. These fault tests
+verify local safety/cleanup behavior, not the cause of a historical Azure timeout
+or justification for token warmup, retries, deadline changes or a new image.
+
 ### Native/bundled Node coverage is separate
 
 An empty High/Critical package result does not establish coverage of the copied
