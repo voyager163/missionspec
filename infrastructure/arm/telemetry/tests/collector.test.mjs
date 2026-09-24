@@ -9,9 +9,13 @@ import { buildPhase, storageContract, ids, json, digest, ownerTags, firstRelease
 import { verifyWhatIf, assertBudget, permitFirstPush, verifyResource, executionIdentity,
   verifyExecutionOrigins, verifyReconciliation, verifyDeploymentIdentity, roleDefinitionSignature, verifyImagePublication, verifyPublicationReadback, resourceContext } from '../policy.mjs';
 import { manifestJson, configJson } from './receiver-oci.fixture.mjs';
+import { candidateFixture } from './receiver-upgrade.fixture.mjs';
+import { terminalReceiverWindow } from './receiver-window.fixture.mjs';
+import { buildDisabledImagePhase, ReceiverUpgradeController, RECEIVER_SOURCE_INPUTS, verifyDisabledImageRecord } from '../receiver-upgrade.mjs';
 import { CollectorController, az, transport, validateReadOnly, verifyScannerAdoption, verifyOrigin, verifyProjectBudgetReceipt,
   checkReadOnly, load, saveImmutable, MAX_PRIVATE_ARTIFACT_BYTES, DIAGNOSTIC_API, privateDirectory, sourceDigest,
-  publishedSourceDigest, collectReconciliation, reviewedReconciliationReceipts, verifyFreshReconciliation, readPrivacy, readAssignmentRoleDefinitions, whatIfRequestContext } from '../controller.mjs';
+  publishedSourceDigest, collectReconciliation, reviewedReconciliationReceipts, verifyFreshReconciliation, readPrivacy, readAssignmentRoleDefinitions,
+  whatIfRequestContext, receiverUpgradeIO } from '../controller.mjs';
 
 const c = { version: 2, subscriptionId: '00000000-0000-4000-8000-000000000001',
   tenantId: '00000000-0000-4000-8000-000000000002', operatorPrincipalId: '00000000-0000-4000-8000-000000000003',
@@ -1136,7 +1140,8 @@ test('published source lookup uses immutable commit blobs and never evaluates hi
     assert.equal(command, 'git'); commands.push(args);
     if (args[0] === 'merge-base') { assert.deepEqual(args, ['merge-base', '--is-ancestor', commit, 'HEAD']); return { stdout: Buffer.alloc(0) }; }
     if (args[0] === 'ls-tree') {
-      assert.deepEqual(args, ['ls-tree', '--name-only', commit, '--', 'infrastructure/arm/telemetry/arm-whatif.py']);
+      assert.deepEqual(args.slice(0, 4), ['ls-tree', '--name-only', commit, '--']);
+      assert(['infrastructure/arm/telemetry/arm-whatif.py', 'infrastructure/arm/telemetry/receiver-upgrade.mjs'].includes(args[4]));
       return { stdout: Buffer.alloc(0) };
     }
     assert.deepEqual(args.slice(0, 2), ['--no-pager', 'show']);
@@ -1145,16 +1150,16 @@ test('published source lookup uses immutable commit blobs and never evaluates hi
     return { stdout: Buffer.from(files[path]) };
   };
   assert.equal(await publishedSourceDigest(commit, run), expected.digest('hex'));
-  assert.equal(commands.length, 7);
+  assert.equal(commands.length, 8);
   for (const ref of ['HEAD', '--all', 'a'.repeat(39), 'g'.repeat(40)]) await assert.rejects(publishedSourceDigest(ref, run), /PUBLISHED_ORIGIN_INVALID/);
-  assert.equal(commands.length, 7);
+  assert.equal(commands.length, 8);
   const bridgePath = 'infrastructure/arm/telemetry/arm-whatif.py';
   files[bridgePath] = 'bounded historical bridge';
   const withBridge = createHash('sha256');
   for (const [path, body] of Object.entries(sourceFiles)) withBridge.update(path.split('/').at(-1)).update(body);
   withBridge.update('arm-whatif.py').update(files[bridgePath]).update(json(contract));
   assert.equal(await publishedSourceDigest(commit, async (command, args) =>
-    args[0] === 'ls-tree' ? { stdout: Buffer.from(bridgePath + '\n') } : run(command, args)), withBridge.digest('hex'));
+    args[0] === 'ls-tree' && args.at(-1) === bridgePath ? { stdout: Buffer.from(bridgePath + '\n') } : run(command, args)), withBridge.digest('hex'));
   await assert.rejects(publishedSourceDigest(commit, async () => { throw new Error('private git failure'); }), { message: 'PUBLISHED_ORIGIN_UNAVAILABLE' });
 });
 test('reconciliation and fresh qualification read only the exact deployed resources and supported privacy routes', async t => {
@@ -1179,7 +1184,7 @@ test('reconciliation and fresh qualification read only the exact deployed resour
     responses.set(`${target.scope}/providers/Microsoft.Authorization/roleDefinitions/${target.roleDefinitionId.split('/').at(-1)}`, f.proposal.roleDefinitions.readbacks[i].resource);
   }
   const calls = [];
-  let assignmentPhase;
+  let assignmentPhase, activeCandidate;
   const invoke = async args => {
     calls.push(args);
     assert.equal(args[args.indexOf('--subscription') + 1], a.config.subscriptionId);
@@ -1187,7 +1192,9 @@ test('reconciliation and fresh qualification read only the exact deployed resour
     if (args[0] === 'acr') {
       assert.equal(count, 7);
       if (args[1] === 'repository' && args[2] === 'list') return ['missionspec/telemetry-ingest'];
-      if (args[1] === 'manifest' && args[2] === 'list-metadata') return [{ digest: a.config.receiverDigest }];
+      if (args[1] === 'manifest' && args[2] === 'list-metadata') return activeCandidate?.publication.manifests ?? [{ digest: a.config.receiverDigest }];
+      if (args[1] === 'manifest' && args[2] === 'list-referrers') return [];
+      if (activeCandidate && args[args.indexOf('--name') + 1]?.endsWith(activeCandidate.profile.manifestDigest)) return JSON.parse(activeCandidate.profile.manifestJson);
       assert.deepEqual(args.slice(0, 3), ['acr', 'manifest', 'show']); return f.origins.imagePublication.receipt.manifest;
     }
     if (args[0] === 'deployment') {
@@ -1208,6 +1215,32 @@ test('reconciliation and fresh qualification read only the exact deployed resour
   assert.equal((await readdir(directory)).length, 0);
   const current = { ...f, proposal };
   await verifyFreshReconciliation(a.config, directory, current, invoke);
+  if (count === 7) await t.test('explicit receiver overlay rechecks original history and both remote images without rewriting receipts', async () => {
+    const before = json(f.origins);
+    activeCandidate = candidateFixture(a.config, f.origins.imagePublication.receipt);
+    activeCandidate.legacyPublication = f.origins.imagePublication;
+    activeCandidate.review.legacyPublicationSha256 = digest(json(f.origins.imagePublication));
+    activeCandidate.publication.reviewSha256 = digest(json(activeCandidate.review));
+    const originalApp = structuredClone(responses.get(rr.app));
+    responses.set(rr.app, structuredClone(originalApp));
+    const descriptor = structuredClone(f.origins.records.at(-1).phase.resources[0]);
+    descriptor.expected.properties.template.containers[0].image = `${a.config.registryName}.azurecr.io/missionspec/telemetry-ingest@${activeCandidate.profile.manifestDigest}`;
+    responses.get(rr.app).properties.template.containers[0].image = descriptor.expected.properties.template.containers[0].image;
+    const imageContext = { receiverCandidate: activeCandidate, imageDescriptor: descriptor };
+    const fresh = await verifyFreshReconciliation(a.config, directory, current, invoke, undefined, imageContext);
+    assert.equal(fresh.app.properties.template.containers[0].image, descriptor.expected.properties.template.containers[0].image);
+    assert.equal(json(f.origins), before);
+    activeCandidate.publication.manifests[1].tags.push('unreviewed');
+    await assert.rejects(verifyFreshReconciliation(a.config, directory, current, invoke, undefined, imageContext), /INVENTORY_CHANGED/);
+    activeCandidate.publication.manifests[1].tags.pop();
+    const roleId = `${rr.dcr}/providers/Microsoft.Authorization/roleDefinitions/${rr.uploadRole.split('/').at(-1)}`;
+    const role = structuredClone(responses.get(roleId));
+    responses.set(roleId, structuredClone(role));
+    responses.get(roleId).properties.permissions[0].dataActions.push('Microsoft.Insights/Telemetry/Read');
+    await assert.rejects(verifyFreshReconciliation(a.config, directory, current, invoke, undefined, imageContext), /UPLOAD_ROLE_SCOPE_DRIFT/);
+    responses.set(roleId, role);
+    responses.set(rr.app, originalApp); activeCandidate = undefined;
+  });
   if (count === 5) await t.test('assignment preflight binds freshly read role signatures into the approval baseline', async () => {
     current.review = { version: 3, action: 'accept-exact-arm-reconciliation', sourceSha256: proposal.sourceSha256,
       proposalSha256: digest(json(proposal)), reviewedAt: new Date().toISOString() };
@@ -1569,7 +1602,8 @@ test('one-image conservative release cost includes full ambiguous environment/ne
   assert(cost.items.oneImageInitialPlusDailyAndPullReserve > 9);
   assert.equal(cost.freeGrantsAssumed, false);
   assert.equal(cost.operatorInfrastructureAdded, false);
-  assert.throws(() => firstReleaseCost(2), /NEW_DIGEST_COST_REVIEW/);
+  assert.equal(firstReleaseCost(2).total, 311.23);
+  assert.throws(() => firstReleaseCost(3), /NEW_DIGEST_COST_REVIEW/);
 });
 test('default HTTP request cost is independent of the accepted-event quota and is not a billing hard cap', () => {
   const cost = firstReleaseCost(1);
@@ -1590,4 +1624,201 @@ test('default HTTP request cost is independent of the accepted-event quota and i
   assert.equal(cost.isHardCap, false);
   assert.equal(Math.round(Object.entries(cost.items).filter(([key]) => key !== 'requests')
     .reduce((sum, [, value]) => sum + value, 0) * 10000), 2480884);
+});
+
+async function realReceiverUpgradeFixture(t, mode) {
+  const adoption = fixtureAdoption(), config = adoption.config, r = ids(config), source = await sourceDigest();
+  const reconciliation = fixtureReconciliation(config, adoption.origin.policyBaselineSha256, 7);
+  const initial = reconciliation.proposal.results['disabled-app'].resources[r.app];
+  Object.assign(initial.properties, { latestRevisionName: 'missionspec-test-ingest--initial',
+    latestReadyRevisionName: 'missionspec-test-ingest--initial', runningStatus: 'Running', provisioningState: 'Succeeded' });
+  reconciliation.proposal.sourceSha256 = source;
+  reconciliation.review.sourceSha256 = source;
+  reconciliation.review.proposalSha256 = digest(json(reconciliation.proposal));
+  const receipts = { ...await reviewedReconciliationReceipts(config, reconciliation.foundation, reconciliation, source, reconciliation.lookup),
+    publication: reconciliation.origins.imagePublication.receipt };
+  const predecessor = terminalReceiverWindow(config, receipts, adoption.origin, source, Date.parse('2026-09-23T09:00:00.000Z'));
+  const candidate = candidateFixture(config, receipts.publication);
+  candidate.legacyPublication = structuredClone(reconciliation.origins.imagePublication);
+  candidate.review.legacyPublicationSha256 = digest(json(candidate.legacyPublication));
+  candidate.review.sourceSha256 = source;
+  candidate.publication.reviewSha256 = digest(json(candidate.review));
+  const instance = { version: 1, id: randomUUID(), predecessorSha256: digest(json(predecessor)),
+    previousInstanceIds: [predecessor.window.windowInstance.id] };
+  const phase = buildDisabledImagePhase(config, 'disabled-image-upgrade', receipts, candidate, predecessor, instance, reconciliation);
+  const directory = await scratch(t);
+  t.after(() => rm(`infrastructure/arm/telemetry/.operator-private/window-instance-${instance.id}.json`, { force: true }));
+  let now = Date.parse('2026-09-23T09:01:00.000Z'), stage = 'preflight', writes = 0, deployment = null, intentAt = null, postAppGets = 0;
+  const start = now, calls = [];
+  let app = structuredClone(predecessor.readback.app);
+  const resources = new Map([
+    [adoption.adoption.resourceId, adoption.adoption.after],
+    [adoption.origin.bootstrap.id, { id: adoption.origin.bootstrap.id, properties: { ...adoption.origin.bootstrap, provisioningState: 'Succeeded' } }],
+    [`${r.sub}/providers/Microsoft.Authorization/policyAssignments`, { value: [] }],
+    [`${r.sub}/providers/Microsoft.Security/pricings`, { value: [] }],
+    [r.stateBudget, reconciliation.foundation.state], [r.managedGroup, null], [`${r.group}/resources`, reconciliation.proposal.inventory],
+    [r.workspace + '/dataExports', { value: [] }],
+    [`${r.sub}/providers/Microsoft.Authorization/permissions`, { value: [{ actions: ['*'], notActions: [] }] }],
+    [`${r.sub}/providers/Microsoft.Authorization/denyAssignments`, { value: [] }],
+    [`${r.sub}/providers/Microsoft.App/locations/${config.location}/usages`, { value: [] }],
+  ]);
+  for (const record of reconciliation.origins.records) {
+    resources.set(record.phase.deploymentId, record.firstReadback.deployment);
+    for (const [id, value] of Object.entries(record.firstReadback.resources)) resources.set(id, structuredClone(value));
+  }
+  for (const [id, value] of Object.entries(predecessor.readback.deployments)) resources.set(predecessor.phases[id].deploymentId, value);
+  for (const id of [r.workspace, r.environment, r.app]) resources.set(id + '/providers/Microsoft.Insights/diagnosticSettings', { value: [] });
+  for (const [i, target] of assignmentRoleTargets(config).entries()) {
+    resources.set(`${target.scope}/providers/Microsoft.Authorization/roleDefinitions/${target.roleDefinitionId.split('/').at(-1)}`,
+      structuredClone(reconciliation.proposal.roleDefinitions.readbacks[i].resource));
+  }
+  const providerTypes = { 'Microsoft.App': ['managedEnvironments', 'containerApps'], 'Microsoft.ContainerRegistry': ['registries'],
+    'Microsoft.ManagedIdentity': [], 'Microsoft.OperationalInsights': ['workspaces'], 'Microsoft.Insights': ['dataCollectionRules'],
+    'Microsoft.Consumption': [], 'Microsoft.Authorization': [] };
+  resources.set(`${r.sub}/providers`, { value: Object.entries(providerTypes).map(([namespace, types]) => ({
+    namespace, registrationState: 'Registered', resourceTypes: types.map(resourceType => ({ resourceType, locations: ['Australia East'] })),
+  })) });
+  const revisions = () => ({ value: [{ id: `${r.app}/revisions/${app.properties.latestRevisionName}`, name: app.properties.latestRevisionName,
+    properties: { active: true, provisioningState: 'Provisioned', runningState: 'Running', healthState: 'Healthy',
+      replicas: 1, trafficWeight: 100, template: structuredClone(app.properties.template) } }] });
+  const knownIgnores = [r.registry, r.ingestIdentity, r.pullIdentity, r.environment, r.workspace, r.dcr];
+  const whatIf = { status: 'Succeeded', changes: [{ resourceId: r.app, changeType: 'Modify',
+    before: structuredClone(app), after: { ...structuredClone(phase.resources[0].expected), id: r.app } },
+  ...knownIgnores.map(resourceId => ({ resourceId, changeType: 'Ignore' }))] };
+  const expiry = start + (mode === 'expired-final-preflight' ? 100000 : mode === 'expired-critical' ? 110000 : mode === 'expired-body' ? 125000 : 1800000);
+  const approval = { action: 'direct-arm-disabled-image-upgrade', configSha256: digest(json(config)), phaseSha256: digest(json(phase)),
+    sourceSha256: source, originSha256: config.originSha256, receiptsSha256: digest(json(receipts)),
+    baselineSha256: adoption.origin.policyBaselineSha256, whatIfSha256: digest(json(whatIf)),
+    approvedAt: new Date(start - 60000).toISOString(), expiresAt: new Date(expiry).toISOString() };
+  const invoke = async (args, timeout) => {
+    assert(timeout > 0 && timeout <= 15000);
+    const before = now; now += 500;
+    const call = { stage, before, completed: now, timeout, args }; calls.push(call);
+    assert.equal(args[args.indexOf('--subscription') + 1], config.subscriptionId);
+    if (args[0] === 'account') return { id: config.subscriptionId, tenantId: config.tenantId, state: 'Enabled', environmentName: 'AzureCloud' };
+    if (args[0] === 'deployment') {
+      assert.equal(args[2], 'validate'); return { properties: { provisioningState: 'Succeeded' } };
+    }
+    if (args[0] === 'acr') {
+      if (args[1] === 'repository') return ['missionspec/telemetry-ingest'];
+      if (args[2] === 'list-referrers') return [];
+      if (args[2] === 'list-metadata') return mode === 'image-drift' && stage !== 'preflight'
+        ? [...candidate.publication.manifests, { digest: 'sha256:' + 'f'.repeat(64), tags: ['unknown'] }] : candidate.publication.manifests;
+      assert.equal(args[2], 'show');
+      return args[args.indexOf('--name') + 1].endsWith(candidate.profile.manifestDigest)
+        ? JSON.parse(candidate.profile.manifestJson) : candidate.legacyPublication.receipt.manifest;
+    }
+    assert.equal(args[0], 'rest');
+    const method = args[args.indexOf('--method') + 1], url = new URL(args[args.indexOf('--url') + 1]);
+    if (method === 'PUT') {
+      assert.equal(url.pathname, phase.deploymentId);
+      const journal = await load(directory, `${phase.phase}-journal.json`);
+      assert.equal(journal.outcome, 'submission-possible');
+      assert.equal(journal.transportDispatchAttempted, null);
+      intentAt = Date.parse(journal.intentAt);
+      assert(now < intentAt + 120000 && now < expiry);
+      const bodyFile = args[args.indexOf('--body') + 1];
+      assert(bodyFile.startsWith('@'));
+      const body = JSON.parse(await readFile(bodyFile.slice(1), 'utf8')), previous = app;
+      app = { ...structuredClone(body.properties.template.resources[0]), id: r.app, systemData: previous.systemData, identity: previous.identity };
+      app.properties.configuration.ingress.fqdn = previous.properties.configuration.ingress.fqdn;
+      Object.assign(app.properties, { latestRevisionName: 'missionspec-test-ingest--upgraded',
+        latestReadyRevisionName: 'missionspec-test-ingest--upgraded', runningStatus: 'Running', provisioningState: 'Succeeded' });
+      writes++; stage = 'rollout';
+      deployment = { id: phase.deploymentId, properties: { provisioningState: 'Succeeded', mode: 'Incremental',
+        correlationId: 'image-upgrade-fixture', timestamp: new Date(now).toISOString(), templateHash: digest(json(phase.template)) } };
+      return {};
+    }
+    assert.equal(method, 'GET');
+    if (url.pathname === phase.deploymentId) return deployment;
+    if (url.pathname === r.app) {
+      if (writes && ++postAppGets === 2 && mode === 'late-final-read') now = intentAt + 120001;
+      call.completed = now; return structuredClone(app);
+    }
+    if (url.pathname === `${r.app}/revisions`) {
+      if (writes && mode === 'late-ready-read') now = intentAt + 120001;
+      call.completed = now; return revisions();
+    }
+    assert(resources.has(url.pathname), url.pathname);
+    const value = structuredClone(resources.get(url.pathname));
+    if (stage !== 'preflight') {
+      if (mode === 'role-drift' && url.pathname === `${r.dcr}/providers/Microsoft.Authorization/roleDefinitions/${r.uploadRole.split('/').at(-1)}`) {
+        value.properties.permissions[0].dataActions.push('Microsoft.Insights/Telemetry/Read');
+      }
+      if (mode === 'identity-drift' && url.pathname === r.ingestIdentity) value.properties.principalId = config.operatorPrincipalId;
+      if (mode === 'privacy-drift' && url.pathname.endsWith('/diagnosticSettings')) value.value.push({ name: 'unknown-route' });
+    }
+    return value;
+  };
+  const lookup = async commit => ['a'.repeat(40), 'c'.repeat(40)].includes(commit) ? source : reconciliation.lookup(commit);
+  const sourceContents = { ...Object.fromEntries(RECEIVER_SOURCE_INPUTS.map(path => [path, `fixture ${path}`])),
+    'services/telemetry-ingest/src/identity-readiness.ts': 'fixture readiness', 'services/telemetry-ingest/Dockerfile': 'fixture Dockerfile' };
+  const sourceRun = async (command, args) => {
+    assert.equal(command, 'git');
+    if (args[0] === 'merge-base') return { stdout: Buffer.alloc(0) };
+    assert.deepEqual(args.slice(0, 2), ['--no-pager', 'show']);
+    return { stdout: Buffer.from(sourceContents[args[2].slice(41)]) };
+  };
+  const evidence = { scannerAdoption: adoption.adoption, foundationBudgets: reconciliation.foundation, reconciliation,
+    receiverCandidate: candidate, windowPredecessor: predecessor };
+  const context = whatIfRequestContext(config, phase);
+  const options = { now: () => now, sleep: async ms => { now += ms; }, sourceRun, lookup,
+    request: async operation => {
+      operation.beforeDispatch(); now += 1000;
+      assert(operation.timeoutMs <= 15000);
+      const complete = now - start >= 100000;
+      if (complete) stage = 'critical';
+      return { version: 1, contextSha256: context.contextSha256, verifiedRegion: config.location, step: `what-if.${operation.action}`,
+        responseFile: 'whatif-response-0000.json', statusCode: complete ? 200 : 202, bodyParseError: false,
+        headers: complete ? {} : { 'retry-after': '5', ...(operation.action === 'start' ? {
+          location: `https://management.azure.com${r.sub}/locations/australiaeast/operationresults/${config.runId}?api-version=2025-04-01`,
+        } : {}) }, body: complete ? { status: 'Succeeded', properties: { changes: whatIf.changes } } : { status: 'Running' } };
+    } };
+  const io = receiverUpgradeIO(config, phase, receipts, adoption.origin, evidence, directory, invoke, options);
+  const controller = new ReceiverUpgradeController(config, phase, candidate, predecessor.readback.app, io);
+  return { config, phase, candidate, predecessor, receipts, directory, approval, io, controller, calls, start, expiry, whatIf, source,
+    get now() { return now; }, get writes() { return writes; }, get intentAt() { return intentAt; }, get app() { return app; } };
+}
+
+test('real receiverUpgradeIO completes a 100-second full preflight before separately bounded critical checks and rollout', async t => {
+  const f = await realReceiverUpgradeFixture(t, 'success');
+  const receipt = await f.controller.execute(f.approval);
+  const proof = await load(f.directory, `${f.phase.phase}-preflight.json`), journal = await f.io.loadJournal();
+  assert(proof.completedAt - proof.startedAt >= 100000 && proof.completedAt - proof.startedAt < 120000);
+  assert(f.intentAt > proof.completedAt && f.intentAt - f.start > 100000);
+  assert.equal(f.writes, 1);
+  assert.equal(receipt.rolloutDeadline, f.intentAt + 120000);
+  assert(Date.parse(receipt.completedAt) < receipt.operationDeadline);
+  assert.equal(receipt.noOtherChange, true);
+  t.diagnostic(JSON.stringify({ preflightMs: proof.completedAt - proof.startedAt,
+    finalChecksMs: f.intentAt - proof.completedAt, rolloutMs: Date.parse(receipt.completedAt) - f.intentAt, puts: f.writes }));
+  const record = { version: 1, kind: 'reviewed-disabled-image-change', publication: { commitSha: 'c'.repeat(40), sourceSha256: f.source },
+    candidate: f.candidate, predecessor: f.predecessor, prerequisiteReceipts: f.receipts, phase: f.phase,
+    approval: f.approval, preflight: proof, whatIf: f.whatIf, journal, receipt };
+  verifyDisabledImageRecord(f.config, record);
+  const critical = f.calls.filter(v => v.stage === 'critical');
+  assert(critical.some(v => v.args.includes('PUT')));
+  assert(critical.every(v => !v.args.some(arg => typeof arg === 'string' && arg.includes('/deployments/') && !arg.includes(f.phase.deploymentId))));
+  assert(critical.some(v => v.args.includes('list-metadata')));
+  assert(critical.some(v => v.args.some(arg => typeof arg === 'string' && arg.includes('/roleDefinitions/'))));
+  for (const call of f.calls.filter(v => v.stage === 'rollout')) {
+    assert(call.timeout <= Math.min(15000, receipt.operationDeadline - call.before));
+  }
+});
+
+test('real upgrade IO rejects late preflight/critical/body reads, mutable drift and post-intent observations beyond 120 seconds', async t => {
+  for (const mode of ['expired-final-preflight', 'expired-critical', 'expired-body', 'role-drift', 'identity-drift',
+    'privacy-drift', 'image-drift', 'late-ready-read', 'late-final-read']) await t.test(mode, async t => {
+    const f = await realReceiverUpgradeFixture(t, mode);
+    await assert.rejects(f.controller.execute(f.approval));
+    assert.equal(f.writes, mode.startsWith('late-') ? 1 : 0);
+    assert.equal(await load(f.directory, `${f.phase.phase}-receipt.json`, true), null);
+    const journal = await f.io.loadJournal();
+    if (mode.startsWith('late-') || mode === 'expired-body') {
+      assert.equal(journal.outcome, 'reconciliation-required');
+      assert.equal(journal.transportDispatchAttempted, mode.startsWith('late-'));
+      if (mode.startsWith('late-')) assert(f.now >= Date.parse(journal.intentAt) + 120000);
+    }
+    assert(f.calls.filter(v => v.args.includes('PUT')).every(v => v.before < f.expiry));
+  });
 });

@@ -1,10 +1,12 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
+import { IMAGE_PHASES, receiverAnchor, runtimeReceiver } from './receiver-upgrade.mjs';
 
 const PHASE_CODES = Object.freeze({ 'project-budget': 'pb', core: 'co', 'workspace-access': 'wa', data: 'da', 'upload-role': 'ur',
-  assignments: 'ra', 'disabled-app': 'di', 'synthetic-admission': 'sy', 'synthetic-disable': 'sd' });
-export const PHASES = Object.freeze(Object.keys(PHASE_CODES));
+  assignments: 'ra', 'disabled-app': 'di', 'synthetic-admission': 'sy', 'synthetic-disable': 'sd',
+  'disabled-image-upgrade': 'iu', 'disabled-image-rollback': 'ir' });
+export const PHASES = Object.freeze(Object.keys(PHASE_CODES).filter(v => !v.startsWith('disabled-image-')));
 export const TOGGLE_PHASES = Object.freeze(['synthetic-admission', 'synthetic-disable']);
 export const SYNTHETIC_LIMITS = Object.freeze({ enabledWindowMs: 600000, rollbackReserveMs: 180000,
   rolloutTimeoutMs: 120000, rolloutPollMs: 3000, maxRolloutPolls: 40, httpTimeoutMs: 1000,
@@ -61,10 +63,11 @@ export function deploymentName(c, phase, instance) {
   validateConfig(c);
   if (!Object.hasOwn(PHASE_CODES, phase)) fail('PHASE_NOT_SUPPORTED');
   if (instance !== undefined) {
-    if (!TOGGLE_PHASES.includes(phase)) fail('WINDOW_INSTANCE_TOGGLE_ONLY');
+    if (![...TOGGLE_PHASES, ...IMAGE_PHASES].includes(phase)) fail('WINDOW_INSTANCE_TOGGLE_ONLY');
     validateWindowInstance(c, instance);
   }
-  const identity = instance ? 'w' + instance.id.replaceAll('-', '') : c.runId.replaceAll('-', '');
+  if (IMAGE_PHASES.includes(phase) && !instance) fail('IMAGE_INSTANCE_REQUIRED');
+  const identity = instance ? (IMAGE_PHASES.includes(phase) ? 'u' : 'w') + instance.id.replaceAll('-', '') : c.runId.replaceAll('-', '');
   const name = `${c.namePrefix}-${identity}-${PHASE_CODES[phase]}`;
   if (!/^[a-z0-9-]{1,64}$/u.test(name)) fail('DEPLOYMENT_NAME_INVALID');
   return name;
@@ -188,6 +191,7 @@ function assignment(scope, principal, role, c, purpose) {
 }
 function appResource(c, receipts, enabled) {
   const r = ids(c);
+  const runtime = runtimeReceiver(c, receipts);
   const core = receipts.core;
   const ingest = bindPrior(c, receipts, 'core', r.ingestIdentity), pull = bindPrior(c, receipts, 'core', r.pullIdentity);
   const dcr = bindPrior(c, receipts, 'data', r.dcr);
@@ -219,7 +223,7 @@ function appResource(c, receipts, enabled) {
       ingress: { external: true, allowInsecure: false, targetPort: 8080, transport: 'http', traffic: [{ latestRevision: true, weight: 100 }] } },
     template: { terminationGracePeriodSeconds: 10,
       scale: { minReplicas: 1, maxReplicas: 1, rules: [{ name: 'bounded-http', http: { metadata: { concurrentRequests: '16' } } }] },
-      containers: [{ name: 'telemetry-ingest', image: `${loginServer}/missionspec/telemetry-ingest@${c.receiverDigest}`,
+      containers: [{ name: 'telemetry-ingest', image: `${loginServer}/missionspec/telemetry-ingest@${runtime?.digest ?? c.receiverDigest}`,
         resources: { cpu: 0.25, memory: '0.5Gi' }, env: Object.entries(values).map(([name, value]) => ({ name, value })),
         probes: [
           { type: 'Startup', httpGet: { path: '/health/live', port: 8080, scheme: 'HTTP' }, periodSeconds: 1, failureThreshold: 30 },
@@ -235,6 +239,7 @@ export function reconciliationBinding(lineage) {
 }
 export function buildPhase(c, phase, contract, receipts = {}, foundation, sourceLineage, windowInstance) {
   validateConfig(c); if (!PHASES.includes(phase)) fail('PHASE_NOT_SUPPORTED');
+  if (IMAGE_PHASES.includes(phase)) fail('REVIEWED_IMAGE_OVERLAY_REQUIRED');
   const r = ids(c), regional = { location: c.location, tags: ownerTags(c) };
   let resources, scope = r.group;
   if (phase === 'project-budget') {
@@ -288,7 +293,10 @@ export function buildPhase(c, phase, contract, receipts = {}, foundation, source
       ...c.queryPrincipalIds.map(principal => assignment(r.workspace, principal, `${r.sub}/providers/Microsoft.Authorization/roleDefinitions/73c42c96-874c-492b-b04d-ab87d138a893`, c, 'query')),
     ];
   }
-  if (phase === 'disabled-app') resources = [appResource(c, receipts, false)];
+  if (phase === 'disabled-app') {
+    if (receipts.receiverUpgrade) fail('HISTORICAL_DISABLED_APP_PROFILE_IMMUTABLE');
+    resources = [appResource(c, receipts, false)];
+  }
   if (TOGGLE_PHASES.includes(phase)) {
     if (!receipts['disabled-app']?.qualified || receipts['disabled-app'].configSha256 !== digest(json(c)) ||
         !receipts['disabled-app'].resources?.[r.app]) fail('DISABLED_APP_NOT_QUALIFIED');
@@ -306,10 +314,11 @@ export function buildPhase(c, phase, contract, receipts = {}, foundation, source
   return { version: 1, phase, configSha256: digest(json(c)), scope,
     deploymentId: `${scope}/providers/Microsoft.Resources/deployments/${deploymentName(c, phase, windowInstance)}`,
     ...(windowInstance ? { windowInstance: structuredClone(validateWindowInstance(c, windowInstance)) } : {}),
+    ...(TOGGLE_PHASES.includes(phase) && receipts.receiverUpgrade ? { receiverUpgradeSha256: digest(json(receipts.receiverUpgrade)) } : {}),
     template: template(resources, scope === r.sub), resources: descriptors,
     ...(sourceLineage?.proposal ? { reconciliation: reconciliationBinding(sourceLineage) } : {}),
     ...(TOGGLE_PHASES.includes(phase) ? { transition: {
-      version: 1, anchorAppSha256: digest(json(receipts['disabled-app'].resources[r.app])),
+      version: 1, anchorAppSha256: digest(json(receiverAnchor(c, receipts))),
       from: phase === 'synthetic-admission' ? ['false'] : ['true', 'false'],
       to: phase === 'synthetic-admission' ? 'true' : 'false',
       maximumWrites: 1, limits: SYNTHETIC_LIMITS,
@@ -325,7 +334,7 @@ export function buildPhase(c, phase, contract, receipts = {}, foundation, source
 }
 
 export function firstReleaseCost(recentDigestCount = 1) {
-  if (recentDigestCount !== 1) fail('NEW_DIGEST_COST_REVIEW_REQUIRED');
+  if (![1, 2].includes(recentDigestCount)) fail('NEW_DIGEST_COST_REVIEW_REQUIRED');
   const hours = 31 * 24;
   // Disabled/invalid requests can still be billed without accepting an event.
   const httpRequests = { sustainedPerMinute: LIMITS.requests_per_minute, monthlyVolume: hours * 60 * LIMITS.requests_per_minute,
@@ -341,6 +350,7 @@ export function firstReleaseCost(recentDigestCount = 1) {
     ambiguousEnvironmentManagement: hours * 0.145,
     possibleManagedLoadBalancer: hours * 0.025, possibleTwoManagedPublicIPs: hours * 2 * 0.005,
     contingency: 10,
+    ...(recentDigestCount === 2 ? { additionalImageInitialPlusDailyAndPullReserve: (31 + 2) * 0.29 } : {}),
   };
   const total = Math.ceil(Object.values(items).reduce((sum, v) => sum + v, 0) * 100) / 100;
   return { currency: 'USD', days: 31, recentDigestCount, httpRequests, items, total,

@@ -38,3 +38,38 @@ required; no preparation operation sends HTTP fixtures or enables ingestion.
 Final HTTP/query dispatch guards run after the last awaited operation. One
 120-second submission-to-ready deadline and intent-anchored work/window/recovery
 deadlines distinguish safe late disable recovery from successful qualification.
+
+## Reviewed disabled receiver image overlay
+
+`receiver-upgrade.mjs` defines the closed version-1 receiver profile/publication
+and disabled-image execution record. It does **not** change configuration v2,
+the seven historical phases, their prerequisites, or the original one-image
+publication. No candidate image is built, pushed, or production-cleared by this
+module. A `qualified: true` flag is not candidate evidence.
+
+The fixed commands are `preview-image-publication disabled-image-upgrade`,
+`prepare-image disabled-image-upgrade`, `check-image disabled-image-upgrade`,
+and `execute-image disabled-image-upgrade`. The independent
+`disabled-image-rollback` phase has its own instance, exact before-image, fresh
+review and approval. The first two commands are local-only; execution remains
+an explicit parent/operator action. See the operator guide for private input
+artifacts and the publication/deployment authority boundary.
+
+Image what-if retains the app `Modify` plus known preserved `Ignore` entries,
+without rewriting the full payload. A full 120-second preflight is followed by
+separately bounded final checks; one new absolute 120-second rollout deadline
+starts at durable intent. Approval expiry and five-minute proof freshness still
+apply, and each request is bounded by 15 seconds and its stage's remaining time.
+
+Only the original digest plus one explicitly reviewed candidate/tag may exist.
+The two-image estimate is **USD 311.23 / 31 days**, below the reviewed USD 350
+project estimate; rejected-request, full security, environment and network
+reserves remain included. This is neither a hard billing cap nor publication
+permission. Fresh digest-count/cost approval is required before the one push.
+
+After a successful reviewed disabled-image change, preserve
+`disabled-image-record.json` unchanged. A later revision supplies it as
+`receiver-upgrade.json` and as its `window-predecessor.json`; it does not replace
+`receipts.publication` or `receipts["disabled-app"]`. Standard paired window
+approvals, durable UUID reservation, timeouts and terminal false/503 proof
+remain mandatory.

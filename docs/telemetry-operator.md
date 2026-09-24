@@ -15,6 +15,114 @@ Retired-route approvals are terminal; none authorizes the direct ARM route.
 
 ## Local review and authority
 
+### Disabled receiver image upgrade (local candidate, no implicit release)
+
+The version-1 `receiver-upgrade.mjs` overlay leaves configuration v2, its
+`receiverDigest`, run ID, ownership tags, all seven original ARM execution
+origins, original publication, and completed/failed synthetic windows unchanged.
+It is a separate reviewed transition, not a migration or reinterpretation of
+the historical ledger. The new receiver is **conditional disabled/synthetic
+only**: optimization-disabled CVE-2026-91745, debugger-disabled CVE-2026-93377,
+and unproven CVE-2026-91728 applicability are retained. Neither scan counts nor
+prepared managed-identity readiness constitute native or production clearance.
+
+In a fresh private revision, `receiver-candidate.json` contains a closed profile:
+exact OCI manifest/config **bytes** and digests; Linux/amd64, UID/GID
+`65532:65532`, the unchanged Node command and all image runtime defaults;
+the exact 35-file build-source closure and immutable Git commit; corresponding-source
+archive/manifest and notices bytes/hashes; complete scanner JSON, database hash,
+validity and unsuppressed severity counts; and the explicit 20-second,
+single-flight prepared-UAMI contract. Disabled start acquires no token,
+readiness/POST admission requires a prepared token, expiry triggers refresh,
+and failed initialization requires restart. Server 650 ms and client 1,000 ms
+deadlines remain unchanged. A fresh upgrade or synthetic admission requires a
+still-current scan database; expiry does not block the fixed disable or a
+separately approved rollback to the original disabled image.
+Source verification also binds the fixed root build/license inputs and receiver
+operations/runtime documentation in that closure. It does not enumerate every
+tracked service-directory file or require unrelated `.gitignore`/editor files
+inside the source archive. Missing or extra profile inputs fail closed.
+The notices bundle contains the complete
+hashed inventory and canonical base64 for every file, preserving compressed
+Debian notices without UTF-8 conversion. Scanner database timestamps retain
+their original 3–9 fractional digits; deadline checks conservatively use
+millisecond precision. The complete local qualification report is independently
+hash-bound to the same image/config/source, scanner database, severity counts,
+resource limits, and disabled/slow-identity/failed-identity results. Its local
+success explicitly carries no cloud, publication or production authority.
+
+The candidate includes the **complete original publication record** plus a
+separate `publish-one-reviewed-receiver-upgrade` review. That review binds the
+profile, base config, immutable published policy source, registry, repository,
+one digest-derived tag, exactly two retained digests, and the entire cost
+object. Source verification reads Git blobs; historical code is never executed.
+The original receipt is not changed to say two images existed historically.
+The publication record must independently retain the single-copy intent/time,
+exact remote graph/config bytes, source/notices bindings and closed inventories.
+It is supplied only after the separately approved publication actually happens.
+
+With `publication: null`, the local-only
+`preview-image-publication disabled-image-upgrade <private-revision>` reads
+`receiver-publication-inventory.json` and writes an unqualified preview.
+Inventory must contain only the original repository, original digest/tag and
+no referrers. After publication, reads require that same old manifest/tag and
+exactly one reviewed candidate/tag, no third image, index, referrer, retag,
+deletion, repush, registry admin authentication or unknown-inventory exception.
+`firstReleaseCost(2)` is **USD 311.23 / 31 days**, retaining the complete
+request/security/environment/network reserves under USD 350. The parent must
+review this changed count and cost **before** a push. No command here pushes.
+
+`prepare-image disabled-image-upgrade <private-revision>` is also local-only.
+It requires real candidate publication evidence and the closed terminal
+false/503 predecessor, and creates a fresh `image-instance.json`, plan and
+template. `check-image` repeats the account, foundation, budgets, providers,
+permissions, role definitions/assignments, identities, privacy, image inventory,
+and full bounded asynchronous ARM validate/what-if gates. The only permitted
+effective delta is old image → reviewed image while ingestion stays `false`;
+ports, probes, resources, environment, scale, UAMI scopes/lifecycles, containers,
+volumes, runtime defaults and resource identity remain exact.
+Full what-if may contain the one app `Modify` plus known preserved resources
+marked `Ignore`, as Azure returns for this group. The complete seven-entry
+payload remains hashed and retained. Unknown IDs, a second `Modify`, duplicate
+IDs, or preserved-resource `Create`/`Delete`/`NoChange` entries are rejected.
+
+`execute-image` is a **separate parent-approved action** requiring the exact
+fresh phase approval and `image-policy-publication.json`. It uses a unique
+owned deployment name, shared lock and global durable UUID reservation, records
+intent before one PUT, and repeats source/security/current-app checks after
+request-body preparation. Unknown submission is terminal for replay purposes.
+Deployment plus new latest-ready healthy revision and final image/identity/
+privacy/security reads must complete within the same 120-second rollout bound.
+The full preflight has its own unchanged 120-second deadline. Only after it
+returns does the controller establish a final-check deadline, capped at
+120 seconds and by both approval expiry and the proof's five-minute freshness.
+Final checks re-read mutable governance/budgets, workspace/environment/DCR
+privacy, registry/image inventory, exact role definitions/grants and app/UAMI
+identity; independent reads are batched. They do not traverse historical
+deployments or the foundation again after the full fresh preflight.
+After durable intent, one absolute 120-second rollout deadline covers body
+preparation, the repeated final dispatch checks, PUT, polling, privacy/security
+and final app/revision reads. Every cloud call receives that remaining bound
+(at most 15 seconds); neither reservation nor an individual read renews it.
+Approval/proof expiry can shorten either stage. Late responses cannot authorize
+a dispatch or qualify a readback.
+No ingestion request, toggle, deletion or app recreation is included.
+An explicit `disabled-image-rollback` has its own fresh approval, instance and
+exact new-image preimage; it does not overwrite drift or borrow enable authority.
+It requires a settled reviewed image-change predecessor, not an invented
+success after an unknown or unready upgrade. Unresolved upgrades remain a
+readback/review hold; do not retry them blindly.
+
+On success, `disabled-image-record.json` is a new immutable execution record.
+For the next normal synthetic window, supply that exact record as
+`receiver-upgrade.json` and `window-predecessor.json` in a fresh revision.
+The runtime uses its new disabled anchor and candidate profile while keeping
+the original disabled-app/publication receipts as historical prerequisites.
+Both paired window approvals still bind the complete prerequisite set, new
+UUID, full what-ifs and source; the image transition's UUID remains in the
+global predecessor/replay chain. No preview is a qualified receipt, and no
+fixture in the tests is an approved or published receiver.
+
 Use the existing authorized operator Azure CLI for control-plane authentication
 over TLS, with the exact subscription specified on every request. Do not switch
 the global default account, request/print tokens, enable registry admin login,

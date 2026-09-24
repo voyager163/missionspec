@@ -1,5 +1,7 @@
 import { isDeepStrictEqual } from 'node:util';
-import { assertOwned, assertBudget, BUDGET, buildPhase, budgetConfiguration, closed, digest, fail, ids, json, LIMITS, PHASES, RECEIVER_COMMAND, requireAccess, sameId, projectBudgetFilter, uploadRoleProperties, assignmentRoleTargets, TOGGLE_PHASES, SYNTHETIC_LIMITS, SYNTHETIC_FIXTURES, validateWindowInstance, deploymentName } from './definition.mjs';
+import { IMAGE_PHASES, verifyDisabledImageWhatIf, verifyDisabledImageRecord, verifyImageRuntimePublication,
+  verifyReceiverCandidate, verifyReceiverInventory } from './receiver-upgrade.mjs';
+import { assertOwned, assertBudget, BUDGET, buildPhase, budgetConfiguration, closed, digest, fail, ids, json, LIMITS, RECEIVER_COMMAND, requireAccess, sameId, projectBudgetFilter, uploadRoleProperties, assignmentRoleTargets, TOGGLE_PHASES, SYNTHETIC_LIMITS, SYNTHETIC_FIXTURES, validateWindowInstance, deploymentName } from './definition.mjs';
 export { assertBudget, notificationKeys } from './definition.mjs';
 
 const REVIEW_HASH_FIELDS = ['configSha256', 'phaseSha256', 'sourceSha256', 'originSha256', 'receiptsSha256', 'baselineSha256', 'whatIfSha256'];
@@ -97,7 +99,7 @@ function historicalTemplate(c, phase) {
   }
   return copy;
 }
-export const RECONCILABLE_PHASES = Object.freeze(PHASES.slice(0, 7));
+export const RECONCILABLE_PHASES = Object.freeze(['project-budget', 'core', 'workspace-access', 'data', 'upload-role', 'assignments', 'disabled-app']);
 function prerequisiteWorkspace(c, receipts) {
   return receipts['workspace-access']?.resources?.[ids(c).workspace] ?? receipts.core?.resources?.[ids(c).workspace] ?? null;
 }
@@ -106,7 +108,7 @@ export function resourceContext(c, receipts) {
   return { workspace: prerequisiteWorkspace(c, receipts), identities: {
     [r.ingestIdentity]: receipts.core?.resources?.[r.ingestIdentity],
     [r.pullIdentity]: receipts.core?.resources?.[r.pullIdentity],
-  }, publication: receipts.publication };
+  }, publication: receipts.publication, ...(receipts.receiverUpgrade ? { receiverUpgrade: receipts.receiverUpgrade } : {}) };
 }
 export function verifyImagePublication(c, record) {
   closed(record, ['version', 'receipt', 'release', 'binding', 'journal', 'qualification', 'manifestJson', 'configJson']);
@@ -165,11 +167,17 @@ export function verifyImagePublication(c, record) {
       !Number.isFinite(Date.parse(security.databaseUpdatedAt)) || Date.parse(security.databaseUpdatedAt) > intentAt ||
       !Number.isFinite(Date.parse(security.databaseNextUpdate)) || Date.parse(security.databaseNextUpdate) <= intentAt) fail('PUBLICATION_SECURITY_EVIDENCE_CHANGED');
 }
-export function verifyPublicationReadback(c, publication, current) {
-  closed(current, ['repositories', 'manifests', 'manifest', 'registry']);
+export function verifyPublicationReadback(c, publication, current, candidate) {
+  closed(current, ['repositories', 'manifests', 'manifest', 'registry', ...(candidate ? ['referrers', 'candidateManifest'] : [])]);
   const receipt = publication.receipt, r = ids(c), p = current.registry?.properties;
+  if (candidate) {
+    const artifact = verifyReceiverCandidate(c, candidate);
+    if (!isDeepStrictEqual(publication, candidate.legacyPublication) ||
+        !isDeepStrictEqual(current.candidateManifest, artifact.manifest)) fail('PUBLICATION_READBACK_CHANGED');
+    verifyReceiverInventory(c, candidate, current, true);
+  }
   if (!isDeepStrictEqual(current.repositories, ['missionspec/telemetry-ingest']) || !Array.isArray(current.manifests) ||
-      current.manifests.length !== 1 || current.manifests[0].digest !== receipt.digest ||
+      (!candidate && (current.manifests.length !== 1 || current.manifests[0].digest !== receipt.digest)) ||
       !isDeepStrictEqual(current.manifest, receipt.manifest) || !sameId(current.registry.id, r.registry) ||
       p?.adminUserEnabled !== false || p.anonymousPullEnabled !== false || p.loginServer !== `${c.registryName}.azurecr.io`) fail('PUBLICATION_READBACK_CHANGED');
   assertOwned(current.registry, r.registry, c);
@@ -384,10 +392,15 @@ export function verifyWhatIf(phase, result, preservedIds = [], context) {
     if (!id || seen.has(id)) fail('WHAT_IF_ID_INVALID');
     seen.add(id);
     if (!target.has(id)) {
-      if (preserved.has(id) && ['Ignore', 'NoChange'].includes(change.changeType)) continue;
+      if (preserved.has(id) && (IMAGE_PHASES.includes(phase.phase)
+        ? change.changeType === 'Ignore' : ['Ignore', 'NoChange'].includes(change.changeType))) continue;
       fail('UNREVIEWED_RESOURCE_CHANGE');
     }
     const allowed = Object.entries(phase.allowedModify).find(([key]) => key.toLowerCase() === id)?.[1];
+    if (IMAGE_PHASES.includes(phase.phase)) {
+      verifyDisabledImageWhatIf(phase, change, context);
+      target.delete(id); continue;
+    }
     if (TOGGLE_PHASES.includes(phase.phase)) {
       verifyToggleWhatIf(phase, change, context);
       target.delete(id); continue;
@@ -440,7 +453,7 @@ export function canonicalAppWrite(c, descriptor, actual, context, whatIf = false
   if (whatIf) {
     if (!context?.app || !sameId(context.app.id, descriptor.id)) fail('TOGGLE_READBACK_CONTEXT_REQUIRED');
     assertOwned(context.app, descriptor.id, c);
-    verifyApp(c, descriptorWithFlag(descriptor, admissionFlag(context.app)).expected, context.app, context);
+    verifyApp(c, descriptorWithFlag(context.appDescriptor ?? descriptor, admissionFlag(context.app)).expected, context.app, context);
     for (const [id, metadata] of Object.entries(value.identity?.userAssignedIdentities ?? {})) {
       if (onlyKeys(metadata, []) && Object.keys(metadata).length === 0) {
         const match = Object.entries(context.identities ?? {}).find(([key]) => sameId(id, key))?.[1];
@@ -546,10 +559,12 @@ export function verifySyntheticWindow(c, phases, window, approvals, source, now,
   if (starting && canonicalInstant(approvals['synthetic-disable'].expiresAt) < now + SYNTHETIC_LIMITS.enabledWindowMs + SYNTHETIC_LIMITS.rollbackReserveMs) fail('DISABLE_AUTHORITY_WINDOW_TOO_SHORT');
 }
 export function predecessorInstanceIds(predecessor) {
+  if (predecessor.kind === 'reviewed-disabled-image-change') return [...predecessorInstanceIds(predecessor.predecessor), predecessor.phase.windowInstance.id];
   return predecessor.window.version === 2
     ? [...predecessor.window.windowInstance.previousInstanceIds, predecessor.window.windowInstance.id] : [];
 }
 export function verifyWindowPredecessor(c, predecessor) {
+  if (predecessor?.kind === 'reviewed-disabled-image-change') return verifyDisabledImageRecord(c, predecessor);
   closed(predecessor, ['version', 'kind', 'publication', 'window', 'phases', 'approvals', 'journals', 'receipts', 'prerequisiteReceipts', 'run', 'readback']);
   closed(predecessor.publication, ['commitSha', 'sourceSha256']);
   closed(predecessor.readback, ['checkedAt', 'sourceSha256', 'deployments', 'app', 'identities', 'revisions', 'privacy']);
@@ -799,10 +814,10 @@ function verifyApp(c, expected, actual, context) {
       ['username', 'passwordSecretRef'].some(key => Object.hasOwn(registry, key) && registry[key] !== '')) fail('APP_REGISTRY_DRIFT');
   verifyAppIdentities(c, actual, expected, context.identities);
   const publication = context.publication;
-  if (publication?.qualified !== true || publication.digest !== c.receiverDigest || !sameId(publication.registryId, r.registry) ||
+  if (!verifyImageRuntimePublication(c, expected, context) && (publication?.qualified !== true || publication.digest !== c.receiverDigest || !sameId(publication.registryId, r.registry) ||
       publication.configSha256Inputs !== digest(json(c)) || publication.recentDigestCount !== 1 ||
       publication.configSha256 !== 'sha256:46e59e2d089b1869fb3737444fa4d1cbf380bc5ed3eb27318508dafad4c08204' ||
-      publication.configUser !== '65532:65532' || !isDeepStrictEqual(publication.command, RECEIVER_COMMAND)) fail('APP_PUBLICATION_READBACK_REQUIRED');
+      publication.configUser !== '65532:65532' || !isDeepStrictEqual(publication.command, RECEIVER_COMMAND))) fail('APP_PUBLICATION_READBACK_REQUIRED');
   if (typeof ingress.fqdn !== 'string' || !/^[a-z0-9.-]+\.azurecontainerapps\.io$/u.test(ingress.fqdn)) fail('APP_FQDN_INVALID');
 }
 export function roleDefinitionSignature(c, target, actual) {

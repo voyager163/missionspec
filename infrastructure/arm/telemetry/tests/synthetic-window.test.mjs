@@ -4,10 +4,13 @@ import https from 'node:https';
 import { EventEmitter } from 'node:events';
 import { mkdir, readdir, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { buildPhase, digest, json, ids, ownerTags, RECEIVER_DIGEST, RECEIVER_COMMAND, SYNTHETIC_FIXTURES, SYNTHETIC_LIMITS, deploymentName, validateWindowInstance } from '../definition.mjs';
+import { buildPhase, digest, json, ids, ownerTags, RECEIVER_DIGEST, RECEIVER_COMMAND, SYNTHETIC_FIXTURES, SYNTHETIC_LIMITS, deploymentName, validateWindowInstance, firstReleaseCost } from '../definition.mjs';
 import { admissionFlag, verifyWhatIf, resourceContext, verifySyntheticWindow, verifyWindowState, verifySyntheticRows, verifyWindowPredecessor, verifyWindowInstancePredecessor } from '../policy.mjs';
 import { buildSyntheticWindow, SyntheticToggleController, SyntheticWindowDriver, latestRevisionReady, syntheticHttp, syntheticQuery, readSyntheticQuery, syntheticWindowIO, transport,
-  verifyPublishedWindowPredecessor, whatIfRequestContext, reserveWindowInstance } from '../controller.mjs';
+  verifyPublishedWindowPredecessor, whatIfRequestContext, reserveWindowInstance, verifyReceiverSource } from '../controller.mjs';
+import { candidateFixture } from './receiver-upgrade.fixture.mjs';
+import { verifyReceiverProfile, verifyReceiverCandidate, verifyReceiverInventory, prepareReceiverPublication, RECEIVER_SOURCE_INPUTS, receiverDatabaseInstant,
+  buildDisabledImagePhase, verifyDisabledImageRecord, ReceiverUpgradeController } from '../receiver-upgrade.mjs';
 
 function fixture() {
   const origin = { policyBaselineSha256: digest('baseline') };
@@ -796,4 +799,351 @@ test('a durable instance reservation rejects the same UUID even if a caller copi
   const altered = structuredClone(f.window); altered.sourceSha256 = digest('changed source');
   await assert.rejects(reserveWindowInstance(f.c, directory, altered), /WINDOW_INSTANCE_REPLAY_FORBIDDEN/);
   assert.equal((await readdir(directory)).length, 1);
+});
+
+async function upgradeFixture(preservedIgnores = false) {
+  const { f, predecessor } = await completedPredecessor();
+  if (preservedIgnores) {
+    f.receipts = structuredClone(f.receipts);
+    f.receipts.core.resources[f.r.environment] = { id: f.r.environment, tags: ownerTags(f.c), properties: {} };
+  }
+  const candidate = candidateFixture(f.c, f.receipts.publication), source = digest('upgrade-policy');
+  const instance = { version: 1, id: randomUUID(), predecessorSha256: digest(json(predecessor)),
+    previousInstanceIds: [f.instance.id] };
+  const phase = buildDisabledImagePhase(f.c, 'disabled-image-upgrade', f.receipts, candidate, predecessor, instance);
+  let now = f.now + 1000, journal = null, receipt = null, deployment = null, writes = 0, reservations = 0;
+  let app = structuredClone(predecessor.readback.app);
+  const context = { ...resourceContext(f.c, f.receipts), receiverCandidate: candidate };
+  const whatIf = { status: 'Succeeded', changes: [{ resourceId: f.r.app, changeType: 'Modify',
+    before: structuredClone(app), after: { ...structuredClone(phase.resources[0].expected), id: f.r.app } },
+  ...(preservedIgnores ? [f.r.registry, f.r.ingestIdentity, f.r.pullIdentity, f.r.workspace, f.r.environment, f.r.dcr]
+    .map(resourceId => ({ resourceId, changeType: 'Ignore' })) : [])] };
+  verifyWhatIf(phase, whatIf, Object.values(f.receipts).flatMap(v => Object.keys(v.resources ?? {})), { ...context, config: f.c, app });
+  const approval = { action: 'direct-arm-disabled-image-upgrade', configSha256: digest(json(f.c)), phaseSha256: digest(json(phase)),
+    sourceSha256: source, originSha256: f.c.originSha256, receiptsSha256: digest(json(f.receipts)),
+    baselineSha256: f.window.baselineSha256, whatIfSha256: digest(json(whatIf)),
+    approvedAt: new Date(now - 1000).toISOString(), expiresAt: new Date(now + 1800000).toISOString() };
+  const proof = { ...Object.fromEntries(Object.entries(approval).filter(([k]) => k.endsWith('Sha256'))),
+    qualified: true, startedAt: now, completedAt: now, cost: firstReleaseCost(2) };
+  const privacy = { diagnostics: { [f.r.app]: { value: [] } }, exports: { value: [] } };
+  const revisions = () => ({ value: [{ id: `${f.r.app}/revisions/${app.properties.latestRevisionName}`, name: app.properties.latestRevisionName,
+    properties: { active: true, provisioningState: 'Provisioned', runningState: 'Running', healthState: 'Healthy',
+      replicas: 1, trafficWeight: 100, template: structuredClone(app.properties.template) } }] });
+  const io = { now: () => now, sourceDigest: async () => source,
+    loadJournal: async () => journal, saveJournal: async value => { journal = structuredClone(value); },
+    saveReceipt: async value => { receipt = structuredClone(value); }, check: async () => proof,
+    observe: async () => ({ app: structuredClone(app), context, revisions: revisions() }),
+    privacy: async () => privacy, security: async () => {}, reserve: async () => { reservations++; },
+    sleep: async ms => { now += ms; }, deployment: async () => deployment,
+    arm: async (method, id, api, body, _filter, guard, _role, current) => {
+      assert.equal(method, 'PUT'); assert.equal(id, phase.deploymentId); assert.equal(api, '2022-09-01');
+      assert.equal(journal.outcome, 'submission-possible'); assert.equal(reservations, 1);
+      await current(); guard(); writes++;
+      const previous = structuredClone(app);
+      app = { ...structuredClone(body.properties.template.resources[0]), id: f.r.app, systemData: previous.systemData, identity: previous.identity };
+      app.properties.configuration.ingress.fqdn = previous.properties.configuration.ingress.fqdn;
+      Object.assign(app.properties, { latestRevisionName: 'missionspec-test-ingest--upgraded',
+        latestReadyRevisionName: 'missionspec-test-ingest--upgraded', provisioningState: 'Succeeded', runningStatus: 'Running' });
+      deployment = { id, properties: { provisioningState: 'Succeeded', mode: 'Incremental', correlationId: 'fixture-image-change',
+        timestamp: new Date(now).toISOString(), templateHash: digest(json(phase.template)) } };
+    },
+  };
+  const controller = new ReceiverUpgradeController(f.c, phase, candidate, predecessor.readback.app, io);
+  const record = () => ({ version: 1, kind: 'reviewed-disabled-image-change', publication: { commitSha: 'c'.repeat(40), sourceSha256: source },
+    candidate, predecessor, prerequisiteReceipts: f.receipts, phase, approval, preflight: proof, whatIf, journal, receipt });
+  return { f, candidate, phase, context, whatIf, approval, proof, io, controller, predecessor, record,
+    advance: ms => { now += ms; }, get writes() { return writes; }, get journal() { return journal; },
+    get app() { return app; }, get receipt() { return receipt; } };
+}
+
+test('receiver upgrade profile binds full immutable artifacts, source, notices and retained conditional native limitations', async t => {
+  const f = fixture(), candidate = candidateFixture(f.c, f.receipts.publication);
+  assert.equal(verifyReceiverCandidate(f.c, candidate).digest, candidate.profile.manifestDigest);
+  assert.equal(candidate.profile.nativeClearance, 'CONDITIONAL_DISABLED_OR_SYNTHETIC_ONLY');
+  for (const [label, mutate] of [
+    ['manifest bytes', x => { x.profile.manifestJson += ' '; }],
+    ['config bytes', x => { x.profile.configJson += ' '; }],
+    ['arbitrary qualified digest', x => { x.profile = { qualified: true, manifestDigest: 'sha256:' + 'f'.repeat(64) }; }],
+    ['unknown profile', x => { x.profile.kind = 'arbitrary-image'; }],
+    ['source archive', x => { x.profile.source.archiveSha256 = digest('other'); }],
+    ['notices', x => { x.profile.notices.bytes += ' changed'; }],
+    ['scan bytes', x => { x.profile.scan.reportJson += ' '; }],
+    ['counts', x => { x.profile.scan.counts.MEDIUM = 0; }],
+    ['high advisory', x => { x.profile.scan.counts.HIGH = 1; }],
+    ['suppression', x => { x.profile.scan.suppressedFindings = 1; }],
+    ['native cleared', x => { x.profile.nativeClearance = 'CLEARED'; }],
+    ['native conditions omitted', x => { x.profile.retainedAdvisories.pop(); }],
+    ['glibc caveat waived', x => { x.profile.priorUnknownGlibcCaveatWaived = true; }],
+    ['qualification bytes', x => { x.profile.qualification.reportJson += ' '; }],
+    ['prepared identity contract', x => { x.profile.runtime.storageTimeoutMs = 20000; }],
+    ['production authority', x => { x.profile.authority.productionClearance = true; }],
+    ['old execution rewritten', x => { x.legacyPublication.receipt.configSha256Inputs = digest('new-config'); }],
+    ['old source rewritten', x => { x.review.legacyPublicationSha256 = digest('other-history'); }],
+    ['publication source not reviewed', x => { x.review.sourceSha256 = 'unknown'; }],
+    ['publication evidence absent', x => { x.publication = { qualified: true }; }],
+    ['publication cost reserve reduced', x => { x.review.cost.items.requests = 0; }],
+    ['image index', x => { const m = JSON.parse(x.profile.manifestJson); m.mediaType = 'application/vnd.oci.image.index.v1+json'; x.profile.manifestJson = json(m); }],
+  ]) await t.test(label, () => {
+    const value = structuredClone(candidate); mutate(value);
+    assert.throws(() => verifyReceiverCandidate(f.c, value));
+  });
+  const scanExpired = structuredClone(candidate); scanExpired.publication.intentAt = candidate.profile.scan.databaseNextUpdate;
+  assert.throws(() => verifyReceiverCandidate(f.c, scanExpired), /EXPIRED/);
+  const wrongUser = structuredClone(candidate.profile), config = JSON.parse(wrongUser.configJson);
+  config.config.User = '0'; wrongUser.configJson = json(config); wrongUser.configDigest = 'sha256:' + digest(wrongUser.configJson);
+  assert.throws(() => verifyReceiverProfile(wrongUser), /INVALID/);
+});
+
+test('candidate publication admits exactly the owned old tag and one reviewed new manifest, never a push', async () => {
+  const f = fixture(), candidate = candidateFixture(f.c, f.receipts.publication), inventory = structuredClone(candidate.publication);
+  verifyReceiverInventory(f.c, candidate, inventory, true);
+  for (const change of [
+    x => x.manifests.push({ digest: 'sha256:' + 'f'.repeat(64), tags: ['extra'] }),
+    x => { x.manifests[1].tags.push('latest'); }, x => { x.manifests[0].tags = ['changed']; },
+    x => { x.repositories.push('other/repository'); }, x => { x.referrers.push({ digest: 'sha256:' + 'f'.repeat(64) }); },
+    x => { x.manifests[1].digest = x.manifests[0].digest; },
+  ]) { const value = structuredClone(inventory); change(value); assert.throws(() => verifyReceiverInventory(f.c, candidate, value, true), /INVENTORY/); }
+  const before = { repositories: inventory.repositories, manifests: inventory.manifests.slice(0, 1), referrers: [] };
+  candidate.publication = null;
+  const preview = prepareReceiverPublication(f.c, candidate, before, Date.parse('2026-09-23T08:01:00.000Z'));
+  assert.equal(preview.qualified, false); assert.equal(preview.pushExecuted, false);
+  assert.equal(preview.cost.total, 311.23); assert.equal(preview.cost.items.requests, firstReleaseCost(1).items.requests);
+  assert.equal(preview.cost.items.defenderCspmTwoFullNodes, firstReleaseCost(1).items.defenderCspmTwoFullNodes);
+  assert.throws(() => prepareReceiverPublication(f.c, candidate, before, Date.parse(candidate.review.expiresAt)), /EXPIRED/);
+});
+
+test('source qualification binds the exact 35 build inputs, not unrelated tracked/editor files', async () => {
+  const f = fixture(), candidate = candidateFixture(f.c, f.receipts.publication);
+  const contents = { ...Object.fromEntries(RECEIVER_SOURCE_INPUTS.map(path => [path, `fixture ${path}`])),
+    'services/telemetry-ingest/src/identity-readiness.ts': 'fixture readiness', 'services/telemetry-ingest/Dockerfile': 'fixture Dockerfile' };
+  assert.equal(RECEIVER_SOURCE_INPUTS.length, 35);
+  assert(!RECEIVER_SOURCE_INPUTS.includes('services/telemetry-ingest/.gitignore'));
+  const run = async (command, args) => {
+    assert.equal(command, 'git');
+    if (args[0] === 'merge-base') return { stdout: Buffer.alloc(0) };
+    assert.notEqual(args[0], 'ls-tree', 'Unrelated Git directory entries are not build inputs.');
+    assert.deepEqual(args.slice(0, 2), ['--no-pager', 'show']);
+    return { stdout: Buffer.from(contents[args[2].slice(41)]) };
+  };
+  await verifyReceiverSource(candidate, run, async () => candidate.review.sourceSha256);
+  const unrelated = structuredClone(candidate);
+  unrelated.profile.source.files['services/telemetry-ingest/.gitignore'] = digest('unrelated');
+  assert.throws(() => verifyReceiverProfile(unrelated.profile), /CLOSED_INPUT_REQUIRED/);
+  await assert.rejects(verifyReceiverSource(unrelated, run, async () => candidate.review.sourceSha256), /SOURCE_UNAVAILABLE/);
+  await assert.rejects(verifyReceiverSource(candidate, run, async () => digest('unreviewed policy')), /SOURCE_UNAVAILABLE/);
+  delete candidate.profile.source.files['services/telemetry-ingest/Dockerfile'];
+  await assert.rejects(verifyReceiverSource(candidate, run, async () => candidate.review.sourceSha256), { message: 'RECEIVER_SOURCE_UNAVAILABLE' });
+});
+
+test('scanner database nanoseconds remain hash-bound while expiry comparisons fail closed at millisecond boundaries', () => {
+  assert.equal(receiverDatabaseInstant('2026-09-25T06:44:41.940723189Z'), Date.parse('2026-09-25T06:44:41.940Z'));
+  assert.equal(receiverDatabaseInstant('2026-09-24T06:44:41.94072344Z'), Date.parse('2026-09-24T06:44:41.940Z'));
+  for (const value of ['2026-02-30T06:44:41.94072344Z', '2026-09-24T06:44:41Z', '2026-09-24T06:44:41.9407234411Z',
+    '2026-09-24T06:44:41.940+00:00', null, 1]) assert.throws(() => receiverDatabaseInstant(value), /DATABASE_TIME_INVALID/);
+  const f = fixture(), candidate = candidateFixture(f.c, f.receipts.publication);
+  candidate.profile.scan.databaseUpdatedAt = '2026-09-23T08:00:00.000123456Z';
+  candidate.profile.scan.databaseNextUpdate = '2026-09-24T08:00:00.000123456Z';
+  const qualification = JSON.parse(candidate.profile.qualification.reportJson);
+  qualification.scanner.dbMetadata.UpdatedAt = candidate.profile.scan.databaseUpdatedAt;
+  qualification.scanner.dbMetadata.NextUpdate = candidate.profile.scan.databaseNextUpdate;
+  candidate.profile.qualification.reportJson = json(qualification);
+  candidate.profile.qualification.reportSha256 = digest(candidate.profile.qualification.reportJson);
+  verifyReceiverProfile(candidate.profile);
+  candidate.review.profileSha256 = digest(json(candidate.profile));
+  candidate.publication = null;
+  assert.throws(() => verifyReceiverCandidate(f.c, candidate, Date.parse('2026-09-24T08:00:00.000Z'), false), /EXPIRED/);
+});
+
+test('content hashes do not substitute for matching local image qualification, complete notices or native caveats', () => {
+  const f = fixture(), original = candidateFixture(f.c, f.receipts.publication).profile;
+  for (const mutate of [
+    q => { q.artifact.config = 'sha256:' + 'f'.repeat(64); },
+    q => { q.productionAzureQualification = true; },
+    q => { q.nativeCoverage = 'all native advisories cleared'; },
+    q => { q.runtimeConstraints.memoryMaxBytes *= 2; },
+    q => { q.resourceFixtures['disabled-main'].identityRequests = 1; },
+    q => { q.resourceFixtures['slow-identity'].firstEvent.elapsedMs = 1001; },
+    q => { q.resourceFixtures['failed-identity'].ingestionRequests = 1; },
+  ]) {
+    const profile = structuredClone(original), report = JSON.parse(profile.qualification.reportJson);
+    mutate(report); profile.qualification.reportJson = json(report); profile.qualification.reportSha256 = digest(profile.qualification.reportJson);
+    assert.throws(() => verifyReceiverProfile(profile), /QUALIFICATION_INVALID/);
+  }
+  for (const mutate of [
+    b => { b.files[0].base64 = Buffer.from('different notice').toString('base64'); },
+    b => { b.files[0].base64 += '\\n'; },
+    b => { b.files.length = 0; },
+  ]) {
+    const profile = structuredClone(original), bundle = JSON.parse(profile.notices.bytes);
+    mutate(bundle); profile.notices.bytes = json(bundle); profile.notices.sha256 = digest(profile.notices.bytes);
+    assert.throws(() => verifyReceiverProfile(profile), /NOTICES_INVALID/);
+  }
+});
+
+test('full disabled image what-if rejects flag, defaults, identity and every other mutable app delta', async t => {
+  const u = await upgradeFixture(), context = { ...u.context, config: u.f.c, app: u.predecessor.readback.app };
+  assert.equal(u.phase.transition.fromDigest, RECEIVER_DIGEST);
+  assert.equal(u.phase.transition.toDigest, u.candidate.profile.manifestDigest);
+  assert.equal(u.phase.configSha256, digest(json(u.f.c)));
+  assert.equal(whatIfRequestContext(u.f.c, u.phase).windowInstanceId, u.phase.windowInstance.id);
+  for (const [label, mutate] of [
+    ['flag', v => { v.properties.template.containers[0].env.find(v => v.name === 'MSR_INGESTION_ENABLED').value = 'true'; }],
+    ['cpu', v => { v.properties.template.containers[0].resources.cpu = 0.5; }],
+    ['env', v => { v.properties.template.containers[0].env.push({ name: 'EXTRA', value: '1' }); }],
+    ['command', v => { v.properties.template.containers[0].command = ['sh']; }],
+    ['volume', v => { v.properties.template.volumes = [{ name: 'extra' }]; }],
+    ['probe', v => { v.properties.template.containers[0].probes[0].periodSeconds = 2; }],
+    ['identity', v => { v.identity.userAssignedIdentities = {}; }],
+    ['lifecycle', v => { v.properties.configuration.identitySettings[0].lifecycle = 'All'; }],
+    ['ingress', v => { v.properties.configuration.ingress.allowInsecure = true; }],
+    ['scale', v => { v.properties.template.scale.maxReplicas = 2; }],
+    ['unreviewed default', v => { v.properties.template.scale.cooldownPeriod = 600; }],
+    ['registry credentials', v => { v.properties.configuration.registries[0].username = 'admin'; }],
+  ]) await t.test(label, () => {
+    const value = structuredClone(u.whatIf); mutate(value.changes[0].after);
+    assert.throws(() => verifyWhatIf(u.phase, value, [], context));
+  });
+
+  await t.test('seven-entry Azure image what-if preserves six known Ignores in both review and completed record', async () => {
+    const u = await upgradeFixture(true), raw = json(u.whatIf), known = Object.values(u.f.receipts).flatMap(v => Object.keys(v.resources ?? {}));
+    assert.equal(u.whatIf.changes.length, 7);
+    const context = { ...u.context, config: u.f.c, app: u.predecessor.readback.app };
+    verifyWhatIf(u.phase, u.whatIf, known, context);
+    await u.controller.execute(u.approval);
+    verifyDisabledImageRecord(u.f.c, u.record());
+    assert.equal(json(u.whatIf), raw, 'The complete payload, not a filtered rewrite, remains bound.');
+    const rejectRecorded = whatIf => {
+      const record = structuredClone(u.record());
+      record.whatIf = whatIf;
+      record.approval.whatIfSha256 = digest(json(whatIf));
+      record.preflight.whatIfSha256 = record.approval.whatIfSha256;
+      record.receipt.approvalSha256 = digest(json(record.approval));
+      record.journal.approvalSha256 = record.receipt.approvalSha256;
+      record.journal.receiptSha256 = digest(json(record.receipt));
+      assert.throws(() => verifyDisabledImageRecord(u.f.c, record), /UNREVIEWED_RESOURCE_CHANGE/);
+    };
+    for (const changeType of ['Modify', 'Create', 'Delete', 'NoChange']) {
+      const value = structuredClone(u.whatIf); value.changes[1].changeType = changeType;
+      assert.throws(() => verifyWhatIf(u.phase, value, known, context), /UNREVIEWED_RESOURCE_CHANGE/);
+      rejectRecorded(value);
+    }
+    const unknown = structuredClone(u.whatIf); unknown.changes[1].resourceId += '-unknown';
+    assert.throws(() => verifyWhatIf(u.phase, unknown, known, context), /UNREVIEWED_RESOURCE_CHANGE/);
+    rejectRecorded(unknown);
+    const duplicate = structuredClone(u.whatIf); duplicate.changes.push(structuredClone(duplicate.changes[0]));
+    assert.throws(() => verifyWhatIf(u.phase, duplicate, known, context), /WHAT_IF_ID_INVALID/);
+    const missing = structuredClone(u.whatIf); missing.changes.shift();
+    assert.throws(() => verifyWhatIf(u.phase, missing, known, context), /WHAT_IF_INCOMPLETE/);
+  });
+  for (const type of ['Create', 'Delete', 'NoChange', 'Ignore']) {
+    const value = structuredClone(u.whatIf); value.changes[0].changeType = type;
+    assert.throws(() => verifyWhatIf(u.phase, value, [], context), /DISABLED_IMAGE_ONLY/);
+  }
+});
+
+test('reviewed disabled image execution journals once, preserves history, and becomes the next standard-window anchor', async () => {
+  const u = await upgradeFixture(), before = json(u.predecessor), oldConfig = json(u.f.c), oldReceipts = json(u.f.receipts);
+  await u.controller.execute(u.approval);
+  assert.equal(u.writes, 1); assert.equal(u.receipt.ingestionEnabled, false); assert.equal(u.receipt.noOtherChange, true);
+  const record = u.record(), summary = verifyDisabledImageRecord(u.f.c, record);
+  assert.equal(verifyWindowPredecessor(u.f.c, record).outcome, 'reviewed-disabled-image-change');
+  assert.equal(summary.usedInstanceIds.length, 2);
+  assert.equal(json(u.predecessor), before); assert.equal(json(u.f.c), oldConfig); assert.equal(json(u.f.receipts), oldReceipts);
+  const instance = { version: 1, id: randomUUID(), predecessorSha256: digest(json(record)), previousInstanceIds: summary.usedInstanceIds };
+  verifyWindowInstancePredecessor(u.f.c, instance, record);
+  const receipts = { ...u.f.receipts, receiverUpgrade: record };
+  const phases = Object.fromEntries(['synthetic-admission', 'synthetic-disable'].map(name =>
+    [name, buildPhase(u.f.c, name, null, receipts, undefined, undefined, instance)]));
+  for (const p of Object.values(phases)) {
+    assert.equal(p.resources[0].expected.properties.template.containers[0].image.endsWith(u.candidate.profile.manifestDigest), true);
+    assert.equal(p.transition.anchorAppSha256, digest(json(u.receipt.resources[u.f.r.app])));
+  }
+  const whatifs = { 'synthetic-admission': { status: 'Succeeded', changes: [{ resourceId: u.f.r.app, changeType: 'Modify',
+    before: u.receipt.resources[u.f.r.app], after: { ...structuredClone(phases['synthetic-admission'].resources[0].expected), id: u.f.r.app } }] },
+  'synthetic-disable': { status: 'Succeeded', changes: [{ resourceId: u.f.r.app, changeType: 'NoChange' }] } };
+  const window = buildSyntheticWindow(u.f.c, phases, receipts, { policyBaselineSha256: u.f.window.baselineSha256 }, u.f.source, whatifs);
+  assert.equal(window.anchorApp.properties.template.containers[0].image.endsWith(u.candidate.profile.manifestDigest), true);
+  const rollback = buildDisabledImagePhase(u.f.c, 'disabled-image-rollback', receipts, u.candidate, record, instance);
+  assert.equal(rollback.transition.toDigest, RECEIVER_DIGEST);
+  assert.equal(rollback.ingestEnabled, false);
+  assert.notEqual(rollback.deploymentId, u.phase.deploymentId);
+  const rollbackWhatIf = { status: 'Succeeded', changes: [{ resourceId: u.f.r.app, changeType: 'Modify',
+    before: u.receipt.resources[u.f.r.app], after: { ...structuredClone(rollback.resources[0].expected), id: u.f.r.app } }] };
+  verifyWhatIf(rollback, rollbackWhatIf, [], { ...u.context, config: u.f.c, app: u.receipt.resources[u.f.r.app] });
+  const restore = new ReceiverUpgradeController(u.f.c, rollback, u.candidate, u.receipt.resources[u.f.r.app], u.io);
+  await assert.rejects(restore.execute(u.approval), /EXACT_PHASE_RELEASE_REQUIRED/);
+  assert.throws(() => buildPhase(u.f.c, 'disabled-app', null, receipts), /HISTORICAL_DISABLED_APP_PROFILE_IMMUTABLE/);
+  await assert.rejects(u.controller.execute(u.approval), /REPLAY/);
+  assert.equal(u.writes, 1);
+});
+
+test('upgrade rejects expiry, source/role/identity drift and unknown submissions without a blind retry', async t => {
+  for (const mode of ['expired', 'source', 'role', 'identity', 'unknown', 'old-ready', 'privacy']) await t.test(mode, async () => {
+    const u = await upgradeFixture(), observe = u.io.observe, arm = u.io.arm;
+    if (mode === 'expired') u.advance(1800000);
+    if (mode === 'source') u.io.sourceDigest = async () => digest('changed source');
+    if (mode === 'role') u.io.security = async () => { throw new Error('ASSIGNMENT_ROLE_DEFINITION_DRIFT'); };
+    if (mode === 'identity') u.io.observe = async () => {
+      const value = await observe(); value.app.identity.userAssignedIdentities[u.f.r.ingestIdentity].principalId = u.f.c.operatorPrincipalId; return value;
+    };
+    if (mode === 'unknown') u.io.arm = async (...args) => { await arm(...args); throw new Error('private URL token and path'); };
+    if (mode === 'old-ready') u.io.observe = async () => {
+      const value = await observe(); if (u.writes) value.app.properties.latestReadyRevisionName = u.predecessor.readback.app.properties.latestReadyRevisionName; return value;
+    };
+    if (mode === 'privacy') u.io.privacy = async () => ({ diagnostics: { [u.f.r.app]: { value: [{ name: 'route' }] } }, exports: { value: [] } });
+    await assert.rejects(u.controller.execute(u.approval));
+    assert.equal(u.receipt, null);
+    assert.equal(u.writes, ['unknown', 'old-ready', 'privacy'].includes(mode) ? 1 : 0);
+    if (u.journal) {
+      assert.equal(u.journal.outcome, 'reconciliation-required');
+      assert.match(u.journal.failureCode, /^[A-Z_]+$/u);
+      assert(!json(u.journal).includes('private URL'));
+      await assert.rejects(u.controller.execute(u.approval));
+      assert.equal(u.writes, 1);
+    }
+  });
+});
+
+test('upgrade predecessor cannot fabricate old window success, change approvals, or erase image execution uncertainty', async () => {
+  const u = await upgradeFixture(); await u.controller.execute(u.approval);
+  for (const mutate of [
+    x => { x.predecessor.run.outcome = 'qualified-and-disabled'; },
+    x => { x.predecessor.run.terminalFalseVerified = false; },
+    x => { x.journal.transportDispatchAttempted = false; },
+    x => { x.journal.outcome = 'reconciliation-required'; },
+    x => { x.receipt.qualified = true; x.receipt.noOtherChange = false; },
+    x => { x.approval.sourceSha256 = digest('unreviewed source'); },
+    x => { x.receipt.resources[u.f.r.app].properties.template.containers[0].image = 'unknown'; },
+    x => { x.phase.windowInstance.id = u.f.instance.id; },
+    x => { x.receipt.revisions.value[0].properties.healthState = 'Unhealthy'; },
+    x => { x.receipt.privacy.exports.value = [{}]; },
+  ]) { const record = structuredClone(u.record()); mutate(record); assert.throws(() => verifyWindowPredecessor(u.f.c, record)); }
+});
+
+test('image guards run after body preparation and asynchronous reads; no late qualification or raced deployment', async t => {
+  for (const mode of ['body-expiry', 'body-phase-drift', 'body-role-drift', 'deployment-race', 'late-final']) await t.test(mode, async () => {
+    const u = await upgradeFixture(), arm = u.io.arm, observe = u.io.observe, deployment = u.io.deployment;
+    if (mode.startsWith('body-')) u.io.arm = async (...args) => {
+      if (mode === 'body-expiry') u.advance(1800000);
+      if (mode === 'body-phase-drift') u.phase.template.resources[0].properties.template.containers[0].env.push({ name: 'EXTRA', value: '1' });
+      if (mode === 'body-role-drift') u.io.security = async () => { throw new Error('ASSIGNMENT_ROLE_DEFINITION_DRIFT'); };
+      return arm(...args);
+    };
+    if (mode === 'deployment-race') {
+      let reads = 0;
+      u.io.deployment = async (...args) => ++reads >= 2 ? { id: u.phase.deploymentId } : deployment(...args);
+    }
+    if (mode === 'late-final') {
+      let readyReads = 0;
+      u.io.observe = async (...args) => {
+        const value = await observe(...args);
+        if (u.writes && ++readyReads === 2) u.advance(120001);
+        return value;
+      };
+    }
+    await assert.rejects(u.controller.execute(u.approval));
+    assert.equal(u.writes, mode === 'late-final' ? 1 : 0);
+    assert.equal(u.receipt, null);
+    assert.equal(u.journal.outcome, 'reconciliation-required');
+  });
 });

@@ -196,9 +196,9 @@ test('Python bridge rejects unsafe URLs and credential-bearing/static-expression
   assert.equal(result.stdout.trim(), 'BRIDGE_VALIDATORS_PASSED_NO_AUTH_OR_NETWORK');
 });
 
-test('Python and Node derive the actual toggle execution name from the bound UUID, never the collector runId', async () => {
+test('Python and Node derive toggle and image-change names from the bound UUID, never the collector runId', async () => {
   const instance = { version: 1, id: '00000000-0000-4000-8000-000000000099', predecessorSha256: digest('prior'), previousInstanceIds: [] };
-  const requests = ['synthetic-admission', 'synthetic-disable'].map(name => {
+  const requests = ['synthetic-admission', 'synthetic-disable', 'disabled-image-upgrade', 'disabled-image-rollback'].map(name => {
     const p = { ...phase, phase: name, windowInstance: instance,
       deploymentId: `${r.group}/providers/Microsoft.Resources/deployments/${deploymentName(c, name, instance)}` };
     const request = whatIfRequestContext(c, p);

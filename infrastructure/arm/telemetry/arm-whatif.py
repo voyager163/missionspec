@@ -17,7 +17,8 @@ HOST = "https://management.azure.com"
 MAX_BYTES = 64 * 1024 * 1024
 PHASE_CODES = {"core": "co", "workspace-access": "wa", "data": "da", "upload-role": "ur",
                "assignments": "ra", "disabled-app": "di", "synthetic-admission": "sy",
-               "synthetic-disable": "sd", "project-budget": "pb"}
+               "synthetic-disable": "sd", "project-budget": "pb",
+               "disabled-image-upgrade": "iu", "disabled-image-rollback": "ir"}
 GUID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
 
 
@@ -69,14 +70,14 @@ def fixed_deployment_name(request):
     require(request.get("phase") in PHASE_CODES and isinstance(request.get("namePrefix"), str)
             and re.fullmatch(r"missionspec-[a-z0-9]{2,10}", request["namePrefix"])
             and isinstance(request.get("runId"), str) and GUID.fullmatch(request["runId"]), "FIXED_WHATIF_NAME_REQUIRED")
-    if request["phase"] in ("synthetic-admission", "synthetic-disable"):
+    if request["phase"] in ("synthetic-admission", "synthetic-disable", "disabled-image-upgrade", "disabled-image-rollback"):
         instance = request.get("windowInstanceId")
         require(isinstance(instance, str)
                 and re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", instance)
                 and instance != request["runId"]
                 and isinstance(request.get("predecessorSha256"), str)
                 and re.fullmatch(r"[0-9a-f]{64}", request["predecessorSha256"]), "BOUND_WINDOW_INSTANCE_REQUIRED")
-        identity = "w" + instance.replace("-", "")
+        identity = ("u" if request["phase"].startswith("disabled-image-") else "w") + instance.replace("-", "")
     else:
         require(request.get("windowInstanceId") is None and request.get("predecessorSha256") is None, "WINDOW_INSTANCE_TOGGLE_ONLY")
         identity = request["runId"].replace("-", "")
