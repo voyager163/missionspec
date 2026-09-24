@@ -4,13 +4,14 @@
   "packageName": "@msn-control/missionspec-telemetry-ingest",
   "packageVersion": "0.0.0",
   "lockfile": "services/telemetry-ingest/package-lock.json",
-  "lockfileDataSha256": "9d391432236af1a043c8f7e17b1c8a85bdb860505371e83c33d51d39a745c433",
+  "lockfileDataSha256": "6f02483734ebffaec065c2f20918a5c5eccd8c2e6b6061259c955190d3d70eb9",
   "selection": "Complete locked runtime dependency/optional/peer closure; not a bundle or reachability analysis of executable code.",
   "provenanceLimit": "Tarball integrity is recorded from the lockfile; trust restoration via npm ci. This check does not independently authenticate installed source bytes.",
   "directDependencies": {
     "@azure/identity": "node_modules/@azure/identity",
     "@azure/logger": "node_modules/@azure/logger",
     "@azure/monitor-ingestion": "node_modules/@azure/monitor-ingestion",
+    "@azure/storage-queue": "node_modules/@azure/storage-queue",
     "ajv": "node_modules/ajv"
   },
   "omittedOptional": [],
@@ -105,6 +106,52 @@
         "@azure/core-tracing": "node_modules/@azure/core-tracing",
         "@azure/core-util": "node_modules/@azure/core-util",
         "@azure/logger": "node_modules/@azure/logger",
+        "tslib": "node_modules/tslib"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744",
+          "retainedSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/@azure/core-http-compat",
+      "name": "@azure/core-http-compat",
+      "version": "2.5.0",
+      "resolved": "https://registry.npmjs.org/@azure/core-http-compat/-/core-http-compat-2.5.0.tgz",
+      "integrity": "sha512-BoSmXPx2er1Ai+wKlDvj29jIQespCNBwEmKyZVHO2kEFsWbGjAjwMCGzug3DJM5/QYIV3vej0S1zcU5bq9fa8w==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "@azure/abort-controller": "node_modules/@azure/abort-controller",
+        "@azure/core-client": "node_modules/@azure/core-client",
+        "@azure/core-rest-pipeline": "node_modules/@azure/core-rest-pipeline"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744",
+          "retainedSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/@azure/core-paging",
+      "name": "@azure/core-paging",
+      "version": "1.7.0",
+      "resolved": "https://registry.npmjs.org/@azure/core-paging/-/core-paging-1.7.0.tgz",
+      "integrity": "sha512-7GEAoIsaoBr6KELNRb8nypowCqvk8dnCHFCYg4XD4lOQGY2GqjQg5IhkRjyBFRO18CGSMq05PaNqSOE9GQro3g==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
         "tslib": "node_modules/tslib"
       },
       "omittedOptional": [],
@@ -363,6 +410,94 @@
       ]
     },
     {
+      "location": "node_modules/@azure/storage-common",
+      "name": "@azure/storage-common",
+      "version": "12.5.0",
+      "resolved": "https://registry.npmjs.org/@azure/storage-common/-/storage-common-12.5.0.tgz",
+      "integrity": "sha512-bttzuhQiCIwrkzjPDA+AtAR7dg19L/CC6ztcqJ5LfvWpXuys9mHp0UQ0udYnoUvv9SCT9KTR5kqFvFr0e6k0lQ==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "@azure/abort-controller": "node_modules/@azure/abort-controller",
+        "@azure/core-auth": "node_modules/@azure/core-auth",
+        "@azure/core-http-compat": "node_modules/@azure/core-http-compat",
+        "@azure/core-rest-pipeline": "node_modules/@azure/core-rest-pipeline",
+        "@azure/core-tracing": "node_modules/@azure/core-tracing",
+        "@azure/core-util": "node_modules/@azure/core-util",
+        "@azure/logger": "node_modules/@azure/logger",
+        "events": "node_modules/events",
+        "tslib": "node_modules/tslib"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "ed11982ff1ff5818970e943bf9aefc3909dbc65e5f0b3465a969c73a8bca5bb2",
+          "retainedSha256": "ed11982ff1ff5818970e943bf9aefc3909dbc65e5f0b3465a969c73a8bca5bb2"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/@azure/storage-queue",
+      "name": "@azure/storage-queue",
+      "version": "12.32.0",
+      "resolved": "https://registry.npmjs.org/@azure/storage-queue/-/storage-queue-12.32.0.tgz",
+      "integrity": "sha512-jMtVg87egqEanN4lb5mXViAYAsjZshLhqgx35f1Xr+qjVF7eh9eI0u2dMuDW/IQXrNK6H9rXUbS3xap2XeI88g==",
+      "relationship": "direct",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "@azure-rest/core-client": "node_modules/@azure-rest/core-client",
+        "@azure/abort-controller": "node_modules/@azure/abort-controller",
+        "@azure/core-auth": "node_modules/@azure/core-auth",
+        "@azure/core-client": "node_modules/@azure/core-client",
+        "@azure/core-http-compat": "node_modules/@azure/core-http-compat",
+        "@azure/core-paging": "node_modules/@azure/core-paging",
+        "@azure/core-rest-pipeline": "node_modules/@azure/core-rest-pipeline",
+        "@azure/core-tracing": "node_modules/@azure/core-tracing",
+        "@azure/core-util": "node_modules/@azure/core-util",
+        "@azure/logger": "node_modules/@azure/logger",
+        "@azure/storage-common": "node_modules/@azure/storage-common",
+        "fast-xml-parser": "node_modules/@azure/storage-queue/node_modules/fast-xml-parser",
+        "tslib": "node_modules/tslib"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744",
+          "retainedSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/@azure/storage-queue/node_modules/fast-xml-parser",
+      "name": "fast-xml-parser",
+      "version": "5.5.9",
+      "resolved": "https://registry.npmjs.org/fast-xml-parser/-/fast-xml-parser-5.5.9.tgz",
+      "integrity": "sha512-jldvxr1MC6rtiZKgrFnDSvT8xuH+eJqxqOBThUVjYrxssYTo1avZLGql5l0a0BAERR01CadYzZ83kVEkbyDg+g==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "fast-xml-builder": "node_modules/fast-xml-builder",
+        "path-expression-matcher": "node_modules/path-expression-matcher",
+        "strnum": "node_modules/strnum"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "7883225d5e84a6bbb9b170c3d891b4bf6d6259cee869c86bd86381a927071745",
+          "retainedSha256": "7883225d5e84a6bbb9b170c3d891b4bf6d6259cee869c86bd86381a927071745"
+        }
+      ]
+    },
+    {
       "location": "node_modules/@typespec/ts-http-runtime",
       "name": "@typespec/ts-http-runtime",
       "version": "0.3.9",
@@ -428,6 +563,26 @@
           "path": "LICENSE",
           "sourceSha256": "a05350a88e318e4f5f2c2a1ff1e2e88daa4dd38e6e78b71cccae422bdc762cc3",
           "retainedSha256": "a05350a88e318e4f5f2c2a1ff1e2e88daa4dd38e6e78b71cccae422bdc762cc3"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/anynum",
+      "name": "anynum",
+      "version": "1.0.1",
+      "resolved": "https://registry.npmjs.org/anynum/-/anynum-1.0.1.tgz",
+      "integrity": "sha512-N6//FLET/tXYNM/F6ABca1oH6fWB+KlTt909Le28WMDBk8oaT4vY17DCrwg2MvmuqUKt3Ni4N5dGJ/EoBgcO6A==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "8e75fc0e776c62ccadb8178ece8d3daa9ba7601fb0a49b2dfb0ea9a7a5c0aa07",
+          "retainedSha256": "8e75fc0e776c62ccadb8178ece8d3daa9ba7601fb0a49b2dfb0ea9a7a5c0aa07"
         }
       ]
     },
@@ -581,6 +736,26 @@
       ]
     },
     {
+      "location": "node_modules/events",
+      "name": "events",
+      "version": "3.3.0",
+      "resolved": "https://registry.npmjs.org/events/-/events-3.3.0.tgz",
+      "integrity": "sha512-mQw+2fkQbALzQ7V0MY0IqdnXNOeTtP4r0lN9z7AAawCXgqea7bDii20AYrIBrFd/Hx0M2Ocz6S111CaFkUcb0Q==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "631987b7616a325a5b97566c232418481ddf7dbb5ecadefb991e791876cc2599",
+          "retainedSha256": "631987b7616a325a5b97566c232418481ddf7dbb5ecadefb991e791876cc2599"
+        }
+      ]
+    },
+    {
       "location": "node_modules/fast-deep-equal",
       "name": "fast-deep-equal",
       "version": "3.1.3",
@@ -617,6 +792,29 @@
           "path": "LICENSE",
           "sourceSha256": "b010b0dfdfdb23d7396e03b82cd4621fc9bb8f95d6b0aea70b9c24e12074c786",
           "retainedSha256": "b010b0dfdfdb23d7396e03b82cd4621fc9bb8f95d6b0aea70b9c24e12074c786"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/fast-xml-builder",
+      "name": "fast-xml-builder",
+      "version": "1.3.1",
+      "resolved": "https://registry.npmjs.org/fast-xml-builder/-/fast-xml-builder-1.3.1.tgz",
+      "integrity": "sha512-pIM/1n3ntFXKYrUZwW7QCK0gAW7XY+wzj1YMIV3tLDvPj/V+zTGJK5e3/4WJfwj0qWw2ElNXiTixda/R+3YSug==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "path-expression-matcher": "node_modules/path-expression-matcher",
+        "xml-naming": "node_modules/xml-naming"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "8e75fc0e776c62ccadb8178ece8d3daa9ba7601fb0a49b2dfb0ea9a7a5c0aa07",
+          "retainedSha256": "8e75fc0e776c62ccadb8178ece8d3daa9ba7601fb0a49b2dfb0ea9a7a5c0aa07"
         }
       ]
     },
@@ -1039,6 +1237,26 @@
       ]
     },
     {
+      "location": "node_modules/path-expression-matcher",
+      "name": "path-expression-matcher",
+      "version": "1.6.2",
+      "resolved": "https://registry.npmjs.org/path-expression-matcher/-/path-expression-matcher-1.6.2.tgz",
+      "integrity": "sha512-enSlaiat05iasnzmgNxRj8reFdj3puY2QpNgP1aPIaVfT6nn9ICuPoFlKHk8EN22HcwewshO+mN2DGbkCEOtqQ==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "75486ea0af9309140ca6e2c401d7e67bea8f4892344e5707f6394dc5e83dfc44",
+          "retainedSha256": "75486ea0af9309140ca6e2c401d7e67bea8f4892344e5707f6394dc5e83dfc44"
+        }
+      ]
+    },
+    {
       "location": "node_modules/require-from-string",
       "name": "require-from-string",
       "version": "2.0.2",
@@ -1119,6 +1337,28 @@
       ]
     },
     {
+      "location": "node_modules/strnum",
+      "name": "strnum",
+      "version": "2.4.2",
+      "resolved": "https://registry.npmjs.org/strnum/-/strnum-2.4.2.tgz",
+      "integrity": "sha512-rDG3Ah4TV0k1hWvLSzkZtMmLN9+eS+h3knq4MP6A42Y3Yh5qGNnOUs1jJkoSr8FG5dsL28c7KgkIBzSEykqtuw==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "anynum": "node_modules/anynum"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "2aa16be0f4fad003a352a955a43314e9d1d8deef7034060a82ac9c49f32b81e2",
+          "retainedSha256": "2aa16be0f4fad003a352a955a43314e9d1d8deef7034060a82ac9c49f32b81e2"
+        }
+      ]
+    },
+    {
       "location": "node_modules/tslib",
       "name": "tslib",
       "version": "2.8.1",
@@ -1162,6 +1402,26 @@
           "path": "license",
           "sourceSha256": "5c932d88256b4ab958f64a856fa48e8bd1f55bc1d96b8149c65689e0c61789d3",
           "retainedSha256": "5c932d88256b4ab958f64a856fa48e8bd1f55bc1d96b8149c65689e0c61789d3"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/xml-naming",
+      "name": "xml-naming",
+      "version": "0.3.0",
+      "resolved": "https://registry.npmjs.org/xml-naming/-/xml-naming-0.3.0.tgz",
+      "integrity": "sha512-ghig2TBE/H11aOVgmahA3MhimvkBr6JIYknH/Dhdk10nXwdbIqBJsbfMxpvFPG8bAw77gN29aQWvKpmVoPlvPQ==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "8e75fc0e776c62ccadb8178ece8d3daa9ba7601fb0a49b2dfb0ea9a7a5c0aa07",
+          "retainedSha256": "8e75fc0e776c62ccadb8178ece8d3daa9ba7601fb0a49b2dfb0ea9a7a5c0aa07"
         }
       ]
     }

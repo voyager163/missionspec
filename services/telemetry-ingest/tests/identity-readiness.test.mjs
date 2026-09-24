@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { setImmediate as turn } from 'node:timers/promises';
-import { createIdentityReadiness, INGESTION_SCOPE, IDENTITY_PREPARATION_TIMEOUT_MS,
+import { createIdentityReadiness, INGESTION_SCOPE, STORAGE_SCOPE, IDENTITY_PREPARATION_TIMEOUT_MS,
   IDENTITY_REFRESH_MARGIN_MS } from '../dist/identity-readiness.js';
 import { createStorageAdapter } from '../dist/azure-storage.js';
 import { createTelemetryServer } from '../dist/server.js';
@@ -19,6 +19,22 @@ const deferred = () => {
 };
 const health = (receiver, kind = 'ready') => post(receiver.port, '', { method: 'GET', path: `/health/${kind}` });
 
+test('storage and monitor identities are separately scoped and never return a token for the other audience', async t => {
+  for (const scope of [STORAGE_SCOPE, INGESTION_SCOPE]) {
+    const other = scope === STORAGE_SCOPE ? INGESTION_SCOPE : STORAGE_SCOPE;
+    const identity = createIdentityReadiness({ async getToken(requested) {
+      assert.equal(requested, scope);
+      return accessToken();
+    } }, scope);
+    t.after(() => identity.readiness.stop());
+    identity.readiness.setEnabled(true);
+    await turn();
+    assert.equal(identity.readiness.ready(), true);
+    assert(await identity.credential.getToken(scope));
+    await assert.rejects(identity.credential.getToken(other), /IDENTITY_NOT_READY/);
+    await assert.rejects(identity.credential.getToken(scope, { tenantId: 'challenge' }), /IDENTITY_NOT_READY/);
+  }
+});
 test('constructors and disabled listening receiver do no identity/upload work; enabling prepares once', async t => {
   let calls = 0, uploads = 0;
   const pending = deferred();

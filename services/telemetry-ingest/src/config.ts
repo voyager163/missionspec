@@ -14,6 +14,8 @@ export interface AzureConfig {
   ruleId: string;
   ruleResourceId: string;
   clientId: string;
+  queueUrl: string;
+  queueResourceId: string;
 }
 
 export interface OperatorConfig {
@@ -92,13 +94,23 @@ export function parseConfig(environment: Readonly<Record<string, string | undefi
       !/^[a-z0-9-]+(?:\.[a-z0-9-]+)*\.ingest\.monitor\.azure\.com$/.test(endpoint.hostname)) {
     throw new ConfigError('CONFIG_INVALID');
   }
+  const queueResourceId = required('AZURE_QUEUE_RESOURCE_ID');
+  const queuePrefix = `/subscriptions/${subscription}/resourceGroups/${group}/providers/Microsoft.Storage/storageAccounts/`;
+  if (!queueResourceId.toLowerCase().startsWith(queuePrefix.toLowerCase())) throw new ConfigError('CONFIG_INVALID');
+  const queueParts = /^([a-z0-9]{3,24})\/queueServices\/default\/queues\/([a-z0-9](?:[a-z0-9-]{1,61})[a-z0-9])$/.exec(
+    queueResourceId.slice(queuePrefix.length),
+  );
+  if (!queueParts || queueParts[2]!.includes('--')) throw new ConfigError('CONFIG_INVALID');
+  const queueUrl = required('AZURE_QUEUE_URL');
+  if (queueUrl !== `https://${queueParts[1]}.queue.core.windows.net/${queueParts[2]}`) throw new ConfigError('CONFIG_INVALID');
   const limits = Object.fromEntries(Object.entries(limitEnvironment).map(([key, name]) => {
     const [min, max] = limitRanges[key as keyof Limits];
     return [key, integer(name, min, max)];
   })) as unknown as Limits;
   try { validateLimits(limits); } catch { throw new ConfigError('CONFIG_INVALID'); }
+  if (limits.storageTimeoutMs > 650 || limits.maxConcurrentIngestions > 8) throw new ConfigError('CONFIG_INVALID');
   return {
     host, enabled: enabled === 'true', port: integer('PORT', 1024, 65535), limits,
-    azure: { endpoint: endpoint.origin, ruleId, ruleResourceId, clientId },
+    azure: { endpoint: endpoint.origin, ruleId, ruleResourceId, clientId, queueUrl, queueResourceId },
   };
 }

@@ -40,7 +40,7 @@ export function validateLimits(limits: Limits): void {
       limits.maxConcurrentRequests > limits.maxConnections) throw new Error('CONFIG_LIMIT_INVALID');
 }
 
-type Code = 'accepted' | 'invalid' | 'oversized' | 'unsupported' | 'not_found' |
+type Code = 'accepted' | 'queued' | 'invalid' | 'oversized' | 'unsupported' | 'not_found' |
   'method' | 'quota' | 'busy' | 'disabled' | 'body_timeout' | 'cancelled' |
   'storage_failure' | 'storage_timeout' | 'http_error';
 
@@ -169,6 +169,7 @@ export function createTelemetryServer(options: ReceiverOptions) {
     response.once('close', disconnect);
     let storageTimer: ReturnType<typeof setTimeout> | undefined;
     let onAbort: (() => void) | undefined;
+    let storageDeadline = Infinity;
     try {
       let value: unknown;
       const body = await readBody(request, controller.signal, limits.bodyTimeoutMs);
@@ -187,11 +188,19 @@ export function createTelemetryServer(options: ReceiverOptions) {
       // Keep the work slot occupied until the adapter actually settles, even after a timeout.
       // An adapter ignoring abort must not allow an unbounded queue of replacement uploads.
       inflightStorage++;
+      storageDeadline = clock() + limits.storageTimeoutMs;
       const upload = Promise.resolve().then(() => {
         controller.signal.throwIfAborted();
         return storage.ingest(record, controller.signal);
       }).then(
-        () => { storageUnavailableUntil = 0; return 'accepted' as const; },
+        () => {
+          if (controller.signal.aborted || clock() >= storageDeadline) {
+            storageUnavailableUntil = clock() + STORAGE_RECOVERY_DELAY_MS;
+            return 'storage_timeout' as const;
+          }
+          storageUnavailableUntil = 0;
+          return storage.acknowledgement === 'queued' ? 'queued' as const : 'accepted' as const;
+        },
         () => { storageUnavailableUntil = clock() + STORAGE_RECOVERY_DELAY_MS; return 'storage_failure' as const; },
       ).finally(() => { inflightStorage--; });
       const interrupted = new Promise<'storage_timeout' | 'cancelled'>(resolve => {
@@ -205,8 +214,8 @@ export function createTelemetryServer(options: ReceiverOptions) {
         if (controller.signal.aborted) resolve('cancelled');
       });
       const result = await Promise.race([upload, interrupted]);
-      const outcome = result === 'accepted' && controller.signal.aborted ? 'cancelled' : result;
-      return reject(outcome, outcome === 'accepted' ? 204 : 503);
+      const outcome = (result === 'accepted' || result === 'queued') && controller.signal.aborted ? 'cancelled' : result;
+      return reject(outcome, outcome === 'queued' ? 202 : outcome === 'accepted' ? 204 : 503);
     } catch (error) {
       if (error instanceof BodyError) {
         return reject(error.code, error.code === 'oversized' ? 413 :

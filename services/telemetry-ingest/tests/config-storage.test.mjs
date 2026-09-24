@@ -17,6 +17,8 @@ const environment = {
   AZURE_DCR_RESOURCE_ID: `/subscriptions/${guid}/resourceGroups/missionspec-test/providers/Microsoft.Insights/dataCollectionRules/test`,
   AZURE_DCR_IMMUTABLE_ID: `dcr-${'0'.repeat(32)}`,
   AZURE_LOGS_ENDPOINT: 'https://synthetic.invalid.ingest.monitor.azure.com',
+  AZURE_QUEUE_RESOURCE_ID: `/subscriptions/${guid}/resourceGroups/missionspec-test/providers/Microsoft.Storage/storageAccounts/msrqueuetest/queueServices/default/queues/events`,
+  AZURE_QUEUE_URL: 'https://msrqueuetest.queue.core.windows.net/events',
   ...Object.fromEntries(Object.entries(limitEnvironment).map(([key, name]) => [name, String(limits[key])])),
 };
 
@@ -33,6 +35,15 @@ test('operator config has no credential/destination/limit defaults and rejects u
     ['AZURE_LOGS_ENDPOINT', 'https://synthetic.ingest.monitor.azure.com?token=secret'],
     ['AZURE_DCR_RESOURCE_ID', environment.AZURE_DCR_RESOURCE_ID.replace('missionspec-test', 'other')],
     ['AZURE_DCR_IMMUTABLE_ID', 'arbitrary'],
+    ['AZURE_QUEUE_URL', 'http://msrqueuetest.queue.core.windows.net/events'],
+    ['AZURE_QUEUE_URL', 'https://msrqueuetest.queue.core.windows.net/events?sig=forbidden'],
+    ['AZURE_QUEUE_URL', 'https://other.queue.core.windows.net/events'],
+    ['AZURE_QUEUE_URL', 'https://msrqueuetest.queue.core.windows.net:443/events'],
+    ['AZURE_QUEUE_URL', 'https://msrqueuetest.queue.core.windows.net/events/'],
+    ['AZURE_QUEUE_RESOURCE_ID', environment.AZURE_QUEUE_RESOURCE_ID.replace('missionspec-test', 'foreign')],
+    ['AZURE_QUEUE_RESOURCE_ID', environment.AZURE_QUEUE_RESOURCE_ID.replace('/events', '/bad--queue')],
+    ['MSR_STORAGE_TIMEOUT_MS', '651'],
+    ['MSR_MAX_CONCURRENT_INGESTIONS', '9'],
     ['MSR_STORAGE_TIMEOUT_MS', 'NaN'],
     ['MSR_EVENTS_PER_DAY', '1000001'],
     ['MSR_INGESTION_ENABLED', 'TRUE'],
@@ -109,43 +120,107 @@ test('module imports are inert and startup fails with only a safe code', () => {
 });
 
 test('production storage wiring stays inert while disabled and identity failures expose no raw errors', () => {
+  const setupTimeoutMs = 10000;
+  const executionTimeoutMs = 5000;
   const script = `
     import assert from 'node:assert/strict';
     import { once } from 'node:events';
+    import { writeSync } from 'node:fs';
+    import { request } from 'node:http';
     import { setImmediate as turn } from 'node:timers/promises';
-    import { ManagedIdentityCredential } from '@azure/identity';
-    import { createAzureStorage } from './dist/azure-storage.js';
-    import { createTelemetryServer } from './dist/server.js';
-    let tokens = 0;
-    ManagedIdentityCredential.prototype.getToken = async function () {
-      assert.equal(this.clientId, ${JSON.stringify(guid)});
-      tokens++;
-      throw new Error('PRIVATE_IDENTITY_TOKEN_ENV_RAW_ERROR');
+    let receiver, timer, phase;
+    const stage = (name, budget) => {
+      phase = name;
+      writeSync(3, name + '\\n');
+      if (budget !== undefined) {
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          writeSync(3, phase + '_TIMEOUT\\n');
+          process.exit(1);
+        }, budget);
+      }
     };
-    const storage = await createAzureStorage(${JSON.stringify(parseConfig(environment).azure)});
-    assert.equal(tokens, 0);
-    const receiver = createTelemetryServer({ storage, enabled: false, limits: ${JSON.stringify(limits)} });
+    // Own and drain each test connection instead of leaving a global fetch dispatcher to settle.
+    async function status(port, path, method = 'GET') {
+      let req, socketClosed = Promise.resolve();
+      const response = new Promise((resolve, reject) => {
+        req = request({ hostname: '127.0.0.1', port, path, method, agent: false }, res => {
+          res.once('error', () => reject(new Error('FIXTURE_HTTP_FAILED')));
+          res.resume();
+          res.once('end', () => resolve(res.statusCode));
+        });
+        req.once('socket', socket => { socketClosed = new Promise(resolve => socket.once('close', resolve)); });
+        req.once('error', () => reject(new Error('FIXTURE_HTTP_FAILED')));
+        req.end();
+      });
+      const timeout = setTimeout(() => req.destroy(new Error('FIXTURE_HTTP_TIMEOUT')), 1000);
+      try {
+        const code = await response;
+        await socketClosed;
+        return code;
+      } finally {
+        req.destroy();
+        await socketClosed;
+        clearTimeout(timeout);
+      }
+    }
+    stage('SETUP', ${setupTimeoutMs});
     try {
+      const { ManagedIdentityCredential } = await import('@azure/identity');
+      const { createAzureStorage } = await import('./dist/azure-storage.js');
+      const { createTelemetryServer } = await import('./dist/server.js');
+      let tokens = 0;
+      ManagedIdentityCredential.prototype.getToken = async function () {
+        assert.equal(this.clientId, ${JSON.stringify(guid)});
+        tokens++;
+        throw new Error('PRIVATE_IDENTITY_TOKEN_ENV_RAW_ERROR');
+      };
+      const storage = await createAzureStorage(${JSON.stringify(parseConfig(environment).azure)});
+      assert.equal(tokens, 0);
+      receiver = createTelemetryServer({ storage, enabled: false, limits: ${JSON.stringify(limits)} });
       assert.equal(tokens, 0);
       receiver.server.listen(0, '127.0.0.1');
       await once(receiver.server, 'listening');
-      const endpoint = 'http://127.0.0.1:' + receiver.server.address().port;
-      assert.equal((await fetch(endpoint + '/health/ready')).status, 204);
-      assert.equal((await fetch(endpoint + '/v1/events', { method: 'POST' })).status, 503);
+      stage('ASSERTIONS', ${executionTimeoutMs});
+      const port = receiver.server.address().port;
+      assert.equal(await status(port, '/health/ready'), 204);
+      assert.equal(await status(port, '/v1/events', 'POST'), 503);
       assert.equal(tokens, 0);
       receiver.setEnabled(true);
       await turn();
-      assert.equal((await fetch(endpoint + '/health/ready')).status, 503);
-      assert.equal((await fetch(endpoint + '/health/live')).status, 204);
-      assert.equal((await fetch(endpoint + '/v1/events', { method: 'POST' })).status, 503);
-      assert.equal(tokens, 1);
-    } finally { receiver.stop(); }
+      assert.equal(await status(port, '/health/ready'), 503);
+      assert.equal(await status(port, '/health/live'), 204);
+      assert.equal(await status(port, '/v1/events', 'POST'), 503);
+      assert.equal(tokens, 2);
+    } finally {
+      stage('CLEANUP');
+      if (receiver) {
+        const closed = receiver.server.listening ? once(receiver.server, 'close') : Promise.resolve();
+        receiver.stop();
+        await closed;
+        await turn();
+      }
+      clearTimeout(timer);
+    }
+    stage('COMPLETE');
   `;
+  // Only import/listener setup gets extra headroom. Assertions/cleanup keep the original 5s bound.
   const child = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
-    cwd: new URL('../', import.meta.url), env: {}, encoding: 'utf8', timeout: 5000,
+    cwd: new URL('../', import.meta.url), env: {}, encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe', 'pipe'], maxBuffer: 65536,
+    timeout: setupTimeoutMs + executionTimeoutMs + 1000,
   });
-  assert.equal(child.status, 0, child.stderr);
-  assert.equal(child.stdout + child.stderr, '');
+  const phases = String(child.output?.[3] ?? '').trim().split('\n').filter(value =>
+    ['SETUP', 'ASSERTIONS', 'CLEANUP', 'COMPLETE', 'SETUP_TIMEOUT', 'ASSERTIONS_TIMEOUT', 'CLEANUP_TIMEOUT'].includes(value));
+  const diagnostic = JSON.stringify({
+    code: 'STORAGE_WIRING_FIXTURE_FAILED', status: child.status, signal: child.signal,
+    errorCode: child.error?.code ?? null, phase: phases.at(-1) ?? 'NOT_STARTED',
+    stdoutBytes: Buffer.byteLength(child.stdout ?? ''), stderrBytes: Buffer.byteLength(child.stderr ?? ''),
+  });
+  assert.equal(child.error === undefined, true, diagnostic);
+  assert.equal(child.status, 0, diagnostic);
+  assert.equal(phases.at(-1), 'COMPLETE', diagnostic);
+  assert.equal((child.stdout ?? '').length + (child.stderr ?? '').length, 0, diagnostic);
 });
 
 test('malformed requests and SDK failures cannot appear in service stdout/stderr', () => {

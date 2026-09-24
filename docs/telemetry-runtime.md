@@ -145,43 +145,69 @@ cancellation is not proof of non-commit by a remote provider. These fault tests
 verify local safety/cleanup behavior, not the cause of a historical Azure timeout
 or a proof that Azure ingestion did not commit.
 
-### Identity readiness candidate
+### Durable queue candidate (local source only)
 
-Enabled startup now explicitly prepares the same UAMI credential before event
-admission. A separate **20-second**, singleflight preparation deadline leaves
-nominal startup headroom under the existing **30-second** startup probe setting.
-Liveness remains available; readiness and events are empty/no-store 503 while
-preparation is pending. Disabled startup remains ready to reject events and makes
-no token request. Constructors/imports remain inert. No HTTP limits, schema,
-retention, roles or production CLI endpoint are changed.
+The prepared-identity image did not make synchronous Logs ACKs fit the one-second
+client contract. The approved next design moves persistence to one dedicated
+Standard LRS Azure Queue in Australia East, not the private runtime-state account.
+This source change is **not** a rollout or permission to reopen ingestion.
 
-The in-memory token supplied to the ingestion SDK is an actual credential result,
-not a boolean warmup hint. Enabled readiness/admission checks close admission at
-SDK `refreshAfterTimestamp` or expiry minus two minutes, whichever comes first,
-and renew singleflight through the same credential. No background polling loop is
-added. MSAL's old-result-after-refresh behavior requires at most one real cache
-readback under the same deadline. Failed/timed-out preparation remains unready
-until process restart, including after late completion. An abort request cannot
-prove that the platform identity operation stopped; the unresolved slot is never
-replaced. Existing storage-health/quarantine checks remain independently required.
+Production replies empty/no-store **202 only after Queue ACK**, with a maximum
+650 ms enqueue budget. The same closed projection, including original receipt
+`TimeGenerated`, is persisted as at most 1 KiB UTF-8 JSON with explicit 3,600-second
+TTL. A timed-out enqueue can already exist remotely; no automatic resend or
+optimistic acceptance occurs. Eight unresolved sends remain bounded.
 
-The pinned-SDK fixture additionally verifies disabled zero-network startup, a
-900 ms token preparation followed by an admitted event using that prepared token
-without another identity wire request, token failure, a real 20-second preparation
-deadline with late completion, SDK expiry/refresh-on renewal, and prepared-token
-upload timeout/disconnect behavior. These use in-memory noncredential identity
-responses and real loopback TLS ingestion only. Deterministic lifecycle tests also
-cover delayed timer dispatch, stale/invalid token results and disable/shutdown.
-No Azure calls are part of this qualification.
+Producer readiness depends on its explicit Storage token, fresh queue properties
+and approximate capacity below 10,000—not on Logs health. Monitor and Storage have
+separate explicit-UAMI, 20-second singleflight preparation for their exact scopes.
+SDK refresh/expiry metadata controls renewal; failed/late preparation remains
+failed until restart. Disabled construction/startup performs no token, queue or
+worker requests. The existing 30-second startup probe and one-second client limit
+are unchanged, not guaranteed by a nominal preparation budget.
 
-Readiness now establishes identity preparation, **not** ingestion connectivity,
-authorization, delivery or stored-event visibility. The direct platform identity
-latency observation motivated removing first-use work from event admission; it did
-not measure the SDK cache path or prove upload latency. A new source-bearing image
-is needed to deploy this local source change. The published image, infrastructure
-pins and historical approvals remain unchanged. Source/notice delivery, exact-image
-scanner and native conditions, retained-digest cost/headroom and explicit parent
-rollout review are still required; these tests authorize no build, push or deployment.
+One worker in the existing singleton receives at most 32 messages with 60-second
+visibility, after Monitor preparation, and sends one Logs batch under a separate
+15-second deadline. The batch disposition bound is 45 seconds, individual Queue
+transactions at most five seconds, and no leases are renewed. Delete follows a
+confirmed Logs ACK, or explicit invalid/expired/over-three-dequeues discard.
+Unknown uploads/deletes wait for visibility/TTL, with capped backoff, not immediate
+replays. At-least-once attempted delivery can duplicate analytics and can discard
+after attempts/TTL; it is neither FIFO nor exactly-once nor a no-loss guarantee.
+Operational queue IDs/pop receipts are never analytics fields or logs.
+
+`queue-sdk.test.mjs` exercises the real pinned Queue SDK's XML serialization,
+bearer policies, TTL, metadata, visibility and delete receipts through actual
+loopback TLS. A 5.2-second Logs ACK does not delay the HTTP 202. Failure, redirect,
+late durable send/unknown ACK, full queue, invalid input and disabled zero-network
+cases are covered. `queue-storage.test.mjs` additionally checks all eight stalled
+enqueue slots, a single 32-message batch, late-upload quarantine, bounded attempts,
+expiry/discards, freshness, circuit backoff and disable behavior. The original
+identity/upload deadline regression fixtures remain; they are not the production
+direct-delivery route. All use synthetic local data without Azure calls.
+
+The exact new runtime dependency is `@azure/storage-queue@12.32.0`, selected from
+public package metadata. Its compatible XML parser is explicitly pinned by an
+override scoped only to `@azure/storage-queue` to `fast-xml-parser@5.5.9`: the initially selected newer parser brought a
+transitive package with no shipped license file and failed the existing gate.
+No missing-notice waiver or JSON-schema license exception was broadened.
+The new locked closure contains **62 runtime packages** (previously 51), with full
+MIT/other existing notices and a narrowly updated reviewed-text catalog. Existing
+Node, Identity, MSAL, Monitor Ingestion and Core Pipeline versions did not change.
+No service SDK enters the root CLI package. This compatibility/license pin still
+requires the parent's new exact-image vulnerability review; it is not scanner
+clearance or a native patch claim.
+
+A fresh source-bearing image must include this code, lockfile and updated
+service notices. Existing images, original archives, source pins and approvals
+remain historical evidence, not authority for the queue topology. Parent-owned
+ARM account/queue/RBAC, client acceptance semantics, third-image qualification,
+source/native/scanner review and explicit rollout remain separate gates.
+The approved conservative **USD 349.37/month** model includes three retained images,
+queue operations/storage/security and retry reserves within the USD 350 estimate;
+it is **not a bill cap or permission for extra resources**. No image build,
+publication or Azure operation is performed by these local tests. Detailed API,
+health, queue bounds and delivery semantics are in [operations](telemetry-operations.md).
 
 ### Native/bundled Node coverage is separate
 

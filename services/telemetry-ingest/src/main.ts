@@ -19,7 +19,7 @@ export async function main(): Promise<void> {
     const stop = () => {
       receiver?.stop();
       // Bound shutdown even if an underlying SDK request ignores abort.
-      setTimeout(() => process.exit(0), config.limits.storageTimeoutMs + 100).unref();
+      setTimeout(() => process.exit(0), 10000).unref();
     };
     process.once('SIGTERM', stop);
     process.once('SIGINT', stop);

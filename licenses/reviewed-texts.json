@@ -3,6 +3,36 @@
   "purpose": "Pinned legal-text evidence from the reviewed initial locked dependency sets; not a legal opinion. The --write inventory command must not update this file.",
   "reviewedFiles": [
     {
+      "licenseExpression": "MIT",
+      "retainedSha256": "ed11982ff1ff5818970e943bf9aefc3909dbc65e5f0b3465a969c73a8bca5bb2",
+      "observedAt": ["service:@azure/storage-common@12.5.0:LICENSE"]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "7883225d5e84a6bbb9b170c3d891b4bf6d6259cee869c86bd86381a927071745",
+      "observedAt": ["service:fast-xml-parser@5.5.9:LICENSE"]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "8e75fc0e776c62ccadb8178ece8d3daa9ba7601fb0a49b2dfb0ea9a7a5c0aa07",
+      "observedAt": ["service:anynum@1.0.1:LICENSE", "service:fast-xml-builder@1.3.1:LICENSE", "service:xml-naming@0.3.0:LICENSE"]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "2aa16be0f4fad003a352a955a43314e9d1d8deef7034060a82ac9c49f32b81e2",
+      "observedAt": ["service:strnum@2.4.2:LICENSE"]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "75486ea0af9309140ca6e2c401d7e67bea8f4892344e5707f6394dc5e83dfc44",
+      "observedAt": ["service:path-expression-matcher@1.6.2:LICENSE"]
+    },
+    {
+      "licenseExpression": "MIT",
+      "retainedSha256": "631987b7616a325a5b97566c232418481ddf7dbb5ecadefb991e791876cc2599",
+      "observedAt": ["service:events@3.3.0:LICENSE"]
+    },
+    {
       "licenseExpression": "(MIT AND Zlib)",
       "retainedSha256": "20356aece8f36fda34645e97af3b163da0a88e253b78ffba298590d5b9121ebb",
       "observedAt": [

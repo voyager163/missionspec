@@ -59,6 +59,11 @@ headers, or request metadata are stored in the custom event columns. The Analyti
 table uses strings for enum columns; Azure may represent a null duration as an empty
 string. Both mean unknown, never zero elapsed time. Duration includes possible user
 waiting; it is not a model benchmark.
+The queue stores exactly that projection as UTF-8 JSON, at most 1 KiB per message,
+with an explicit **3,600-second TTL**. The consumer validates it without replacing
+`TimeGenerated`. Azure Queue message IDs, insertion/expiry/visibility times,
+dequeue counts and pop receipts are operational metadata only: they are not
+analytics columns, logged identifiers or a new event envelope.
 
 Azure additionally processes connection metadata and adds platform/system table
 metadata (for example ingestion/billing fields). SDK requests may carry transient
@@ -146,10 +151,10 @@ manifest readback.
 no development-to-production destination fallback and no `.env` autoload. The
 embedding API is `createTelemetryServer({ storage, limits, enabled })`; local tests
 must inject storage rather than starting the production entrypoint with real Azure
-settings. No events are sent just by starting a configured service.
-An **enabled** listening receiver prepares its explicit managed-identity credential
-before accepting events. Disabled startup does not request a token or initialize
-identity over the network. Imports and constructors remain inert.
+settings. An **enabled** instance prepares explicit Storage/Monitor credentials,
+checks the existing queue and can consume previously queued messages on startup.
+It sends no synthetic test event. Disabled startup makes no token, properties,
+send, receive, delete or upload request. Imports and constructors remain inert.
 
 Required environment:
 
@@ -163,24 +168,34 @@ Required environment:
 | `AZURE_DCR_RESOURCE_ID` | DCR resource ID in that exact subscription and resource group |
 | `AZURE_DCR_IMMUTABLE_ID` | DCR's actual `dcr-` plus 32 hexadecimal characters |
 | `AZURE_LOGS_ENDPOINT` | DCR-generated HTTPS `*.ingest.monitor.azure.com` origin; no credentials, port override, path, query, or fragment |
-| `MSR_HEADERS_TIMEOUT_MS`, `MSR_BODY_TIMEOUT_MS`, `MSR_STORAGE_TIMEOUT_MS` | Each integer 10–5000; choose limits consistent with the client's one-second total budget |
+| `AZURE_QUEUE_RESOURCE_ID` | Existing queue resource ID in the exact subscription/resource group: `Microsoft.Storage/storageAccounts/<account>/queueServices/default/queues/<queue>` |
+| `AZURE_QUEUE_URL` | Exact `https://<account>.queue.core.windows.net/<queue>` matching that resource ID; no SAS, query, fragment, credentials, port, trailing slash or arbitrary endpoint |
+| `MSR_HEADERS_TIMEOUT_MS`, `MSR_BODY_TIMEOUT_MS`, `MSR_STORAGE_TIMEOUT_MS` | Header/body integer 10–5000, enqueue integer 10–650; reviewed production profile remains **150/150/650 ms** |
 | `MSR_MAX_CONNECTIONS` | 1–1024 |
 | `MSR_MAX_CONCURRENT_REQUESTS` | 1–256 and no greater than max connections |
-| `MSR_MAX_CONCURRENT_INGESTIONS` | 1–64 and no greater than max concurrent requests |
+| `MSR_MAX_CONCURRENT_INGESTIONS` | 1–8 enqueue operations and no greater than max concurrent requests |
 | `MSR_REQUESTS_PER_MINUTE` | 1–60000 all-client request attempts |
-| `MSR_EVENTS_PER_DAY` | 1–1000000 validated upload attempts |
+| `MSR_EVENTS_PER_DAY` | 1–1000000 validated enqueue attempts; reviewed profile remains 100000/day |
 
 The stream name is fixed to `Custom-MissionSpecTelemetry`. The module wires the
 resource ID, immutable ID, and generated endpoint from the **same DCR**, with only
 that DCR granting the ingestion identity `Microsoft.Insights/Telemetry/Write`.
 Offline configuration validation cannot prove resource ownership or that independently
 entered IDs match: those are deployed readback gates. Only public Azure is supported;
-sovereign clouds/private-link require a separately reviewed configuration.
+sovereign clouds/private-link require a separately reviewed configuration. The new
+Standard LRS Queue account must be dedicated to telemetry in Australia East,
+**not the preserved private runtime-state account**. URL/resource-ID validation
+cannot establish location, ownership, account purpose or permissions: the parent's
+ARM/readback gates must verify those before releasing a configured instance.
 
 The adapter uses only `ManagedIdentityCredential`, not default-credential fallback,
-interactive sign-in, CLI credentials, tokens, or shared keys. Upload retry and
-redirect counts are zero; one upload contains one record. SDK logging is silenced and
-request logging/tracing policies removed. Nonempty debug/auto-instrumentation
+interactive sign-in, CLI credentials, shared keys, SAS or anonymous fallback.
+The same explicit UAMI needs only scoped queue metadata-read, sender and processor
+permissions plus its existing DCR upload action. The service never creates a queue,
+sets its metadata/access policy, lists accounts, retrieves keys or renews leases.
+Queue and Logs SDK automatic retries/redirects are disabled. Each Queue send is one
+record; the consumer uploads at most 32 records in one Logs batch. SDK logging is
+silenced and Logs request logging/tracing policies removed. Nonempty debug/auto-instrumentation
 variables, `NODE_OPTIONS`, Azure authority overrides, and outbound proxy overrides
 are rejected rather than leaking payloads or silently changing destination behavior.
 Container Apps' platform-managed identity endpoint variables remain platform-owned.
@@ -206,64 +221,127 @@ work are bounded. Unsupported expectations/upgrades are rejected without reflect
 
 | Status | Meaning |
 | --- | --- |
-| 204 | Event upload completed successfully, or a passing health check; not proof of query visibility |
+| 202 | Actual Queue `sendMessage` ACK observed within the enqueue budget; durable acceptance, **not Logs delivery** |
+| 204 | Passing health check (or explicitly injected legacy direct-storage test port); never the production event success status |
 | 400 | Invalid JSON, UTF-8, schema, or HTTP framing |
 | 404 / 405 / 415 / 417 | Unknown route, wrong method, unsupported media/encoding, or expectation |
 | 408 / 413 / 431 | Body deadline, oversized body, or excessive header count |
-| 429 | Global in-memory request/upload-attempt budget exhausted |
-| 503 | Disabled admission, identity not prepared, capacity exhausted, storage failure/timeout, or cancellation |
+| 429 | Global in-memory request/enqueue-attempt budget exhausted |
+| 503 | Disabled admission, Storage identity/queue not ready, stale/full capacity, enqueue failure/timeout, or cancellation |
 
 Some parser, connection-limit, or disconnect conditions close the connection without
 a response. No error response echoes data, path, headers, or error details.
 
-Storage timeouts abort the request and return unavailable, **never 204**. If a storage
-adapter ignores cancellation, its work slot stays occupied until it really settles:
-new uploads cannot create an unbounded hidden queue. Socket disconnect, shutdown,
-and the in-process kill switch abort outstanding operations. SIGTERM/SIGINT close
-listeners/connections and bound process exit. A timeout can occur after Azure
-accepted a record: delivery is uncertain, not exactly-once. Neither sender nor server
-retries, queues, or replays it; do not manually resend uncertain events as a repair.
+The producer waits for the real Queue ACK, not an in-memory buffer. Enqueue timeout,
+failure or client disconnect is unavailable/closed, **never optimistic 202**.
+Persistence may already have occurred despite a lost reply; this outcome remains
+unknown and that enqueue is never automatically retried. An adapter ignoring abort
+retains its slot until actual settlement. Eight such slots cannot become an
+unbounded queue of replacement sends. Late completion cannot turn the original
+timed-out HTTP operation into success. Do not manually resend an uncertain event.
 
 `GET /health/live` is a status-only process check and remains 204 during identity
-preparation. For enabled production instances, `GET /health/ready` requires an
-actual, usable token obtained through the explicit `ManagedIdentityCredential`,
-as well as existing local admission/storage-health checks. Pending preparation
-returns empty/no-store 503 for readiness and events **before body/storage admission**;
-events are not held in a warmup queue. A recent storage failure still closes readiness
-for five seconds, then permits recovery without a synthetic upload. Stuck upload
-work retains its slot. Identity preparation does not clear these storage conditions.
+preparation. Enabled readiness requires a usable **Storage** credential, a recent
+successful real Queue `getProperties`, approximate count below **10,000**, and
+local connection/request/enqueue/quota capacity. Monitor credential failure or slow
+Logs delivery does **not** close producer readiness while the queue remains usable.
+Pending preparation/full/stale queue returns 503 before enqueue admission; events
+are not retained in a warmup buffer. Recent enqueue failures additionally retain
+the existing five-second receiver health cooldown.
 Disabled instances are **ready to reject events** so a disabled revision can deploy;
-events still get 503, with no token preparation.
+events still get 503, with no preparation or worker activity.
 
-Identity preparation has one **20,000 ms** deadline, separate from the unchanged
-**650 ms event storage** and **1,000 ms client** budgets. This leaves a nominal ten
-seconds for process/listener startup within the existing 30-second startup probe
-window; neither that probe setting nor rollout budgets are extended. There is at most
-one outstanding preparation operation. On failure/deadline, readiness stays false
-until a controlled process restart; health checks, events and enable toggles cannot
-retry it. Abort is requested, but MI/MSAL work may continue: its slot remains occupied
-until settlement and a late token cannot turn a timed-out initialization into success.
-Disabling/shutdown aborts pending preparation with the same fail-closed behavior.
-Liveness does not claim identity success, cancellation or durable provider termination.
+Queue properties are sampled at most once per **30 seconds**, with at most one
+request outstanding and a **5-second** transaction deadline. Samples expire after
+30 seconds. Admissions conservatively increment the local estimate, including
+uncertain sends, until the next sample. Concurrent sends during a properties request
+are accounted for locally. Azure's count is approximate and revision/replica overlap
+exists: **10,000 is backpressure, not an atomic or distributed hard cap**.
+Queue transaction failures invalidate readiness and back off **5, 10, 20, 40, then
+60 seconds**, capped at 60. A stalled SDK task keeps its work slot until settlement.
+Missing or malformed SDK success responses are validated within that same bounded
+operation and counted as the operation's static failure class, never as accepted
+enqueues, valid queue observations or confirmed deletions.
 
-Only actual SDK token results are held in memory and supplied to the ingestion SDK;
-the first admitted event does not repeat the identity HTTP request. Readiness is
-rechecked before storage admission. On the first enabled readiness/admission check at
-the earlier of SDK `refreshAfterTimestamp` or expiry minus **120,000 ms**, admission
-closes while the same singleflight preparation renews through the same credential.
-The two-minute margin matches the pinned bearer policy and falls inside MSAL's
-five-minute cache renewal window. There is no periodic poller or automatic event retry.
-Pinned MSAL can return its old cached token after awaiting a refresh-on renewal;
-one actual cache readback under the original deadline must supply a future freshness
-boundary, otherwise readiness fails closed. This is not a fabricated extension of
-token validity or a retry of a failed acquisition. Already-admitted uploads can still
-use a real unexpired token; closing admission does not revoke tokens or unsend events.
+Each explicit audience (`https://storage.azure.com/.default` and
+`https://monitor.azure.com/.default`) has its own **20,000 ms**, singleflight
+preparation bound and actual in-memory SDK token. A token is never returned for the
+other scope or a tenant/claims challenge. Failed/timed-out preparation stays failed
+until a controlled process restart, even after a late result. No accumulating
+uncancellable acquisitions are spawned. Renewal is due at the earlier of SDK
+`refreshAfterTimestamp` or expiry minus **120,000 ms**. The existing two-minute
+bearer/five-minute MSAL cache behavior is preserved, including at most one real
+cache readback after MSAL's old-result-on-refresh case under the same deadline.
+Readiness/admission and the enabled worker's one-second scheduling tick trigger
+checks, not an independent token network poller.
 
 Health endpoints perform no ingestion and are exempt from request quotas, but retain
-connection/header bounds. Enabled readiness proves **identity preparation**, not Azure
-Logs Ingestion connectivity, role authorization, successful upload or query visibility.
-An initial 204 readiness result is not backend qualification. Injected local test
-storage may omit the optional readiness lifecycle.
+connection/header bounds. Ready means Storage credential plus queue metadata
+connectivity/capacity—not proof of sender/processor RBAC, Logs availability,
+ingestion authorization, delivery or query visibility. The unchanged 30-second
+startup probe must accommodate identity, queue properties and process startup;
+the 20-second token bound does not guarantee readiness inside it.
+
+### Bounded durable consumer and delivery uncertainty
+
+One worker in the existing singleton receives at most **32 messages**, with
+**60-second visibility**, only after both scoped credentials are ready. It never
+waits for initial Monitor acquisition while holding a lease. One batch/upload is
+in flight; the independent Logs deadline is **15 seconds**, not the HTTP enqueue
+deadline. A **45-second** receive/upload/disposition budget ends before visibility
+can expire. Each receive/delete has a maximum 5-second budget inside that bound.
+
+A confirmed Logs ACK increments `logs_delivered`; only then are those messages
+deleted. Invalid, expired or exhausted messages are an explicit discard exception:
+they are deleted without upload and counted by reason only after a delete ACK.
+No more than **three delivery attempts**, based on Queue `dequeueCount`, are
+permitted. A failed third attempt leaves its lease; a later dequeue above three
+discards rather than uploads it. Missing/invalid lease metadata fails closed.
+Original message TTL is never reset, extended or moved into a dead-letter archive.
+
+Unknown/failed uploads are not immediately resent. The lease must expire before
+redelivery, with capped worker backoff. Queue failures stop the batch and open
+the queue circuit; failed deletes are not spun/retried in place. Each batch performs
+at most one receive, one Logs upload and 32 sequential deletes, **zero visibility
+updates**. When empty, polling is every 30 seconds; queued ACKs wake an eligible
+worker on its next one-second tick. A nonempty processed batch permits the next
+receive after one second. An uncooperative SDK call retains the worker slot even
+after abort; no new batch overlaps it.
+
+This is **bounded at-least-once attempted delivery**, not exactly-once or guaranteed
+eventual delivery: provider commit after timeout or a failed delete can produce
+analytics duplicates, and attempts/TTL can discard undelivered records. FIFO order
+is not guaranteed. No deduplication identifier is added to the analytics schema.
+Process death leaves messages for visibility retry or TTL expiry; no local disk,
+memory replay queue, indefinite lease renewal or separate worker service is used.
+
+Disable/shutdown stops new admission, dequeues, uploads and deletes, aborts active
+calls and closes listeners. SIGTERM/SIGINT bound process shutdown to **10 seconds**.
+An already-issued provider call may outlive abort or commit. Disabled app state
+does not prove provider termination or a drained queue; pending messages remain
+subject to the original TTL. Existing 150/150/650 ms HTTP limits and the client's
+1,000 ms maximum remain unchanged.
+
+### Embedding API and counters
+
+`createAzureStorage(parseConfig(env).azure)` is the production queue-backed
+storage factory. It has **no direct Logs fallback**. `createQueueStorage({ queue,
+upload, ruleId, producerIdentity, consumerIdentity, now?, monotonicNow? })` injects
+the same bounded logic for local tests. Its `ingest(record, signal)` resolves only
+after a real successful Queue send result, with `acknowledgement: 'queued'` so
+`createTelemetryServer` replies 202. `readiness.setEnabled`, `ready` and `stop`
+control the lifecycle; constructing either object starts no network.
+
+`receiver.snapshot()` counts HTTP `queued` separately from legacy `accepted`.
+`queueStorage.snapshot()` contains only bounded static counters: `queued`,
+`logs_delivered`, `queue_send_unknown`, `queue_properties_failed`,
+`queue_receive_unknown`, `queue_delete_unknown`, `logs_upload_unknown`,
+`dropped_invalid`, `dropped_expired`, `dropped_attempts`. Confirmed upstream ACKs,
+HTTP responses and deletion outcomes are distinct observations; a delivery count
+can include a duplicate and does not prove query visibility. No counter is exported
+periodically or exposed through a public endpoint. The explicitly injected legacy
+`createStorageAdapter` remains only for direct-storage regression fixtures, not a
+production recovery mode.
 
 The quotas apply across **all clients of one process**, without IP/user tracking.
 The module enforces one maximum replica and Single revision mode. Fixed windows are
@@ -276,6 +354,12 @@ one warm replica versus zero, workload limits, and handover costs explicitly; do
 silently extend the CLI's one-second budget to mask slow startup.
 
 ## Infrastructure and deployment prerequisites
+
+The queue candidate additionally requires a separately approved dedicated
+Standard LRS account/queue and scoped metadata-read/sender/processor roles for the
+existing ingestion UAMI. These new resources and image/client 202 qualification
+must be integrated by the parent; the historical direct-Logs phases and approvals
+below cannot authorize that topology or silently change a synthetic window.
 
 The one canonical direct ARM definition uses explicit resource interfaces,
 including the custom table and a `kind = Direct` DCR with its own ingestion
@@ -421,6 +505,9 @@ After separate authorization, operators must:
    retries and an unchanged one-second request deadline. Latest-ready revision
    identity must match the latest revision; an old healthy revision or ARM
    `Succeeded` alone is insufficient. See the [paired window contract](telemetry-operator.md#paired-synthetic-window-and-fixed-disable).
+   For the queue candidate, the parent must separately approve the 202 acceptance
+   and asynchronous query/delivery interpretation. A 202 cannot qualify a Logs
+   delivery assertion, and the historical direct-delivery window is not reused.
 4. Exercise capacity/rate rejection, unavailable Azure/identity permissions, cold/
    warm latency, timeout ambiguity, readiness recovery, kill switch, and image
    rollback. Verify no payload-bearing logs appear during each case.
@@ -446,6 +533,8 @@ reported as successful deployment, enforced retention or client activation.
   instance that returns 503 without uploading. Existing in-flight calls may already
   have reached Azure; this is not a data deletion operation. Reconcile any emergency
   control-plane changes into IaC rather than leaving drift.
+  The queue worker also stops new reads/deletes/uploads; existing queue messages
+  remain for their original TTL, not a newly extended retention window.
 - **Bounded synthetic rollback:** the fixed `synthetic-disable` phase changes
   only the admission flag under its separate valid release. An already-false
   read-only completion is explicitly distinguished from a deployment. Drift,

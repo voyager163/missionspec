@@ -2,13 +2,14 @@ import type { AccessToken, TokenCredential } from '@azure/identity';
 import type { StorageReadiness } from './contract.js';
 
 export const INGESTION_SCOPE = 'https://monitor.azure.com/.default';
+export const STORAGE_SCOPE = 'https://storage.azure.com/.default';
 // Leave ten seconds of the existing 30-second startup probe window for process/listener startup.
 export const IDENTITY_PREPARATION_TIMEOUT_MS = 20000;
 // Match the pinned bearer policy's refresh window, inside MSAL's five-minute cache renewal window.
 export const IDENTITY_REFRESH_MARGIN_MS = 120000;
 
 /** Inert until enabled by the listening receiver. Only this controller calls the MI credential. */
-export function createIdentityReadiness(source: TokenCredential): {
+export function createIdentityReadiness(source: TokenCredential, scope: typeof INGESTION_SCOPE | typeof STORAGE_SCOPE = INGESTION_SCOPE): {
   credential: TokenCredential;
   readiness: StorageReadiness;
 } {
@@ -40,14 +41,14 @@ export function createIdentityReadiness(source: TokenCredential): {
     };
     void Promise.resolve().then(async () => {
       checkDeadline();
-      let value = await source.getToken(INGESTION_SCOPE, { abortSignal: controller.signal });
+      let value = await source.getToken(scope, { abortSignal: controller.signal });
       checkDeadline();
       // Pinned MSAL may return the old token after awaiting a refreshOn renewal. Read its
       // updated cache once, under the same deadline; never poll/retry a failed acquisition.
       if (value && value.refreshAfterTimestamp !== undefined &&
           value.refreshAfterTimestamp <= Date.now() &&
           value.expiresOnTimestamp - IDENTITY_REFRESH_MARGIN_MS > Date.now()) {
-        value = await source.getToken(INGESTION_SCOPE, { abortSignal: controller.signal });
+        value = await source.getToken(scope, { abortSignal: controller.signal });
         checkDeadline();
       }
       if (!value || typeof value.token !== 'string' || !value.token ||
@@ -95,7 +96,7 @@ export function createIdentityReadiness(source: TokenCredential): {
   const credential: TokenCredential = {
     async getToken(scopes, options) {
       const requested = typeof scopes === 'string' ? [scopes] : scopes;
-      if (requested.length !== 1 || requested[0] !== INGESTION_SCOPE || options?.claims ||
+      if (requested.length !== 1 || requested[0] !== scope || options?.claims || options?.tenantId ||
           options?.abortSignal?.aborted || !enabled || stopped || !token ||
           token.expiresOnTimestamp <= Date.now()) throw new Error('IDENTITY_NOT_READY');
       // Admission owns renewal, never an event's 650 ms budget. Already-admitted work may
