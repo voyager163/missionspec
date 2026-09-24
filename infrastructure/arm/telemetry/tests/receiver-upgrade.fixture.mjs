@@ -1,6 +1,18 @@
 import { digest, ids, json, firstReleaseCost } from '../definition.mjs';
 import { NATIVE_CONDITIONS, PREPARED_IDENTITY_RUNTIME, RECEIVER_SOURCE_INPUTS } from '../receiver-upgrade.mjs';
 import { manifestJson, configJson } from './receiver-oci.fixture.mjs';
+import assert from 'node:assert/strict';
+
+export async function receiverSourceFixtureRun(command, args) {
+  assert.equal(command, 'git');
+  if (args[0] === 'merge-base') return { stdout: Buffer.alloc(0) };
+  assert.deepEqual(args.slice(0, 2), ['--no-pager', 'show']);
+  const path = args[2].slice(41);
+  assert(RECEIVER_SOURCE_INPUTS.includes(path));
+  const value = path === 'services/telemetry-ingest/src/identity-readiness.ts' ? 'fixture readiness'
+    : path === 'services/telemetry-ingest/Dockerfile' ? 'fixture Dockerfile' : `fixture ${path}`;
+  return { stdout: Buffer.from(value) };
+}
 
 // Inert generated test evidence, never an operator approval or a published candidate.
 export function candidateFixture(c, legacyReceipt) {

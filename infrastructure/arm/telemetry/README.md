@@ -60,6 +60,17 @@ without rewriting the full payload. A full 120-second preflight is followed by
 separately bounded final checks; one new absolute 120-second rollout deadline
 starts at durable intent. Approval expiry and five-minute proof freshness still
 apply, and each request is bounded by 15 seconds and its stage's remaining time.
+Independent preflight reads share a maximum of four in-flight commands. Queue
+time consumes the same 120-second deadline; failures stop queued work rather
+than retrying it. Historical and current resource reads are not omitted.
+
+After the candidate's actual publication, a new reconciliation proposal uses
+version 4 and binds the complete candidate by SHA-256. It verifies exactly the
+old and candidate manifests using the original publication/review unchanged.
+It requires a separate version-4 reconciliation review under the current policy
+source. Existing version-3 proposals, reviews, execution origins and receipts
+remain historical files; they are neither rewritten nor reinterpreted as
+two-image approval.
 
 Only the original digest plus one explicitly reviewed candidate/tag may exist.
 The two-image estimate is **USD 311.23 / 31 days**, below the reviewed USD 350

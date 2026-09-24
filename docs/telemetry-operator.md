@@ -106,6 +106,15 @@ and final app/revision reads. Every cloud call receives that remaining bound
 (at most 15 seconds); neither reservation nor an individual read renews it.
 Approval/proof expiry can shorten either stage. Late responses cannot authorize
 a dispatch or qualify a readback.
+The preflight now batches independent reads through one four-command limit.
+Foundation snapshots/absences, deployment and resource identity checks, privacy
+reads, registry inventory and permissions/provider/quota evidence retain every
+previous read and validation. Workspace identity is checked before dependent
+DCR validation; role-definition ordering retains the custom role last.
+Queue wait consumes the original deadline, and each command receives at most
+15 seconds of its remaining time when actually dispatched. Command errors stop
+their shared queue and validation errors stop their batch; in-flight read-only
+commands remain bounded. There is no hidden retry or fallback to incomplete evidence.
 No ingestion request, toggle, deletion or app recreation is included.
 An explicit `disabled-image-rollback` has its own fresh approval, instance and
 exact new-image preimage; it does not overwrite drift or borrow enable authority.
@@ -122,6 +131,21 @@ Both paired window approvals still bind the complete prerequisite set, new
 UUID, full what-ifs and source; the image transition's UUID remains in the
 global predecessor/replay chain. No preview is a qualified receipt, and no
 fixture in the tests is an approved or published receiver.
+
+After the separately approved image copy succeeds, use a **new** private
+revision for current-source reconciliation. The actual `receiver-candidate.json`
+still carries its original publication review/source/commit and single-copy
+receipt. `reconcile disabled-app` emits a version-4 proposal with
+`receiverCandidateSha256`, verifies the full candidate publication, and reads
+exactly the preserved old manifest plus that candidate (including empty
+referrers). It keeps all seven original execution origins and the old
+publication record intact; a version-3 proposal cannot serve as implicit
+two-image proof. Only an exact version-4 review of the new proposal under the
+current policy source permits adoption. The resulting read-only receipts retain
+each original phase's source/deployment and add the explicit candidate binding.
+A changed/missing publication, changed legacy record, unknown digest/tag or
+referrer still fails. The current profile/source files and the publication's
+original source are not changed merely because controller policy is updated.
 
 Use the existing authorized operator Azure CLI for control-plane authentication
 over TLS, with the exact subscription specified on every request. Do not switch

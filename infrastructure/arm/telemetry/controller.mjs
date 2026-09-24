@@ -25,7 +25,46 @@ export const MAX_PRIVATE_ARTIFACT_BYTES = 64 * 1024 * 1024;
 export const DIAGNOSTIC_API = '2021-05-01-preview';
 export const WHAT_IF_API = '2025-04-01';
 export const WHAT_IF_MAX_POLLS = 40;
+export const MAX_CONCURRENT_READS = 4;
 const invokeDeadlines = new WeakMap();
+const limitedReadInvokes = new WeakSet();
+export async function readBatch(values, read) {
+  const results = new Array(values.length);
+  let next = 0, failed = false, failure;
+  await Promise.all(Array.from({ length: Math.min(MAX_CONCURRENT_READS, values.length) }, async () => {
+    while (!failed && next < values.length) {
+      const index = next++;
+      try { results[index] = await read(values[index], index); }
+      catch (error) { if (!failed) failure = error; failed = true; }
+    }
+  }));
+  if (failed) throw failure;
+  return results;
+}
+export function limitReadConcurrency(invoke) {
+  if (limitedReadInvokes.has(invoke)) return invoke;
+  const queue = [];
+  let active = 0, failed = false, failure;
+  const drain = () => {
+    while (!failed && active < MAX_CONCURRENT_READS && queue.length) {
+      const job = queue.shift(); active++;
+      (async () => {
+        try { job.resolve(await invoke(...job.args)); }
+        catch (error) {
+          if (!failed) failure = error;
+          failed = true; job.reject(error);
+          for (const pending of queue.splice(0)) pending.reject(failure);
+        } finally { active--; drain(); }
+      })();
+    }
+  };
+  const limited = (...args) => new Promise((resolve, reject) => {
+    if (failed) { reject(failure); return; }
+    queue.push({ args, resolve, reject }); drain();
+  });
+  limitedReadInvokes.add(limited);
+  return limited;
+}
 function privateOwner() {
   if (!['darwin', 'linux'].includes(process.platform) || typeof process.getuid !== 'function' ||
       typeof process.geteuid !== 'function' || !constants.O_NOFOLLOW || !constants.O_DIRECTORY || !constants.O_NONBLOCK) fail('PRIVATE_POSIX_IO_REQUIRED');
@@ -486,12 +525,14 @@ export async function verifyOrigin(origin, arm, c, adoption) {
   if (origin.version !== 1 || origin.adoptionDecision?.accepted !== true || origin.adoptionDecision.opaqueTagIsUTC !== false ||
       origin.latestLedger.sessions.length !== 0 || origin.latestLedgerSha256 !== digest(json(origin.latestLedger))) fail('ORIGIN_NOT_RECONCILED');
   const scanner = verifyScannerAdoption(c, origin, adoption);
-  for (const item of origin.resources) {
+  await readBatch(origin.resources, async item => {
     const actual = await arm('GET', item.id, item.apiVersion);
     const expected = sameId(item.id, scanner.id) ? scanner.snapshot : item.snapshot;
     if (!sameId(actual?.id, item.id) || !isDeepStrictEqual(stableReadback(actual), stableReadback(expected))) fail('FOUNDATION_DRIFT');
-  }
-  for (const item of origin.absent) if (await arm('GET', item.id, item.apiVersion)) fail('RETIRED_OPERATOR_RESOURCE_PRESENT');
+  });
+  await readBatch(origin.absent, async item => {
+    if (await arm('GET', item.id, item.apiVersion)) fail('RETIRED_OPERATOR_RESOURCE_PRESENT');
+  });
   const dep = await arm('GET', origin.bootstrap.id, '2022-09-01');
   if (dep?.properties?.provisioningState !== 'Succeeded' ||
       ['correlationId', 'timestamp', 'templateHash'].some(k => dep.properties[k] !== origin.bootstrap[k])) fail('ORIGINAL_CREATION_RECEIPT_CHANGED');
@@ -538,18 +579,18 @@ export async function verifyReceiverSource(candidate, run = execute, lookup = pu
 }
 async function verifyPublishedOrigins(c, foundation, origins, lookup = publishedSourceDigest, contract) {
   verifyExecutionOrigins(c, foundation, origins, contract ?? await storageContract());
-  for (const record of origins.records) {
+  await readBatch(origins.records, async record => {
     if (await lookup(record.publication.commitSha) !== record.publication.sourceSha256) fail('PUBLISHED_SOURCE_MISMATCH');
-  }
+  });
 }
 export async function readPrivacy(c, phase, arm) {
-  const diagnostics = {};
-  for (const descriptor of phase.resources.filter(v =>
-    ['Microsoft.OperationalInsights/workspaces', 'Microsoft.App/managedEnvironments', 'Microsoft.App/containerApps'].includes(v.type))) {
+  const diagnosticEntries = await readBatch(phase.resources.filter(v =>
+    ['Microsoft.OperationalInsights/workspaces', 'Microsoft.App/managedEnvironments', 'Microsoft.App/containerApps'].includes(v.type)), async descriptor => {
     const value = await arm('GET', descriptor.id + '/providers/Microsoft.Insights/diagnosticSettings', DIAGNOSTIC_API);
     if (!Array.isArray(value?.value) || value.nextLink || value.value.length) fail('DIAGNOSTIC_ROUTE_DRIFT');
-    diagnostics[descriptor.id] = value;
-  }
+    return [descriptor.id, value];
+  });
+  const diagnostics = Object.fromEntries(diagnosticEntries);
   let exports = null;
   if (['core', 'workspace-access', 'data', 'assignments', 'disabled-app', ...TOGGLE_PHASES, ...IMAGE_PHASES].includes(phase.phase)) {
     exports = await arm('GET', ids(c).workspace + '/dataExports', '2020-08-01');
@@ -579,10 +620,13 @@ export async function readAssignmentRoleDefinitions(c, phase, arm, uploadRoleRec
   return { roles, readbacks };
 }
 async function readReconciledPhase(c, record, arm, context = {}) {
-  const phase = record.phase, deployment = await arm('GET', phase.deploymentId, '2022-09-01'), resources = {}, identityPins = {};
+  const phase = record.phase;
+  const [deployment, ...actuals] = await readBatch([{ id: phase.deploymentId, apiVersion: '2022-09-01' }, ...phase.resources],
+    descriptor => arm('GET', descriptor.id, descriptor.apiVersion));
+  const resources = {}, identityPins = {};
   verifyDeploymentIdentity(record.firstReadback.deployment, deployment);
-  for (const descriptor of phase.resources) {
-    const actual = await arm('GET', descriptor.id, descriptor.apiVersion);
+  for (const [index, descriptor] of phase.resources.entries()) {
+    const actual = actuals[index];
     let expected = descriptor.type === 'Microsoft.App/containerApps' && context.imageDescriptor ? context.imageDescriptor : descriptor;
     if (descriptor.type === 'Microsoft.App/containerApps' && context.transition) {
       const { phases, window, approvals, journals, source } = context.transition;
@@ -605,111 +649,146 @@ export function emptyAcrReferrers(value) {
   return [];
 }
 export async function readPublishedImage(c, imagePublication, arm, invoke = az, candidate) {
-  const registry = await arm('GET', ids(c).registry, '2023-07-01');
-  const repositories = await invoke(['acr', 'repository', 'list', '--name', c.registryName,
-    '--subscription', c.subscriptionId, '--only-show-errors', '--output', 'json']);
+  if (candidate) verifyReceiverCandidate(c, candidate);
+  const [registry, repositories] = await readBatch([
+    () => arm('GET', ids(c).registry, '2023-07-01'),
+    () => invoke(['acr', 'repository', 'list', '--name', c.registryName,
+      '--subscription', c.subscriptionId, '--only-show-errors', '--output', 'json']),
+  ], read => read());
   if (!isDeepStrictEqual(repositories, ['missionspec/telemetry-ingest'])) fail('PUBLICATION_READBACK_CHANGED');
-  const manifests = await invoke(['acr', 'manifest', 'list-metadata', '--registry', c.registryName, '--name', 'missionspec/telemetry-ingest',
-    '--subscription', c.subscriptionId, '--only-show-errors', '--output', 'json']);
-  const manifest = await invoke(['acr', 'manifest', 'show', '--registry', c.registryName, '--name', `missionspec/telemetry-ingest@${c.receiverDigest}`,
-    '--subscription', c.subscriptionId, '--only-show-errors', '--output', 'json']);
+  const commands = [
+    ['list-metadata', 'missionspec/telemetry-ingest'],
+    ['show', `missionspec/telemetry-ingest@${c.receiverDigest}`],
+    ...(candidate ? [['show', `missionspec/telemetry-ingest@${candidate.profile.manifestDigest}`],
+      ...[c.receiverDigest, candidate.profile.manifestDigest].map(d => ['list-referrers', `missionspec/telemetry-ingest@${d}`])] : []),
+  ];
+  const [manifests, manifest, candidateManifest, ...refs] = await readBatch(commands, ([command, name]) =>
+    invoke(['acr', 'manifest', command, '--registry', c.registryName, '--name', name,
+      '--subscription', c.subscriptionId, '--only-show-errors', '--output', 'json']));
   const result = { registry, repositories, manifests, manifest };
   if (candidate) {
-    result.candidateManifest = await invoke(['acr', 'manifest', 'show', '--registry', c.registryName,
-      '--name', `missionspec/telemetry-ingest@${candidate.profile.manifestDigest}`, '--subscription', c.subscriptionId,
-      '--only-show-errors', '--output', 'json']);
-    result.referrers = [];
-    for (const digest of [c.receiverDigest, candidate.profile.manifestDigest]) {
-      const refs = await invoke(['acr', 'manifest', 'list-referrers', '--registry', c.registryName,
-        '--name', `missionspec/telemetry-ingest@${digest}`, '--subscription', c.subscriptionId, '--only-show-errors', '--output', 'json']);
-      result.referrers.push(...emptyAcrReferrers(refs));
-    }
+    result.candidateManifest = candidateManifest;
+    result.referrers = refs.flatMap(emptyAcrReferrers);
   }
   verifyPublicationReadback(c, imagePublication, result, candidate);
   return result;
 }
 async function reconciliationContext(c, origins, arm, invoke, candidate) {
   const r = ids(c), hasApp = origins.records.some(v => v.phase.phase === 'disabled-app');
-  const workspace = origins.records.some(v => v.phase.phase === 'data') ? await arm('GET', r.workspace, '2023-09-01') : null;
-  let identities = null, imagePublication = null, roleDefinitions = null;
-  if (hasApp) {
-    identities = { [r.ingestIdentity]: await arm('GET', r.ingestIdentity, '2023-01-31'),
-      [r.pullIdentity]: await arm('GET', r.pullIdentity, '2023-01-31') };
-    imagePublication = await readPublishedImage(c, origins.imagePublication, arm, invoke, candidate);
-  }
   const assignments = origins.records.find(v => v.phase.phase === 'assignments');
-  if (assignments) {
-    const upload = origins.records.find(v => v.phase.phase === 'upload-role');
-    const reads = await readAssignmentRoleDefinitions(c, assignments.phase, arm, upload.originalReceipt);
-    roleDefinitions = { checkedAt: new Date().toISOString(), ...reads, roleDefinitionsSha256: digest(json(reads.roles)) };
-    if (roleDefinitions.roleDefinitionsSha256 !== assignments.preflight.roleDefinitionsSha256) fail('ASSIGNMENT_ROLE_DEFINITION_DRIFT');
+  const [workspace, ingest, pull, imagePublication, roleDefinitions] = await readBatch([
+    () => origins.records.some(v => v.phase.phase === 'data') ? arm('GET', r.workspace, '2023-09-01') : null,
+    () => hasApp ? arm('GET', r.ingestIdentity, '2023-01-31') : null,
+    () => hasApp ? arm('GET', r.pullIdentity, '2023-01-31') : null,
+    () => hasApp ? readPublishedImage(c, origins.imagePublication, arm, invoke, candidate) : null,
+    async () => {
+      if (!assignments) return null;
+      const upload = origins.records.find(v => v.phase.phase === 'upload-role');
+      const reads = await readAssignmentRoleDefinitions(c, assignments.phase, arm, upload.originalReceipt);
+      const value = { checkedAt: new Date().toISOString(), ...reads, roleDefinitionsSha256: digest(json(reads.roles)) };
+      if (value.roleDefinitionsSha256 !== assignments.preflight.roleDefinitionsSha256) fail('ASSIGNMENT_ROLE_DEFINITION_DRIFT');
+      return value;
+    },
+  ], read => read());
+  const identities = hasApp ? { [r.ingestIdentity]: ingest, [r.pullIdentity]: pull } : null;
+  if (workspace) {
+    const access = origins.records.find(v => v.phase.phase === 'workspace-access');
+    if (!isDeepStrictEqual(executionIdentity(workspace),
+      executionIdentity(access.firstReadback.resources[r.workspace]))) fail('RESOURCE_IDENTITY_CHANGED');
   }
   return { workspace, identities, imagePublication, roleDefinitions };
 }
-export async function collectReconciliation(c, origin, directory, evidence, invoke = az, lookup = publishedSourceDigest) {
+export async function collectReconciliation(c, origin, directory, evidence, invoke = az, lookup = publishedSourceDigest, options = {}) {
+  const now = options.now ?? Date.now, deadline = Math.min(options.deadline ?? now() + 120000, now() + 120000);
+  const policySource = await sourceDigest();
+  invoke = limitReadConcurrency(boundedInvoke(deadline, invoke, now));
   const foundation = verifyFoundationBudgets(c, evidence.foundationBudgets), origins = evidence.reconciliation.origins;
+  const suppliedCandidate = evidence.receiverCandidate ?? evidence.reconciliation.receiverCandidate;
+  const receiverCandidate = suppliedCandidate?.publication !== undefined && suppliedCandidate.publication !== null ? suppliedCandidate : null;
   const contract = await storageContract();
   await verifyPublishedOrigins(c, foundation, origins, lookup, contract);
+  if (receiverCandidate) {
+    verifyReceiverCandidate(c, receiverCandidate);
+    await verifyReceiverSource(receiverCandidate, options.sourceRun, lookup);
+    if (!isDeepStrictEqual(receiverCandidate.legacyPublication, origins.imagePublication)) fail('RECONCILIATION_RECEIVER_PUBLICATION_REQUIRED');
+  }
   const r = ids(c), arm = transport(c, origins.records[0].phase, directory, invoke);
   const account = await invoke(['account', 'show', '--subscription', c.subscriptionId, '--only-show-errors', '--output', 'json']);
   if (account?.id !== c.subscriptionId || account?.tenantId !== c.tenantId || account?.state !== 'Enabled' || account?.environmentName !== 'AzureCloud') fail('EXPLICIT_ACCOUNT_MISMATCH');
   await verifyOrigin(origin, arm, c, evidence.scannerAdoption);
-  const policies = await arm('GET', `${r.sub}/providers/Microsoft.Authorization/policyAssignments`, '2023-04-01');
-  const defender = await arm('GET', `${r.sub}/providers/Microsoft.Security/pricings`, '2024-01-01');
+  const [policies, defender, provider] = await readBatch([
+    [`${r.sub}/providers/Microsoft.Authorization/policyAssignments`, '2023-04-01'],
+    [`${r.sub}/providers/Microsoft.Security/pricings`, '2024-01-01'],
+    [`${r.sub}/providers/Microsoft.Insights`, '2021-04-01'],
+  ], ([id, api]) => arm('GET', id, api));
   const baselineSha256 = digest(json({ policies, defender }));
   if (baselineSha256 !== origin.policyBaselineSha256) fail('POLICY_OR_SECURITY_DRIFT');
-  const provider = await arm('GET', `${r.sub}/providers/Microsoft.Insights`, '2021-04-01');
   if (provider?.registrationState !== 'Registered' || !provider.resourceTypes?.some(v =>
     v.resourceType?.toLowerCase() === 'diagnosticsettings' && v.apiVersions?.includes(DIAGNOSTIC_API))) fail('DIAGNOSTIC_API_NOT_REGISTERED');
-  const results = {};
-  const context = await reconciliationContext(c, origins, arm, invoke);
-  for (const record of origins.records) results[record.phase.phase] = await readReconciledPhase(c, record, arm,
-    { ...context, publication: origins.imagePublication?.receipt });
-  const stateBudget = await arm('GET', r.stateBudget, '2024-08-01');
-  const inventory = await arm('GET', `${r.group}/resources`, '2021-04-01', undefined, '$expand=createdTime,changedTime');
-  const managedGroup = await arm('GET', r.managedGroup, '2024-03-01');
-  const proposal = { version: 3, kind: 'read-only-completed-phases', sourceSha256: await sourceDigest(),
+  const context = await reconciliationContext(c, origins, arm, invoke, receiverCandidate ?? undefined);
+  const results = Object.fromEntries(await readBatch(origins.records, async record => [record.phase.phase,
+    await readReconciledPhase(c, record, arm, { ...context, publication: origins.imagePublication?.receipt })]));
+  const [stateBudget, inventory, managedGroup] = await readBatch([
+    () => arm('GET', r.stateBudget, '2024-08-01'),
+    () => arm('GET', `${r.group}/resources`, '2021-04-01', undefined, '$expand=createdTime,changedTime'),
+    () => arm('GET', r.managedGroup, '2024-03-01'),
+  ], read => read());
+  if (await sourceDigest() !== policySource) fail('RECONCILIATION_SOURCE_CHANGED');
+  const proposal = { version: receiverCandidate ? 4 : 3, kind: 'read-only-completed-phases', sourceSha256: policySource,
+    ...(receiverCandidate ? { receiverCandidateSha256: digest(json(receiverCandidate)) } : {}),
     configSha256: digest(json(c)), executionOriginsSha256: digest(json(origins)), baselineSha256,
     checkedAt: new Date().toISOString(), results, stateBudget, ...context, inventory, managedGroup };
-  verifyReconciliation(c, foundation, origins, proposal, proposal.sourceSha256, null, contract);
+  verifyReconciliation(c, foundation, origins, proposal, proposal.sourceSha256, null, contract, receiverCandidate);
+  if (now() >= deadline) fail('WINDOW_READ_DEADLINE');
   return proposal;
 }
-export async function reviewedReconciliationReceipts(c, foundation, evidence, sourceSha256, lookup = publishedSourceDigest) {
+export async function reviewedReconciliationReceipts(c, foundation, evidence, sourceSha256, lookup = publishedSourceDigest, options = {}) {
   if (!evidence?.origins || !evidence.proposal || !evidence.review) fail('RECONCILIATION_REVIEW_REQUIRED');
   const contract = await storageContract();
   await verifyPublishedOrigins(c, foundation, evidence.origins, lookup, contract);
-  verifyReconciliation(c, foundation, evidence.origins, evidence.proposal, sourceSha256, evidence.review, contract);
+  const receiverCandidate = evidence.proposal.version === 4 ? evidence.receiverCandidate : null;
+  if (receiverCandidate) await verifyReceiverSource(receiverCandidate, options.sourceRun, lookup);
+  verifyReconciliation(c, foundation, evidence.origins, evidence.proposal, sourceSha256, evidence.review, contract, receiverCandidate);
   return Object.fromEntries(evidence.origins.records.map(record => {
     const phase = record.phase.phase, result = evidence.proposal.results[phase];
     return [phase, { qualificationKind: 'reviewed-read-only-reconciliation', qualified: true, phase,
       configSha256: digest(json(c)), phaseSha256: digest(json(record.phase)), sourceSha256: record.publication.sourceSha256,
       deployment: result.deployment, resources: result.resources,
-      reconciliation: { contractVersion: 3, ...reconciliationBinding(evidence), policySourceSha256: sourceSha256,
+      reconciliation: { contractVersion: evidence.proposal.version, ...reconciliationBinding(evidence), policySourceSha256: sourceSha256,
+        ...(receiverCandidate ? { receiverCandidateSha256: digest(json(receiverCandidate)) } : {}),
         executionOriginSha256: digest(json(record)), checkedAt: evidence.proposal.checkedAt, reviewedAt: evidence.review.reviewedAt,
         originalJournalOutcome: record.journal.outcome, originalReceiptQualified: record.originalReceipt?.qualified === true } }];
   }));
 }
 export async function verifyFreshReconciliation(c, directory, evidence, invoke = az, transition, imageContext = {}) {
+  invoke = limitReadConcurrency(invoke);
   const arm = transport(c, evidence.origins.records[0].phase, directory, invoke);
-  const context = await reconciliationContext(c, evidence.origins, arm, invoke, imageContext.receiverCandidate);
-  let currentApp;
-  for (const record of evidence.origins.records) {
+  const receiverCandidate = imageContext.receiverCandidate ?? evidence.receiverCandidate;
+  if (evidence.proposal.version === 4 && (!receiverCandidate ||
+      evidence.proposal.receiverCandidateSha256 !== digest(json(receiverCandidate)))) fail('RECONCILIATION_RECEIVER_PUBLICATION_REQUIRED');
+  const context = await reconciliationContext(c, evidence.origins, arm, invoke, receiverCandidate);
+  if (context.workspace && !isDeepStrictEqual(executionIdentity(context.workspace), executionIdentity(evidence.proposal.workspace))) fail('RESOURCE_IDENTITY_CHANGED');
+  const currentApps = await readBatch(evidence.origins.records, async record => {
     const current = await readReconciledPhase(c, record, arm, { ...context, ...imageContext,
       publication: evidence.origins.imagePublication?.receipt, transition });
     if (!isDeepStrictEqual(current.identityPins, evidence.proposal.results[record.phase.phase].identityPins)) fail('RESOURCE_IDENTITY_CHANGED');
-    if (record.phase.phase === 'disabled-app') currentApp = {
+    return record.phase.phase === 'disabled-app' ? {
       app: current.resources[ids(c).app], identities: context.identities,
       privacy: { diagnostics: current.diagnostics, exports: current.exports },
-    };
-  }
-  assertBudget(await arm('GET', ids(c).stateBudget, '2024-08-01'), c, 50);
-  if (await arm('GET', ids(c).managedGroup, '2024-03-01')) fail('RECONCILIATION_INVENTORY_CHANGED');
-  const inventory = await arm('GET', `${ids(c).group}/resources`, '2021-04-01', undefined, '$expand=createdTime,changedTime');
+    } : null;
+  });
+  const [stateBudget, managedGroup, inventory] = await readBatch([
+    () => arm('GET', ids(c).stateBudget, '2024-08-01'),
+    () => arm('GET', ids(c).managedGroup, '2024-03-01'),
+    () => arm('GET', `${ids(c).group}/resources`, '2021-04-01', undefined, '$expand=createdTime,changedTime'),
+  ], read => read());
+  assertBudget(stateBudget, c, 50);
+  if (managedGroup) fail('RECONCILIATION_INVENTORY_CHANGED');
   if (!Array.isArray(inventory?.value) || evidence.proposal.inventory.value.some(previous => {
     const current = inventory.value.filter(v => sameId(v.id, previous.id));
     return current.length !== 1 || current[0].createdTime !== previous.createdTime;
   })) fail('RESOURCE_CREATION_IDENTITY_CHANGED');
-  return currentApp;
+  return currentApps.find(Boolean);
 }
 export async function verifyPublishedWindowPredecessor(c, predecessor, lookup = publishedSourceDigest) {
   const summary = verifyWindowPredecessor(c, predecessor);
@@ -827,14 +906,14 @@ export async function validateReadOnly(c, phase, receipts, directory, invoke = a
 export async function checkReadOnly(c, phase, origin, receipts, directory, evidenceFiles, invoke = az, lookup = publishedSourceDigest, transition, options = {}) {
   const now = options.now ?? Date.now, started = now(), deadline = Math.min(options.deadline ?? invokeDeadlines.get(invoke) ?? started + 120000, started + 120000);
   const bounded = boundedInvoke(deadline, invoke, now);
-  invoke = async (args, timeout) => {
+  invoke = limitReadConcurrency(async (args, timeout) => {
     try { return await bounded(args, timeout); }
     catch (error) {
       await save(directory, `${phase.phase}-readonly-failure.json`, { recordedAt: new Date().toISOString(), phase: phase.phase,
         step: azureStep(args), deadlineAt: new Date(deadline).toISOString(), failure: safeOperationFailure(error) });
       throw error;
     }
-  };
+  });
   const arm = transport(c, phase, directory, invoke), r = ids(c);
   const foundation = verifyFoundationBudgets(c, evidenceFiles.foundationBudgets);
   if (evidenceFiles.reconciliation?.origins?.records.some(v => v.phase.phase === phase.phase)) fail('COMPLETED_PHASE_REQUIRES_RECONCILIATION');
@@ -851,20 +930,25 @@ export async function checkReadOnly(c, phase, origin, receipts, directory, evide
   if (transition && (!TOGGLE_PHASES.includes(phase.phase) || transition.source !== source)) fail('CURRENT_WINDOW_SOURCE_REQUIRED');
   let reconciled = {};
   if (evidenceFiles.reconciliation?.origins) {
-    reconciled = await reviewedReconciliationReceipts(c, foundation, evidenceFiles.reconciliation, source, lookup);
+    if (receiverCandidate && (evidenceFiles.reconciliation.proposal?.version !== 4 ||
+        evidenceFiles.reconciliation.proposal.receiverCandidateSha256 !== digest(json(receiverCandidate)))) fail('VERSIONED_RECEIVER_RECONCILIATION_REQUIRED');
+    reconciled = await reviewedReconciliationReceipts(c, foundation,
+      { ...evidenceFiles.reconciliation, ...(receiverCandidate ? { receiverCandidate } : {}) }, source, lookup, options);
     if (!isDeepStrictEqual(phase.reconciliation, reconciliationBinding(evidenceFiles.reconciliation)) ||
         Object.entries(reconciled).some(([name, value]) => !isDeepStrictEqual(receipts[name], value))) fail('RECONCILIATION_RECEIPTS_REQUIRED');
   }
   const account = await invoke(['account', 'show', '--subscription', c.subscriptionId, '--only-show-errors', '--output', 'json']);
   if (account?.id !== c.subscriptionId || account?.tenantId !== c.tenantId || account?.state !== 'Enabled' || account?.environmentName !== 'AzureCloud') fail('EXPLICIT_ACCOUNT_MISMATCH');
-  await verifyOrigin(origin, arm, c, evidenceFiles.scannerAdoption);
   const imageDescriptor = imagePhase ? structuredClone(phase.resources[0])
     : receipts.receiverUpgrade ? receipts.receiverUpgrade.phase.resources[0] : undefined;
   if (imagePhase) imageDescriptor.expected.properties.template.containers[0].image =
     `${c.registryName}.azurecr.io/missionspec/telemetry-ingest@${phase.transition.fromDigest}`;
-  const verifiedApp = evidenceFiles.reconciliation?.origins
-    ? await verifyFreshReconciliation(c, directory, evidenceFiles.reconciliation, invoke, transition,
-      { ...(receiverCandidate ? { receiverCandidate } : {}), ...(imageDescriptor ? { imageDescriptor } : {}) }) : undefined;
+  const [, verifiedApp] = await readBatch([
+    () => verifyOrigin(origin, arm, c, evidenceFiles.scannerAdoption),
+    () => evidenceFiles.reconciliation?.origins
+      ? verifyFreshReconciliation(c, directory, evidenceFiles.reconciliation, invoke, transition,
+        { ...(receiverCandidate ? { receiverCandidate } : {}), ...(imageDescriptor ? { imageDescriptor } : {}) }) : undefined,
+  ], read => read());
   if (imagePhase) {
     if (!evidenceFiles.reconciliation?.origins || !evidenceFiles.windowPredecessor) fail('IMAGE_HISTORY_REQUIRED');
     await verifyPublishedWindowPredecessor(c, evidenceFiles.windowPredecessor, lookup);
@@ -876,7 +960,7 @@ export async function checkReadOnly(c, phase, origin, receipts, directory, evide
     verifyProjectBudgetReceipt(c, receipts['project-budget'], foundation, source, reconciled);
   }
   const evidence = {};
-  for (const [name, id, api] of [
+  await readBatch([
     ['providers', `${r.sub}/providers`, '2021-04-01'],
     ['permissions', `${r.sub}/providers/Microsoft.Authorization/permissions`, '2022-04-01'],
     ['denies', `${r.sub}/providers/Microsoft.Authorization/denyAssignments`, '2022-04-01'],
@@ -884,9 +968,9 @@ export async function checkReadOnly(c, phase, origin, receipts, directory, evide
     ['defender', `${r.sub}/providers/Microsoft.Security/pricings`, '2024-01-01'],
     ['quota', `${r.sub}/providers/Microsoft.App/locations/${c.location}/usages`, '2025-01-01'],
     ['telemetry-inventory', `${r.group}/resources`, '2021-04-01'],
-  ]) {
+  ], async ([name, id, api]) => {
     evidence[name] = await arm('GET', id, api); await save(directory, `${phase.phase}-${name}.json`, evidence[name]);
-  }
+  });
   if (!evidence.permissions?.value?.some(v => v.actions?.includes('*') && !v.notActions?.length) || evidence.denies?.value?.length) fail('PERMISSION_REVIEW_REQUIRED');
   for (const ns of ['Microsoft.App', 'Microsoft.ContainerRegistry', 'Microsoft.ManagedIdentity', 'Microsoft.OperationalInsights', 'Microsoft.Insights', 'Microsoft.Consumption', 'Microsoft.Authorization']) {
     if (!evidence.providers.value.some(v => v.namespace?.toLowerCase() === ns.toLowerCase() && v.registrationState === 'Registered')) fail('PROVIDER_NOT_REGISTERED');
@@ -909,8 +993,9 @@ export async function checkReadOnly(c, phase, origin, receipts, directory, evide
     if (name?.nameAvailable !== true) fail('REGISTRY_NAME_UNAVAILABLE');
   }
   let currentApp;
-  for (const descriptor of phase.resources) {
-    const actual = await arm('GET', descriptor.id, descriptor.apiVersion);
+  const currentResources = await readBatch(phase.resources, descriptor => arm('GET', descriptor.id, descriptor.apiVersion));
+  for (const [index, descriptor] of phase.resources.entries()) {
+    const actual = currentResources[index];
     if (Object.keys(phase.allowedModify).some(id => sameId(id, descriptor.id))) {
       if (!actual) fail('OWNED_UPDATE_TARGET_MISSING');
       const historical = phase.phase === 'project-budget' ? foundation.project
@@ -936,9 +1021,10 @@ export async function checkReadOnly(c, phase, origin, receipts, directory, evide
       if (!historical || !sameId(actual.id, descriptor.id) || !isDeepStrictEqual(normalize(actual), normalize(historical))) fail('OWNED_TARGET_DRIFT');
     } else if (actual) fail('NEW_RESOURCE_NAME_EXISTS');
   }
-  assertBudget(await arm('GET', r.projectBudget, '2024-08-01'), c,
+  const [projectBudget, stateBudget] = await readBatch([r.projectBudget, r.stateBudget], id => arm('GET', id, '2024-08-01'));
+  assertBudget(projectBudget, c,
     phase.phase === 'project-budget' ? c.budget.previousProjectAmount : c.budget.projectAmount, projectBudgetFilter(c));
-  assertBudget(await arm('GET', r.stateBudget, '2024-08-01'), c, c.budget.stateAmount);
+  assertBudget(stateBudget, c, c.budget.stateAmount);
   let roleDefinitionsSha256;
   if (phase.phase === 'assignments') {
     const definitions = await readAssignmentRoleDefinitions(c, phase, arm, receipts['upload-role']);
@@ -948,6 +1034,7 @@ export async function checkReadOnly(c, phase, origin, receipts, directory, evide
   const { whatIfSha256 } = await validateReadOnly(c, phase, receipts, directory, invoke, currentApp, { ...options, deadline, receiverCandidate });
   const cost = firstReleaseCost(receiverCandidate ? 2 : 1);
   const verifiedSource = await sourceDigest();
+  if (verifiedSource !== source) fail('CURRENT_POLICY_SOURCE_CHANGED');
   if (now() >= deadline) fail('WINDOW_READ_DEADLINE');
   const proof = { startedAt: started, completedAt: now(), qualified: cost.withinEstimate, configSha256: digest(json(c)),
     phaseSha256: digest(json(phase)), sourceSha256: verifiedSource, originSha256: digest(json(origin)),
@@ -1612,11 +1699,13 @@ export function syntheticWindowIO(c, phases, window, approvals, receipts, rawRec
 
 export function receiverUpgradeIO(c, phase, receipts, origin, evidence, directory, invoke = az, options = {}) {
   const candidate = evidence.receiverCandidate, r = ids(c), now = options.now ?? Date.now;
+  const reads = limitReadConcurrency((deadline, args, timeout) => boundedInvoke(deadline, invoke, now)(args, timeout));
   const invokeAt = deadline => {
     if (!Number.isSafeInteger(deadline)) fail('IMAGE_ABSOLUTE_DEADLINE_REQUIRED');
     const bounded = boundedInvoke(deadline, invoke, now);
     return async (args, timeout) => {
-      const result = await bounded(args, timeout);
+      const write = args[0] === 'rest' && args[args.indexOf('--method') + 1] === 'PUT';
+      const result = await (write ? bounded(args, timeout) : reads(deadline, args, timeout));
       if (now() >= deadline) fail('IMAGE_OPERATION_DEADLINE');
       return result;
     };
@@ -1723,6 +1812,7 @@ async function main() {
     reconciliation: { origins: await load(directory, 'execution-origins-v3.json', true),
       proposal: await load(directory, 'reconciliation-proposal.json', true),
       review: await load(directory, 'reconciliation-review.json', true) } };
+  evidenceFiles.reconciliation.receiverCandidate = evidenceFiles.receiverCandidate;
   if (!evidenceFiles.reconciliation.origins && await load(directory, 'execution-origins-v2.json', true)) fail('RECONCILIATION_REVISION_REQUIRED');
   verifyScannerAdoption(c, origin, evidenceFiles.scannerAdoption);
   verifyFoundationBudgets(c, evidenceFiles.foundationBudgets);

@@ -9,7 +9,7 @@ import { buildPhase, storageContract, ids, json, digest, ownerTags, firstRelease
 import { verifyWhatIf, assertBudget, permitFirstPush, verifyResource, executionIdentity,
   verifyExecutionOrigins, verifyReconciliation, verifyDeploymentIdentity, roleDefinitionSignature, verifyImagePublication, verifyPublicationReadback, resourceContext } from '../policy.mjs';
 import { manifestJson, configJson } from './receiver-oci.fixture.mjs';
-import { candidateFixture } from './receiver-upgrade.fixture.mjs';
+import { candidateFixture, receiverSourceFixtureRun } from './receiver-upgrade.fixture.mjs';
 import { terminalReceiverWindow } from './receiver-window.fixture.mjs';
 import { buildDisabledImagePhase, ReceiverUpgradeController, RECEIVER_SOURCE_INPUTS, verifyDisabledImageRecord } from '../receiver-upgrade.mjs';
 import { CollectorController, az, transport, validateReadOnly, verifyScannerAdoption, verifyOrigin, verifyProjectBudgetReceipt,
@@ -1054,7 +1054,7 @@ test('reconciliation rejects expired original intent, changed template or deploy
     await assert.rejects(reviewedReconciliationReceipts(c, f.foundation, f, f.source, f.lookup));
   }
 });
-function fixtureAdoption() {
+function fixtureAdoption(fullReadCounts = false) {
   const config = structuredClone(c), storageId = `${r.stateGroup}/providers/Microsoft.Storage/storageAccounts/fixturestate`;
   const snapshot = { id: storageId, properties: { publicNetworkAccess: 'Disabled', allowSharedKeyAccess: false,
     networkAcls: { bypass: 'None', defaultAction: 'Deny', ipRules: [], ipv6Rules: [], virtualNetworkRules: [], resourceAccessRules: [] } } };
@@ -1063,6 +1063,15 @@ function fixtureAdoption() {
     policyBaselineSha256: digest(json({ policies: { value: [] }, defender: { value: [] } })),
     resources: [{ id: storageId, apiVersion: '2023-05-01', snapshot }], absent: [],
     bootstrap: { id: `${r.stateGroup}/providers/Microsoft.Resources/deployments/foundation`, correlationId: 'original', timestamp: 'original', templateHash: 'original' } };
+  if (fullReadCounts) {
+    for (let i = 1; i < 17; i++) {
+     const id = `${r.stateGroup}/providers/Microsoft.Network/networkSecurityGroups/foundation-${i}`;
+     origin.resources.push({ id, apiVersion: '2024-05-01', snapshot: { id, properties: { securityRules: [] } } });
+    }
+    origin.absent = Array.from({ length: 8 }, (_, i) => ({
+     id: `${r.stateGroup}/providers/Microsoft.Network/networkSecurityGroups/retired-${i}`, apiVersion: '2024-05-01',
+    }));
+  }
   config.originSha256 = digest(json(origin));
   const principal = '00000000-0000-4000-8000-000000000011', app = '00000000-0000-4000-8000-000000000012';
   const actorId = `${r.sub}/providers/Microsoft.Security/pricings/StorageAccounts/securityOperators/DefenderForStorageSecurityOperator`;
@@ -1239,7 +1248,44 @@ test('reconciliation and fresh qualification read only the exact deployed resour
     responses.get(roleId).properties.permissions[0].dataActions.push('Microsoft.Insights/Telemetry/Read');
     await assert.rejects(verifyFreshReconciliation(a.config, directory, current, invoke, undefined, imageContext), /UPLOAD_ROLE_SCOPE_DRIFT/);
     responses.set(roleId, role);
-    responses.set(rr.app, originalApp); activeCandidate = undefined;
+    responses.set(rr.app, originalApp);
+    const priorProposal = json(proposal), priorPublication = json(activeCandidate), lookup = async commit =>
+      commit === activeCandidate.review.policyCommitSha ? activeCandidate.review.sourceSha256 : f.lookup(commit);
+    const currentProposal = await collectReconciliation(a.config, a.origin, directory,
+      { ...evidence, receiverCandidate: activeCandidate }, invoke, lookup, { sourceRun: receiverSourceFixtureRun });
+    assert.equal(currentProposal.version, 4);
+    assert.equal(currentProposal.receiverCandidateSha256, digest(json(activeCandidate)));
+    assert.equal(currentProposal.imagePublication.manifests.length, 2);
+    assert.equal(json(proposal), priorProposal);
+    assert.equal(json(activeCandidate), priorPublication);
+    assert.equal(json(f.origins), before);
+    verifyReconciliation(a.config, f.foundation, f.origins, currentProposal, currentProposal.sourceSha256, null, contract, activeCandidate);
+    const review = { version: 4, action: 'accept-exact-arm-reconciliation', sourceSha256: currentProposal.sourceSha256,
+      proposalSha256: digest(json(currentProposal)), reviewedAt: new Date().toISOString() };
+    const adopted = await reviewedReconciliationReceipts(a.config, f.foundation,
+      { ...f, proposal: currentProposal, review, receiverCandidate: activeCandidate }, currentProposal.sourceSha256, lookup,
+      { sourceRun: receiverSourceFixtureRun });
+    for (const record of f.origins.records) {
+      assert.equal(adopted[record.phase.phase].sourceSha256, record.publication.sourceSha256);
+      assert.equal(adopted[record.phase.phase].reconciliation.contractVersion, 4);
+      assert.equal(adopted[record.phase.phase].reconciliation.receiverCandidateSha256, digest(json(activeCandidate)));
+    }
+    for (const mutate of [
+      p => { p.receiverCandidateSha256 = digest('unreviewed candidate'); },
+      p => { p.imagePublication.manifests.push({ digest: 'sha256:' + 'e'.repeat(64), tags: ['extra'] }); },
+      p => { p.imagePublication.manifests[1].tags.push('retagged'); },
+      p => { p.imagePublication.candidateManifest = p.imagePublication.manifest; },
+      p => { p.imagePublication.referrers.push({ digest: 'sha256:' + 'e'.repeat(64) }); },
+    ]) {
+      const changed = structuredClone(currentProposal); mutate(changed);
+      assert.throws(() => verifyReconciliation(a.config, f.foundation, f.origins, changed, currentProposal.sourceSha256, null, contract, activeCandidate));
+    }
+    assert.throws(() => verifyReconciliation(a.config, f.foundation, f.origins, currentProposal,
+      currentProposal.sourceSha256, { ...review, version: 3 }, contract, activeCandidate), /RECONCILIATION_REVIEW_INVALID/);
+    assert.throws(() => verifyReconciliation(a.config, f.foundation, f.origins, currentProposal, currentProposal.sourceSha256, null, contract), /RECEIVER_PUBLICATION_REQUIRED/);
+    assert.throws(() => verifyReconciliation(a.config, f.foundation, f.origins, proposal, proposal.sourceSha256, null, contract, activeCandidate), /VERSIONED_RECEIVER_RECONCILIATION_REQUIRED/);
+    await assert.rejects(collectReconciliation(a.config, a.origin, directory, evidence, invoke, lookup), /PUBLICATION_READBACK_CHANGED/);
+    activeCandidate = undefined;
   });
   if (count === 5) await t.test('assignment preflight binds freshly read role signatures into the approval baseline', async () => {
     current.review = { version: 3, action: 'accept-exact-arm-reconciliation', sourceSha256: proposal.sourceSha256,
@@ -1627,7 +1673,8 @@ test('default HTTP request cost is independent of the accepted-event quota and i
 });
 
 async function realReceiverUpgradeFixture(t, mode) {
-  const adoption = fixtureAdoption(), config = adoption.config, r = ids(config), source = await sourceDigest();
+  const concurrent = mode.startsWith('parallel-');
+  const adoption = fixtureAdoption(concurrent), config = adoption.config, r = ids(config), source = await sourceDigest();
   const reconciliation = fixtureReconciliation(config, adoption.origin.policyBaselineSha256, 7);
   const initial = reconciliation.proposal.results['disabled-app'].resources[r.app];
   Object.assign(initial.properties, { latestRevisionName: 'missionspec-test-ingest--initial',
@@ -1635,7 +1682,7 @@ async function realReceiverUpgradeFixture(t, mode) {
   reconciliation.proposal.sourceSha256 = source;
   reconciliation.review.sourceSha256 = source;
   reconciliation.review.proposalSha256 = digest(json(reconciliation.proposal));
-  const receipts = { ...await reviewedReconciliationReceipts(config, reconciliation.foundation, reconciliation, source, reconciliation.lookup),
+  let receipts = { ...await reviewedReconciliationReceipts(config, reconciliation.foundation, reconciliation, source, reconciliation.lookup),
     publication: reconciliation.origins.imagePublication.receipt };
   const predecessor = terminalReceiverWindow(config, receipts, adoption.origin, source, Date.parse('2026-09-23T09:00:00.000Z'));
   const candidate = candidateFixture(config, receipts.publication);
@@ -1643,6 +1690,20 @@ async function realReceiverUpgradeFixture(t, mode) {
   candidate.review.legacyPublicationSha256 = digest(json(candidate.legacyPublication));
   candidate.review.sourceSha256 = source;
   candidate.publication.reviewSha256 = digest(json(candidate.review));
+  const lookup = async commit => ['a'.repeat(40), 'c'.repeat(40)].includes(commit) ? source : reconciliation.lookup(commit);
+  reconciliation.receiverCandidate = candidate;
+  reconciliation.proposal = structuredClone(reconciliation.proposal);
+  reconciliation.proposal.version = 4;
+  reconciliation.proposal.receiverCandidateSha256 = digest(json(candidate));
+  reconciliation.proposal.checkedAt = '2026-09-23T09:00:10.000Z';
+  reconciliation.proposal.results['disabled-app'].resources[r.app] = structuredClone(predecessor.readback.app);
+  reconciliation.proposal.imagePublication = { ...reconciliation.proposal.imagePublication,
+    manifests: structuredClone(candidate.publication.manifests), candidateManifest: JSON.parse(candidate.profile.manifestJson), referrers: [] };
+  reconciliation.review.version = 4;
+  reconciliation.review.reviewedAt = '2026-09-23T09:00:11.000Z';
+  reconciliation.review.proposalSha256 = digest(json(reconciliation.proposal));
+  receipts = { ...await reviewedReconciliationReceipts(config, reconciliation.foundation, reconciliation, source, lookup,
+    { sourceRun: receiverSourceFixtureRun }), publication: receipts.publication };
   const instance = { version: 1, id: randomUUID(), predecessorSha256: digest(json(predecessor)),
     previousInstanceIds: [predecessor.window.windowInstance.id] };
   const phase = buildDisabledImagePhase(config, 'disabled-image-upgrade', receipts, candidate, predecessor, instance, reconciliation);
@@ -1650,6 +1711,21 @@ async function realReceiverUpgradeFixture(t, mode) {
   t.after(() => rm(`infrastructure/arm/telemetry/.operator-private/window-instance-${instance.id}.json`, { force: true }));
   let now = Date.parse('2026-09-23T09:01:00.000Z'), stage = 'preflight', writes = 0, deployment = null, intentAt = null, postAppGets = 0;
   const start = now, calls = [];
+  let activeReads = 0, maximumReads = 0, whatIfRemainingMs = null, whatIfRequests = 0, scheduled = false;
+  const pending = [];
+  const virtualDelay = ms => new Promise(resolve => {
+    pending.push({ at: now + ms, resolve });
+    const flush = () => {
+      scheduled = false;
+      const at = Math.min(...pending.map(v => v.at));
+      now = Math.max(now, at);
+      for (const item of pending.filter(v => v.at <= now)) {
+        pending.splice(pending.indexOf(item), 1); item.resolve();
+      }
+      if (pending.length) { scheduled = true; setImmediate(flush); }
+    };
+    if (!scheduled) { scheduled = true; setImmediate(flush); }
+  });
   let app = structuredClone(predecessor.readback.app);
   const resources = new Map([
     [adoption.adoption.resourceId, adoption.adoption.after],
@@ -1662,6 +1738,9 @@ async function realReceiverUpgradeFixture(t, mode) {
     [`${r.sub}/providers/Microsoft.Authorization/denyAssignments`, { value: [] }],
     [`${r.sub}/providers/Microsoft.App/locations/${config.location}/usages`, { value: [] }],
   ]);
+  for (const item of adoption.origin.resources) resources.set(item.id,
+    item.id === adoption.adoption.resourceId ? adoption.adoption.after : item.snapshot);
+  for (const item of adoption.origin.absent) resources.set(item.id, null);
   for (const record of reconciliation.origins.records) {
     resources.set(record.phase.deploymentId, record.firstReadback.deployment);
     for (const [id, value] of Object.entries(record.firstReadback.resources)) resources.set(id, structuredClone(value));
@@ -1692,8 +1771,12 @@ async function realReceiverUpgradeFixture(t, mode) {
     approvedAt: new Date(start - 60000).toISOString(), expiresAt: new Date(expiry).toISOString() };
   const invoke = async (args, timeout) => {
     assert(timeout > 0 && timeout <= 15000);
-    const before = now; now += 500;
-    const call = { stage, before, completed: now, timeout, args }; calls.push(call);
+    const before = now, call = { stage, before, completed: null, timeout, args }; calls.push(call);
+    if (concurrent) {
+      activeReads++; maximumReads = Math.max(maximumReads, activeReads);
+      await virtualDelay(2000); activeReads--;
+    } else now += 500;
+    call.completed = now;
     assert.equal(args[args.indexOf('--subscription') + 1], config.subscriptionId);
     if (args[0] === 'account') return { id: config.subscriptionId, tenantId: config.tenantId, state: 'Enabled', environmentName: 'AzureCloud' };
     if (args[0] === 'deployment') {
@@ -1741,6 +1824,7 @@ async function realReceiverUpgradeFixture(t, mode) {
     }
     assert(resources.has(url.pathname), url.pathname);
     const value = structuredClone(resources.get(url.pathname));
+    if (mode === 'parallel-failure' && url.pathname.endsWith('/foundation-7')) value.properties.securityRules.push({ changed: true });
     if (stage !== 'preflight') {
       if (mode === 'role-drift' && url.pathname === `${r.dcr}/providers/Microsoft.Authorization/roleDefinitions/${r.uploadRole.split('/').at(-1)}`) {
         value.properties.permissions[0].dataActions.push('Microsoft.Insights/Telemetry/Read');
@@ -1750,7 +1834,6 @@ async function realReceiverUpgradeFixture(t, mode) {
     }
     return value;
   };
-  const lookup = async commit => ['a'.repeat(40), 'c'.repeat(40)].includes(commit) ? source : reconciliation.lookup(commit);
   const sourceContents = { ...Object.fromEntries(RECEIVER_SOURCE_INPUTS.map(path => [path, `fixture ${path}`])),
     'services/telemetry-ingest/src/identity-readiness.ts': 'fixture readiness', 'services/telemetry-ingest/Dockerfile': 'fixture Dockerfile' };
   const sourceRun = async (command, args) => {
@@ -1764,19 +1847,23 @@ async function realReceiverUpgradeFixture(t, mode) {
   const context = whatIfRequestContext(config, phase);
   const options = { now: () => now, sleep: async ms => { now += ms; }, sourceRun, lookup,
     request: async operation => {
-      operation.beforeDispatch(); now += 1000;
+      operation.beforeDispatch();
+      whatIfRemainingMs ??= operation.deadlineMs - now;
+      whatIfRequests++; now += 1000;
       assert(operation.timeoutMs <= 15000);
-      const complete = now - start >= 100000;
+      const complete = concurrent ? whatIfRequests === 2 : now - start >= 100000;
       if (complete) stage = 'critical';
       return { version: 1, contextSha256: context.contextSha256, verifiedRegion: config.location, step: `what-if.${operation.action}`,
         responseFile: 'whatif-response-0000.json', statusCode: complete ? 200 : 202, bodyParseError: false,
-        headers: complete ? {} : { 'retry-after': '5', ...(operation.action === 'start' ? {
+        headers: complete ? {} : { 'retry-after': concurrent ? '15' : '5', ...(operation.action === 'start' ? {
           location: `https://management.azure.com${r.sub}/locations/australiaeast/operationresults/${config.runId}?api-version=2025-04-01`,
         } : {}) }, body: complete ? { status: 'Succeeded', properties: { changes: whatIf.changes } } : { status: 'Running' } };
     } };
   const io = receiverUpgradeIO(config, phase, receipts, adoption.origin, evidence, directory, invoke, options);
   const controller = new ReceiverUpgradeController(config, phase, candidate, predecessor.readback.app, io);
   return { config, phase, candidate, predecessor, receipts, directory, approval, io, controller, calls, start, expiry, whatIf, source,
+    foundationResources: adoption.origin.resources, foundationAbsences: adoption.origin.absent,
+    get maximumReads() { return maximumReads; }, get whatIfRemainingMs() { return whatIfRemainingMs; }, get whatIfRequests() { return whatIfRequests; },
     get now() { return now; }, get writes() { return writes; }, get intentAt() { return intentAt; }, get app() { return app; } };
 }
 
@@ -1821,4 +1908,30 @@ test('real upgrade IO rejects late preflight/critical/body reads, mutable drift 
     }
     assert(f.calls.filter(v => v.args.includes('PUT')).every(v => v.before < f.expiry));
   });
+});
+
+test('four-read production preflight preserves the actual 17-resource/8-absence workload and leaves async what-if time', async t => {
+  const f = await realReceiverUpgradeFixture(t, 'parallel-success');
+  const proof = await f.io.check();
+  assert.equal(f.maximumReads, 4);
+  assert(f.whatIfRemainingMs >= 20000);
+  assert.equal(f.whatIfRequests, 2);
+  assert(proof.completedAt - proof.startedAt < 120000);
+  assert.equal(f.writes, 0);
+  for (const item of [...f.foundationResources, ...f.foundationAbsences]) {
+    assert.equal(f.calls.filter(v => v.args.includes('GET') && v.args.some(arg =>
+      typeof arg === 'string' && arg.startsWith(`https://management.azure.com${item.id}?`))).length, 1);
+  }
+  assert.equal(f.calls.length, 89);
+  t.diagnostic(JSON.stringify({ preflightReadCalls: f.calls.length, maximumReads: f.maximumReads,
+    whatIfRemainingMs: f.whatIfRemainingMs, completeMs: proof.completedAt - proof.startedAt }));
+});
+
+test('concurrent immutable-read failure stops the production preflight before async what-if without retry', async t => {
+  const f = await realReceiverUpgradeFixture(t, 'parallel-failure');
+  await assert.rejects(f.io.check(), /FOUNDATION_DRIFT/);
+  assert(f.maximumReads <= 4);
+  assert.equal(f.whatIfRequests, 0);
+  assert.equal(f.writes, 0);
+  assert.equal(f.calls.filter(v => v.args.some(arg => typeof arg === 'string' && arg.includes('/foundation-7?'))).length, 1);
 });

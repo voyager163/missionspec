@@ -296,14 +296,21 @@ export function verifyExecutionOrigins(c, foundation, origins, contract) {
   else if (origins.imagePublication !== null) fail('UNEXPECTED_PUBLICATION_ORIGIN');
   for (const [index, record] of origins.records.entries()) verifyExecutionOrigin(c, foundation, record, contract, origins.records.slice(0, index), origins.imagePublication);
 }
-export function verifyReconciliation(c, foundation, origins, proposal, sourceSha256, review = null, contract) {
+export function verifyReconciliation(c, foundation, origins, proposal, sourceSha256, review = null, contract, receiverCandidate = null) {
   closed(origins, ['version', 'records', 'imagePublication']);
   closed(proposal, ['version', 'kind', 'sourceSha256', 'configSha256', 'executionOriginsSha256', 'baselineSha256', 'checkedAt', 'results',
-    'stateBudget', 'workspace', 'identities', 'imagePublication', 'roleDefinitions', 'inventory', 'managedGroup']);
+    'stateBudget', 'workspace', 'identities', 'imagePublication', 'roleDefinitions', 'inventory', 'managedGroup',
+    ...(proposal.version === 4 ? ['receiverCandidateSha256'] : [])]);
   verifyExecutionOrigins(c, foundation, origins, contract);
-  if (proposal.version !== 3 || proposal.kind !== 'read-only-completed-phases' ||
+  if (![3, 4].includes(proposal.version) || proposal.kind !== 'read-only-completed-phases' ||
       !/^[0-9a-f]{64}$/u.test(sourceSha256) || proposal.sourceSha256 !== sourceSha256 || proposal.configSha256 !== digest(json(c)) ||
       proposal.executionOriginsSha256 !== digest(json(origins)) || canonicalInstant(proposal.checkedAt) > Date.now()) fail('RECONCILIATION_INVALID');
+  if (proposal.version === 4) {
+    if (!receiverCandidate || proposal.receiverCandidateSha256 !== digest(json(receiverCandidate)) ||
+        !isDeepStrictEqual(receiverCandidate.legacyPublication, origins.imagePublication)) fail('RECONCILIATION_RECEIVER_PUBLICATION_REQUIRED');
+    verifyReceiverCandidate(c, receiverCandidate);
+    if (canonicalInstant(receiverCandidate.publication.completedAt) > canonicalInstant(proposal.checkedAt)) fail('RECONCILIATION_RECEIVER_PUBLICATION_REQUIRED');
+  } else if (receiverCandidate !== null) fail('VERSIONED_RECEIVER_RECONCILIATION_REQUIRED');
   const r = ids(c), expectedResults = origins.records.map(v => v.phase.phase);
   const core = origins.records.find(v => v.phase.phase === 'core'), assignments = origins.records.find(v => v.phase.phase === 'assignments');
   if (expectedResults.includes('disabled-app')) {
@@ -311,7 +318,7 @@ export function verifyReconciliation(c, foundation, origins, proposal, sourceSha
     for (const id of [r.ingestIdentity, r.pullIdentity]) {
       if (!isDeepStrictEqual(executionIdentity(proposal.identities[id]), executionIdentity(core.firstReadback.resources[id]))) fail('APP_IDENTITY_READBACK_CHANGED');
     }
-    verifyPublicationReadback(c, origins.imagePublication, proposal.imagePublication);
+    verifyPublicationReadback(c, origins.imagePublication, proposal.imagePublication, receiverCandidate ?? undefined);
   } else if (proposal.identities !== null || proposal.imagePublication !== null) fail('UNEXPECTED_APP_CONTEXT');
   if (assignments) {
     const roles = verifyAssignmentRoleEvidence(c, assignments.phase, proposal.roleDefinitions);
@@ -361,7 +368,7 @@ export function verifyReconciliation(c, foundation, origins, proposal, sourceSha
   }
   if (review !== null) {
     closed(review, ['version', 'action', 'proposalSha256', 'sourceSha256', 'reviewedAt']);
-    if (review.version !== 3 || review.action !== 'accept-exact-arm-reconciliation' || review.proposalSha256 !== digest(json(proposal)) ||
+    if (review.version !== proposal.version || review.action !== 'accept-exact-arm-reconciliation' || review.proposalSha256 !== digest(json(proposal)) ||
         review.sourceSha256 !== sourceSha256 || canonicalInstant(review.reviewedAt) < canonicalInstant(proposal.checkedAt) ||
         canonicalInstant(review.reviewedAt) > Date.now()) fail('RECONCILIATION_REVIEW_INVALID');
   }
