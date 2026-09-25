@@ -1,0 +1,55 @@
+name: Bug report
+description: Report a reproducible problem in this pre-release repository.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is a public issue. Do not include credentials, personal data, private source, `.env` files, or raw diagnostics.
+        MissionSpec is pre-release. Its development CLI supports explicitly reviewed local workflows, native skill installation and authorized check collection. Native autonomous execution and Windows private-state writes remain unqualified.
+        Local logging, optional telemetry controls and an isolated ingestion service are implemented. There is no production telemetry endpoint, deployment or supported product release.
+        Do not disclose sensitive security or privacy findings here. GitHub private vulnerability reporting is enabled; use [Report a vulnerability](https://github.com/voyager163/missionspec/security/advisories/new). If you cannot access it, retain the finding privately rather than posting here.
+        For conduct concerns, use the separate [Code of Conduct](https://github.com/voyager163/missionspec/blob/develop/CODE_OF_CONDUCT.md).
+  - type: input
+    id: revision
+    attributes:
+      label: Repository revision or version
+      description: Give the commit SHA or branch. For a development CLI or local check problem, also include Node.js and operating system versions. There is no supported product release version yet.
+      placeholder: "develop at <commit>; Node.js 24.21.0; <OS/version>"
+    validations:
+      required: true
+  - type: dropdown
+    id: status
+    attributes:
+      label: Project status and affected area
+      options:
+        - Pre-release repository documentation
+        - Pre-release local repository checks
+        - Pre-release reviewed local workflow CLI
+        - Pre-release domain contracts or skill sources
+        - Pre-release local diagnostics or isolated service components
+        - Pre-release community or repository setup
+        - Other or uncertain (explain below)
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal sanitized reproduction
+      description: List the smallest steps and synthetic example needed to reproduce the issue. Do not upload a private project or an unreviewed log archive.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: Describe what should happen. If based on documentation, link to the relevant passage.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Describe what happened instead. Include only a short, manually reviewed and sanitized error excerpt if needed.
+    validations:
+      required: true

@@ -1,0 +1,39 @@
+name: Feature request
+description: Explain a problem and a proposed improvement to the project.
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is a public issue. Do not include credentials, personal data, private source, `.env` files, or raw diagnostics.
+        MissionSpec is pre-release: the CLI supports reviewed local workflows and native skill installation. Installed skills and synthetic protocol tests do not qualify native autonomous execution or Windows private-state writes.
+        Local logging, optional telemetry controls and an isolated ingestion service are implemented. There is no production telemetry endpoint, deployment or supported product release. Planned features are not shipping commitments.
+        For sensitive security or privacy findings, use GitHub's private [Report a vulnerability](https://github.com/voyager163/missionspec/security/advisories/new) route. Private reporting is enabled; sensitive findings must not be posted here.
+        For conduct concerns, use the separate [Code of Conduct](https://github.com/voyager163/missionspec/blob/develop/CODE_OF_CONDUCT.md).
+  - type: input
+    id: revision-status
+    attributes:
+      label: Repository revision and project status
+      description: Give the commit SHA or branch and confirm the pre-release context, or explain if you are unsure. There is no supported product release version yet.
+      placeholder: "develop at <commit>; pre-release repository"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Current behavior or gap
+      description: Describe the problem and who it affects. Give a minimal sanitized example or steps showing the current limitation, using synthetic data.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Desired behavior
+      description: Explain the expected outcome and how you would recognize success. Distinguish a new proposal from an already documented plan.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or scope limits
+      description: Optionally describe a simpler approach, workaround, or work that should remain out of scope.

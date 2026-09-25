@@ -1,0 +1,156 @@
+# MissionSpec collector: canonical direct ARM definition
+
+This is the single supported collector deployment definition. See
+[`docs/telemetry-operator.md`](../../../docs/telemetry-operator.md) for phase
+boundaries, local private review, ownership, budget and publication gates.
+
+```sh
+node --test infrastructure/arm/telemetry/tests/*.test.mjs
+```
+
+No Azure credentials are needed for these tests. The CLI accepts only fixed
+collector phases; `prepare` makes no cloud calls, and `check`/`validate-preview`
+perform only nonmutating reads and ARM validation/what-if. No checked-in file
+contains deployment authority or account-specific configuration.
+What-if uses a fixed authenticated async start/poll adapter, not a blocking
+CLI long-running poller. Requests remain at most 15 seconds within the same
+120-second phase-check deadline; response handles and full results stay private.
+The qualified local Azure CLI Python bridge is part of the source hash.
+
+The completed budget/core/workspace-access/data/upload-role/assignments/disabled-app
+sequence uses `reconcile disabled-app` for a read-only, unapproved version-3 proposal.
+The one-image publication is independently verified history, not an ARM phase.
+`qualify-reconciliation disabled-app` requires a separate exact
+parent review and repeats live reads before issuing new read-only receipts.
+Neither command deploys resources or rewrites original execution history.
+Assignment grants additionally require fresh scoped role-definition checks
+bound to the approval and repeated after request-body preparation.
+
+`prepare-window synthetic-admission` performs read-only preparation of paired
+enable/disable transitions with a new cryptographic instance UUID and a closed,
+settled predecessor record. Collector IDs/tags and old deployments never change.
+The Python what-if bridge derives the same new instance names as execution.
+Separate exact version-2 approvals are required before
+`run-window synthetic-admission`; direct toggle `execute` is forbidden.
+The fixed `execute-disable synthetic-disable` recovery path never replays an
+uncertain submission. New-revision readiness and terminal disabled proof are
+required; no preparation operation sends HTTP fixtures or enables ingestion.
+Final HTTP/query dispatch guards run after the last awaited operation. One
+120-second submission-to-ready deadline and intent-anchored work/window/recovery
+deadlines distinguish safe late disable recovery from successful qualification.
+
+## Reviewed disabled receiver image overlay
+
+`receiver-upgrade.mjs` defines the closed version-1 receiver profile/publication
+and disabled-image execution record. It does **not** change configuration v2,
+the seven historical phases, their prerequisites, or the original one-image
+publication. No candidate image is built, pushed, or production-cleared by this
+module. A `qualified: true` flag is not candidate evidence.
+
+The fixed commands are `preview-image-publication disabled-image-upgrade`,
+`prepare-image disabled-image-upgrade`, `check-image disabled-image-upgrade`,
+and `execute-image disabled-image-upgrade`. The independent
+`disabled-image-rollback` phase has its own instance, exact before-image, fresh
+review and approval. The first two commands are local-only; execution remains
+an explicit parent/operator action. See the operator guide for private input
+artifacts and the publication/deployment authority boundary.
+
+Image what-if retains the app `Modify` plus known preserved `Ignore` entries,
+without rewriting the full payload. A full 120-second preflight is followed by
+separately bounded final checks; one new absolute 120-second rollout deadline
+starts at durable intent. Approval expiry and five-minute proof freshness still
+apply, and each request is bounded by 15 seconds and its stage's remaining time.
+Independent preflight reads share a maximum of four in-flight commands. Queue
+time consumes the same 120-second deadline; failures stop queued work rather
+than retrying it. Historical and current resource reads are not omitted.
+
+After the candidate's actual publication, a new reconciliation proposal uses
+version 4 and binds the complete candidate by SHA-256. It verifies exactly the
+old and candidate manifests using the original publication/review unchanged.
+It requires a separate version-4 reconciliation review under the current policy
+source. Existing version-3 proposals, reviews, execution origins and receipts
+remain historical files; they are neither rewritten nor reinterpreted as
+two-image approval.
+
+Only the original digest plus one explicitly reviewed candidate/tag may exist.
+The two-image estimate is **USD 311.23 / 31 days**, below the reviewed USD 350
+project estimate; rejected-request, full security, environment and network
+reserves remain included. This is neither a hard billing cap nor publication
+permission. Fresh digest-count/cost approval is required before the one push.
+
+After a successful reviewed disabled-image change, preserve
+`disabled-image-record.json` unchanged. A later revision supplies it as
+`receiver-upgrade.json` and as its `window-predecessor.json`; it does not replace
+`receipts.publication` or `receipts["disabled-app"]`. Standard paired window
+approvals, durable UUID reservation, timeouts and terminal false/503 proof
+remain mandatory.
+
+## Durable queue overlay (local review candidate)
+
+`durable-queue.mjs` adds a **separate** queue topology/profile, not configuration
+v3 or replacement execution history. The existing direct profiles still expect
+204; only the version-2 `reviewed-durable-queue-receiver` expects durable
+admission 202. This does not prove Logs persistence or permit CLI activation.
+
+`preview-queue queue-storage <private-revision>` needs only the unchanged
+`config.json` and a closed `queue-namespace.json` containing an explicit
+8–16-character lowercase alphanumeric namespace. It makes no cloud calls.
+The resulting namespace, topology, cost and missing future image binding need
+exact review; the preview is not authority. `prepare-queue` also stays local.
+
+Three fixed effect phases are `queue-storage` (one new StorageV2 Standard_LRS
+account, default queue service and one queue), `queue-role`, then
+`queue-assignment`. No existing state storage/network/security resource is
+modified. `check-queue` and `execute-queue` are separate parent/operator actions,
+with published policy, current-source topology review, exact phase approval,
+fresh bounded what-if, original-history/current-role checks and one journaled
+120-second submission. Unknown submissions cannot be replayed.
+
+CREATE previews retain explicit uncertainty rather than filling ARM's missing
+properties. Only three empty account ACL arrays, account
+`properties.encryption.services`, and whole empty service/queue `properties`
+may be absent for their exact new resource types. Every returned field must
+match the fixed template; contradictions, other omissions, extra resources,
+errors, pagination and existing-resource modifications fail closed.
+
+`queue-storage-preview-uncertainty.json` lists each requested-but-not-predicted
+field and eight fixed actual-GET postconditions. Those conditions are generated
+in the phase, hashed into the preflight/approval baseline, and verified against
+literal GET values before a qualified receipt. In particular, omitted
+encryption predictions **do not prove encryption**: actual queue encryption
+must be enabled with `keyType: Account` and `keySource: Microsoft.Storage`.
+Actual ACL/CORS/metadata readback checks remain strict. A missing actual value
+blocks the receipt and later roles/receiver use. The raw what-if is unchanged.
+
+After actual separate publication, `prepare-image disabled-queue-upgrade`
+binds the failed prepared-identity window's terminal false/503 predecessor,
+all three qualified queue-phase records, and the exact third manifest. Only
+the image and `AZURE_QUEUE_URL` / `AZURE_QUEUE_RESOURCE_ID` may change; admission
+remains false. Both prior digests/tags and their archived 35-file profiles remain
+unchanged. Only the new profile has the 40-file source closure and typed
+source-bound queue SDK qualification. The queued build/source inputs also bind
+`licenses/external-service-licenses.json` and
+`licenses/external/nodable-entities-2.1.0/LICENSE.md`; neither is added to legacy
+archives or treated as a generic license waiver.
+
+The queued contract pins `messageEncoding: "base64-json-v1"`: canonical
+Base64 of the unchanged compact nine-field UTF-8 JSON record. Encoded queue
+message **and** decoded JSON are each capped at 1 KiB. Base64 is neither
+encryption nor an analytics field. No plaintext fallback/migration is supported;
+no plaintext queue was deployed. The new profile proof must include a measured
+encoded/decoded sample and the Base64 roundtrip, size-boundary, no-fallback and
+32-message entity-heavy XML fixture groups. Parser limits and batch32 stay
+unchanged. Prior plaintext local candidates cannot qualify by adding a marker.
+
+Version-5 reconciliation explicitly binds the receiver execution overlay and
+queue records, permitting current-profile observations and the additional
+qualified account inventory. Earlier version-3/4 proposals, two-image inventory
+and source hashes remain immutable. Third-image inventory requires all three
+manifests and empty referrers, never an unknown-resource exception.
+
+The reviewed design model is **USD 349.36772 → 349.37 / 31 days**, including the
+third image, USD 10 additional storage-security reserve, queue operations and
+retry reserve. Only USD 0.63 modeled headroom remains; this is **not a bill cap**.
+Paired verification still requires owned Logs rows and terminal false/503,
+plus an observed approximate queue drain; 202 or resettable counters alone
+cannot qualify it. See the operator guide for the exact review contracts.

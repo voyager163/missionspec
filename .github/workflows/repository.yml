@@ -1,0 +1,229 @@
+name: Repository checks
+
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repository-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DO_NOT_TRACK: "1"
+  MISSIONSPEC_TELEMETRY: "0"
+
+jobs:
+  repository-checks:
+    name: Repository checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24.21.0"
+      - name: Restore locked dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Check repository contracts
+        run: npm run check
+      - name: Restore isolated telemetry-service dependencies
+        run: npm --prefix services/telemetry-ingest ci --ignore-scripts --no-audit --no-fund
+      - name: Check isolated service provenance and retained notices
+        run: node scripts/check-licenses.mjs --scope service
+      - name: Check the local telemetry service without Azure credentials
+        run: npm --prefix services/telemetry-ingest test
+      - name: Check telemetry infrastructure policy without cloud access
+        run: node --test infrastructure/arm/telemetry/tests/*.test.mjs
+  windows-read-only:
+    name: Windows read-only compatibility
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24.21.0"
+      - name: Restore locked dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Check portable contracts and read-only CLI
+        run: npm run check:portable
+  windows-private-state:
+    name: Windows private-state qualification
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24.21.0"
+      - name: Restore locked dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build the candidate private-state adapters
+        run: npm run build
+      - name: Qualify actual Windows ACLs and storage boundaries
+        run: node --test --test-concurrency=1 tests/windows-private-state.test.mjs tests/windows-directory-durability.test.mjs tests/persistence-held-read-windows.test.mjs
+  windows-workflow:
+    name: Windows workflow (${{ matrix.scenario }})
+    needs: windows-file-races
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - scenario: source
+            pattern: 'real Windows setup, callback'
+          - scenario: recovery
+            pattern: 'real Windows file journals'
+          - scenario: pruning
+            pattern: '^real Windows evidence-pruning preparation recovery'
+          - scenario: pruning-delete
+            pattern: '^real Windows evidence-pruning partial-deletion recovery'
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24.21.0"
+      - name: Restore locked dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build the reviewed workflow integration
+        run: npm run build
+      - name: Qualify real Windows workflow and recovery APIs
+        run: node --test --test-concurrency=1 --test-name-pattern="${{ matrix.pattern }}" tests/windows-local-runtime.test.mjs
+  windows-file-races:
+    name: Windows held-handle race qualification
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24.21.0"
+      - name: Restore locked dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build the held-handle adapters
+        run: npm run build
+      - name: Exercise actual concurrent replacements and native recovery
+        run: node --test --test-concurrency=1 tests/windows-file-races.test.mjs
+  windows-writer-instance:
+    name: Windows writer-instance qualification
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24.21.0"
+      - name: Restore locked dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build the instance-bound writer adapters
+        run: npm run build
+      - name: Qualify actual OS process identities and conservative lock recovery
+        run: node --test --test-concurrency=1 tests/windows-writer-instance.test.mjs
+  windows-runtime-lifecycle:
+    name: Windows runtime lifecycle qualification
+    needs: windows-file-races
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24.21.0"
+      - name: Restore locked dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build the runtime lifecycle adapters
+        run: npm run build
+      - name: Qualify real Windows backup and state selection
+        run: node --test --test-concurrency=1 tests/windows-runtime-lifecycle.test.mjs
+  windows-cli-observability:
+    name: Windows CLI observability qualification
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24.21.0"
+      - name: Restore locked dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build the Windows CLI controls
+        run: npm run build
+      - name: Qualify actual private preferences and reviewed diagnostic pruning
+        run: node --test --test-concurrency=1 tests/windows-cli-observability.test.mjs
+  windows-execution:
+    name: Windows execution (${{ matrix.scenario }})
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - scenario: owned-process
+            command: node --test --test-concurrency=1 tests/windows-check-process.test.mjs
+          - scenario: console-challenge
+            command: node --test --test-concurrency=1 --test-name-pattern="^Windows ConPTY exact challenge, replay, JSON refusal and redirected OS handles$" tests/windows-console.test.mjs
+          - scenario: console-deadline
+            command: node --test --test-concurrency=1 --test-name-pattern="^Windows ConPTY deadlines and AbortSignal cannot issue late confirmation$" tests/windows-console.test.mjs
+          - scenario: console-authority
+            command: node --test --test-concurrency=1 --test-name-pattern="^Windows ConPTY real terminal receipts bind setup display, reopen and reviewed revocation$" tests/windows-console.test.mjs
+          - scenario: registered-checks-success
+            command: node --test --test-concurrency=1 --test-name-pattern="^Windows registered checks bind successful job output, source controls, reopen and revocation$" tests/windows-checks-integration.test.mjs
+          - scenario: registered-checks-timeout
+            command: node --test --test-concurrency=1 --test-name-pattern="^Windows registered checks enforce expiry and retain interrupted runs as outcome unknown$" tests/windows-checks-integration.test.mjs
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24.21.0"
+      - name: Restore locked dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build the Windows console and job adapters
+        run: npm run build
+      - name: Qualify the selected native Windows execution boundary
+        run: ${{ matrix.command }}

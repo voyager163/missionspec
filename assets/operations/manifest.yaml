@@ -1,0 +1,211 @@
+# Original MissionSpec source catalog; installation and host qualification are separate.
+schemaVersion: 1
+defaultInstall: true
+hosts: [copilot, codex, claude]
+rendering:
+  invocationPlaceholder: "{{invocation}}"
+operations:
+  discover:
+    body: discover.md
+    description: "Explore a problem, compare options, and surface uncertainties through read-only investigation; save findings only with explicit change-local capture scope."
+    category: primary
+    engineOwner: discovery
+    inputs:
+      required: [workspace, request]
+      optional: [change, context-observations, capture-scope]
+    outputs: [findings, questions, discovery-notes]
+    effects:
+      default: [workspace-read]
+      conditional: [change-create, discovery-write]
+    prerequisites: [workspace-boundary, authoritative-instructions, capture-runtime]
+    approvalRules: [capture-scope, explicit-change-creation, host-permissions]
+    stopRules: [missing-runtime-for-effects, ambiguous-selection, unauthorized-effect, material-question, capture-complete]
+    handoffs: [clarify, draft, draft-all]
+    telemetryClass: none
+  draft:
+    body: draft.md
+    description: "Draft one next ready artifact for a selected change, including a declared multi-file specs set; validate it and stop before implementation."
+    category: primary
+    engineOwner: specification
+    inputs:
+      required: [workspace, change, workflow-state]
+      optional: [artifact-selector, change-creation-scope]
+    outputs: [artifact-patch, validation-findings, readiness-report]
+    effects:
+      default: [workspace-read]
+      conditional: [change-create, artifact-write]
+    prerequisites: [workspace-boundary, authoritative-instructions, operation-runtime, pinned-workflow, current-dependencies]
+    approvalRules: [artifact-scope, explicit-change-creation, host-permissions]
+    stopRules: [missing-runtime-for-effects, ambiguous-selection, unauthorized-effect, material-question, invalid-dependencies, one-artifact-complete, drafts-current, before-implementation]
+    handoffs: [draft, draft-all, clarify, revise, analyze, implement]
+    telemetryClass: stateful-top-level
+  draft-all:
+    body: draft-all.md
+    description: "Prepare the remaining required drafts for a new or existing change using its pinned workflow; pause at blockers and stop before implementation."
+    category: primary
+    engineOwner: specification
+    inputs:
+      required: [workspace, change, workflow-state]
+      optional: [change-creation-scope]
+    outputs: [artifact-patch, validation-findings, readiness-report]
+    effects:
+      default: [workspace-read]
+      conditional: [change-create, artifact-write]
+    prerequisites: [workspace-boundary, authoritative-instructions, operation-runtime, pinned-workflow, current-dependencies]
+    approvalRules: [artifact-closure-scope, explicit-change-creation, host-permissions]
+    stopRules: [missing-runtime-for-effects, ambiguous-selection, unauthorized-effect, material-question, invalid-dependencies, review-gate, prerequisite-closure-complete, before-implementation]
+    handoffs: [draft, clarify, revise, analyze, implement]
+    telemetryClass: stateful-top-level
+  implement:
+    body: implement.md
+    description: "Implement explicitly authorized tasks with current revision-bound authority; Interactive is default and Auto requires a bounded grant and confirmed run limits."
+    category: primary
+    engineOwner: execution
+    inputs:
+      required: [workspace, change, approved-revisions, execution-grant, task-graph]
+      optional: [auto-request, run-reference]
+    outputs: [attempt-records, progress-report, blocker-report]
+    effects:
+      default: [workspace-read]
+      conditional: [source-write, project-check-execute, dependency-change, host-dispatch, execution-record]
+    prerequisites: [workspace-boundary, authoritative-instructions, operation-runtime, current-dependencies, current-execution-grant, qualified-host, durable-ledger]
+    approvalRules: [separate-implementation-request, revision-bound-grant, explicit-auto, per-run-limits, material-change-reapproval, host-permissions]
+    stopRules: [missing-runtime-for-effects, ambiguous-selection, unauthorized-effect, material-question, stale-revision, revoked-authority, run-limit, two-repairs, no-progress, unknown-outcome, ledger-failure, task-scope-complete]
+    handoffs: [verify, revise, clarify]
+    telemetryClass: stateful-top-level
+  verify:
+    body: verify.md
+    description: "Compare saved implementation against approved intent using authorized checks and source-bound evidence; report gaps without standalone repairs or acceptance."
+    category: primary
+    engineOwner: verification
+    inputs:
+      required: [workspace, change, approved-revisions, source-revision, check-plan]
+      optional: [verification-grant, evidence]
+    outputs: [check-observations, gap-report, proposed-repairs]
+    effects:
+      default: [workspace-read]
+      conditional: [project-check-execute, evidence-record]
+    prerequisites: [workspace-boundary, authoritative-instructions, operation-runtime, current-dependencies, source-binding, durable-ledger]
+    approvalRules: [verification-check-scope, evidence-scope, host-permissions]
+    stopRules: [missing-runtime-for-effects, ambiguous-selection, unauthorized-effect, stale-revision, unavailable-check, ledger-failure, report-complete, no-standalone-repair]
+    handoffs: [implement, revise, analyze, archive]
+    telemetryClass: stateful-top-level
+  archive:
+    body: archive.md
+    description: "Guide explicit acceptance, eligible spec promotion, and change closure; preserve the actual outcome without treating cancelled or incomplete work as success."
+    category: primary
+    engineOwner: specification
+    inputs:
+      required: [workspace, change, outcome-selection]
+      optional: [evidence, acceptance-record, sync-preview]
+    outputs: [acceptance-record, sync-result, closure-record]
+    effects:
+      default: [workspace-read]
+      conditional: [acceptance-record, baseline-write, closure-write]
+    prerequisites: [workspace-boundary, authoritative-instructions, operation-runtime, current-dependencies, durable-ledger, shared-sync-engine]
+    approvalRules: [explicit-acceptance, exact-sync-preview, explicit-outcome-closure, host-permissions]
+    stopRules: [missing-runtime-for-effects, ambiguous-selection, unauthorized-effect, stale-revision, acceptance-ineligible, sync-conflict, partial-effect, archive-collision, ledger-failure, closure-complete]
+    handoffs: [verify, sync, revise]
+    telemetryClass: stateful-top-level
+  revise:
+    body: revise.md
+    description: "Amend existing change documents through a reviewed scoped patch; report downstream staleness and invalidated authority without implementing code."
+    category: supporting
+    engineOwner: specification
+    inputs:
+      required: [workspace, change, existing-artifacts, amendment-scope]
+      optional: [gap-report]
+    outputs: [artifact-patch, impact-report, validation-findings]
+    effects:
+      default: [workspace-read]
+      conditional: [artifact-write, revision-invalidation]
+    prerequisites: [workspace-boundary, authoritative-instructions, operation-runtime, current-dependencies]
+    approvalRules: [reviewed-revision-patch, material-change-reapproval, host-permissions]
+    stopRules: [missing-runtime-for-effects, ambiguous-selection, unauthorized-effect, material-question, new-artifact-needed, stale-revision, patch-complete, before-implementation]
+    handoffs: [draft, clarify, analyze, implement, verify]
+    telemetryClass: stateful-top-level
+  clarify:
+    body: clarify.md
+    description: "Resolve consequential ambiguities in an existing change and capture only authorized answers; clarification never grants implementation approval."
+    category: supporting
+    engineOwner: discovery
+    inputs:
+      required: [workspace, change, existing-artifacts, ambiguity-scope]
+      optional: [answers, capture-scope]
+    outputs: [questions, answer-patch, unresolved-questions, impact-report]
+    effects:
+      default: [workspace-read]
+      conditional: [artifact-write, revision-invalidation]
+    prerequisites: [workspace-boundary, authoritative-instructions, capture-runtime, current-dependencies]
+    approvalRules: [answer-capture-scope, host-permissions]
+    stopRules: [missing-runtime-for-effects, ambiguous-selection, unauthorized-effect, question-bound, unanswered-question, stale-revision, capture-complete]
+    handoffs: [revise, draft, analyze]
+    telemetryClass: none
+  analyze:
+    body: analyze.md
+    description: "Review artifact consistency, coverage, and requirements quality without executing project code; report findings without fixes or automatic checklist approval."
+    category: supporting
+    engineOwner: planning
+    inputs:
+      required: [workspace, change, existing-artifacts]
+      optional: [project-principles, capture-scope]
+    outputs: [validation-findings, coverage-report, quality-findings]
+    effects:
+      default: [workspace-read]
+      conditional: [analysis-report-write]
+    prerequisites: [workspace-boundary, authoritative-instructions, capture-runtime, current-dependencies]
+    approvalRules: [report-capture-scope, host-permissions]
+    stopRules: [missing-runtime-for-effects, ambiguous-selection, unauthorized-effect, report-complete, no-project-execution]
+    handoffs: [clarify, revise, draft]
+    telemetryClass: none
+  principles:
+    body: principles.md
+    description: "Create or amend optional project-wide MissionSpec principles with explicit document scope and impact review; principles grant no runtime permissions."
+    category: supporting
+    engineOwner: specification
+    inputs:
+      required: [workspace, principle-scope]
+      optional: [project-principles, active-changes]
+    outputs: [principles-patch, impact-report]
+    effects:
+      default: [workspace-read]
+      conditional: [principles-write, revision-invalidation]
+    prerequisites: [workspace-boundary, authoritative-instructions, operation-runtime, current-dependencies]
+    approvalRules: [project-principles-scope, reviewed-revision-patch, host-permissions]
+    stopRules: [missing-runtime-for-effects, unauthorized-effect, material-question, stale-revision, patch-complete, no-runtime-grants]
+    handoffs: [analyze, revise, discover]
+    telemetryClass: stateful-top-level
+  sync:
+    body: sync.md
+    description: "Promote eligible accepted deltas through the shared freshness, confirmation, and conflict checks; update baseline specs while leaving the change open."
+    category: supporting
+    engineOwner: specification
+    inputs:
+      required: [workspace, change, baseline-revisions, accepted-deltas, acceptance-record]
+      optional: [evidence, sync-preview]
+    outputs: [sync-preview, sync-result]
+    effects:
+      default: [workspace-read]
+      conditional: [baseline-write]
+    prerequisites: [workspace-boundary, authoritative-instructions, operation-runtime, current-dependencies, durable-ledger, shared-sync-engine]
+    approvalRules: [current-acceptance, exact-sync-preview, host-permissions]
+    stopRules: [missing-runtime-for-effects, ambiguous-selection, unauthorized-effect, stale-revision, acceptance-ineligible, sync-conflict, partial-effect, ledger-failure, sync-complete-leave-open]
+    handoffs: [verify, revise, archive]
+    telemetryClass: stateful-top-level
+  onboard:
+    body: onboard.md
+    description: "Explain MissionSpec and guide a selected walkthrough from current readiness; keep every state-changing action separately authorized and never auto-initialize."
+    category: supporting
+    engineOwner: integration
+    inputs:
+      required: [workspace, host-readiness]
+      optional: [walkthrough-selection]
+    outputs: [readiness-report, guidance]
+    effects:
+      default: [workspace-read]
+      conditional: []
+    prerequisites: [workspace-boundary, authoritative-instructions]
+    approvalRules: [each-action-separately, host-permissions]
+    stopRules: [missing-runtime-for-effects, unauthorized-effect, explanation-complete, selected-step-boundary]
+    handoffs: [discover, draft, draft-all, implement, verify, archive, revise, clarify, analyze, principles, sync]
+    telemetryClass: none
