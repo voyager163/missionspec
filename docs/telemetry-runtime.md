@@ -82,6 +82,10 @@ wrong lengths/hashes, missing/surplus source components, corrupt cache entries
 and symlink/private snapshot inputs fail closed. The archive uses fixed ordering,
 timestamps, ownership and encoding; it does not record host paths or operator
 environment data.
+Cached artifacts and snapshot sources are read through bounded, no-follow
+descriptors. Opened-file metadata and retained parent-directory observations
+must still match the current paths after reading; replacement or growth rejects
+the snapshot rather than hashing unverified replacement bytes.
 
 The lock's candidate image identity records the original runtime-inventory
 capture, not the final source-bearing image's self-referential digest. Each final

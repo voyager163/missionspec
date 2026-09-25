@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { execFile, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { chmod, link, lstat, mkdir, readFile, readdir, rm, symlink, utimes, writeFile } from 'node:fs/promises';
+import fs from 'node:fs';
+import { chmod, link, lstat, mkdir, open, readFile, readdir, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { promisify } from 'node:util';
@@ -12,6 +13,7 @@ import { createUserTelemetryPreferenceStore } from '../dist/adapters/telemetry/p
 import { digestContent } from '../dist/kernel/revisions.js';
 import { checkCliProcess, cliControlDiagnostic, cliProcessDiagnostic, networkGuardSpecifier, parseCliEnvelope } from './fixtures/cli-observability-process.mjs';
 import { observabilityFixtureSnapshot, powerShellStartupCache } from './fixtures/cli-observability-files.mjs';
+import { fixtureFileSnapshot, fixtureInventory, fixtureTreeSnapshot } from './fixtures/filesystem-snapshot.mjs';
 
 const exec = promisify(execFile);
 const moduleUrl = new URL('../dist/cli/observability.js', import.meta.url).href;
@@ -92,6 +94,123 @@ test('CLI startup diagnostics precede envelope parsing and console assertions wi
   assert.doesNotMatch(failure, new RegExp(sentinel, 'u'));
 });
 
+test('fixture snapshots bind bounded bytes to a fresh descriptor, including deliberately insecure files', async (t) => {
+  const f = await fixture(t);
+  const filename = path.join(f.root, 'record');
+  const content = Buffer.alloc(131_073, 97);
+  await writeFile(filename, content, { mode: 0o600 });
+  await chmod(filename, 0o644);
+  await link(filename, path.join(f.root, 'second-link'));
+  const originalRead = fs.readSync;
+  const read = t.mock.method(fs, 'readSync', (...args) => {
+    assert.ok(args[3] <= 65_536);
+    return originalRead(...args);
+  });
+  const before = fixtureFileSnapshot(filename, { maxBytes: content.length });
+  assert.deepEqual(before.bytes, content);
+  assert.equal(before.stat.nlink, 2n);
+  if (posix) assert.equal(before.stat.mode & 0o777n, 0o644n);
+  assert.equal(read.mock.callCount(), 3);
+  assert.throws(() => fixtureFileSnapshot(filename, { maxBytes: content.length - 1 }), /type or size/u);
+  assert.equal(read.mock.callCount(), 3, 'the opened size is bounded before any byte read');
+  assert.throws(() => fs.fstatSync(read.mock.calls[0].arguments[0]), { code: 'EBADF' });
+  const inventory = fixtureInventory(f.root, (bytes) => bytes.toString('base64'));
+  assert.equal(inventory[0][5], content.toString('base64'));
+  assert.equal(inventory[0][6], before.stat.mode);
+  assert.equal(inventory[0][7], before.stat.dev);
+  assert.equal(inventory[0][8], 2n);
+  await writeFile(filename, 'changed fixture bytes');
+  assert.equal(fixtureFileSnapshot(filename).bytes.toString('utf8'), 'changed fixture bytes');
+  assert.notDeepEqual(fixtureInventory(f.root, (bytes) => bytes.toString('base64')), inventory);
+});
+
+test('fixture snapshots reject a replacement between inspection and open before reading any bytes', async (t) => {
+  const f = await fixture(t);
+  const filename = path.join(f.root, 'record');
+  const replacement = path.join(f.root, 'replacement');
+  await writeFile(filename, 'retained bytes');
+  await writeFile(replacement, 'unreviewed bytes');
+  const originalOpen = fs.openSync;
+  let descriptor;
+  t.mock.method(fs, 'openSync', (...args) => {
+    fs.renameSync(filename, `${filename}.saved`);
+    fs.renameSync(replacement, filename);
+    descriptor = originalOpen(...args);
+    return descriptor;
+  });
+  const read = t.mock.method(fs, 'readSync', () => { throw new Error('No byte read is permitted'); });
+  assert.throws(() => fixtureTreeSnapshot(filename), /changed during snapshot/u);
+  assert.equal(read.mock.callCount(), 0);
+  assert.throws(() => fs.fstatSync(descriptor), { code: 'EBADF' });
+});
+
+test('fixture snapshots reject same-byte pathname replacement, held-file mutation and directory changes', options, async (t) => {
+  for (const mutation of ['replacement', 'content', 'short-read', 'mode', 'links']) {
+    await t.test(mutation, async (t) => {
+      const f = await fixture(t);
+      const filename = path.join(f.root, 'record');
+      const replacement = path.join(f.root, 'replacement');
+      await writeFile(filename, 'retained bytes', { mode: 0o600 });
+      await writeFile(replacement, 'retained bytes', { mode: 0o600 });
+      const originalRead = fs.readSync;
+      let descriptor;
+      let changed = false;
+      t.mock.method(fs, 'readSync', (...args) => {
+        descriptor = args[0];
+        const count = originalRead(...args);
+        if (!changed) {
+          changed = true;
+          if (mutation === 'replacement') {
+            fs.renameSync(filename, `${filename}.saved`);
+            fs.renameSync(replacement, filename);
+          } else if (mutation === 'content') {
+            fs.writeFileSync(filename, 'different data');
+          } else if (mutation === 'mode') {
+            fs.chmodSync(filename, 0o644);
+          } else if (mutation === 'links') {
+            fs.linkSync(filename, `${filename}.linked`);
+          }
+        }
+        return mutation === 'short-read' ? 0 : count;
+      });
+      assert.throws(() => fixtureFileSnapshot(filename), /changed during snapshot/u);
+      assert.throws(() => fs.fstatSync(descriptor), { code: 'EBADF' });
+    });
+  }
+  const f = await fixture(t);
+  const originalReadDirectory = fs.readdirSync;
+  let changed = false;
+  t.mock.method(fs, 'readdirSync', (...args) => {
+    const names = originalReadDirectory(...args);
+    if (!changed) {
+      changed = true;
+      fs.writeFileSync(path.join(f.root, 'new-child'), 'retained child');
+    }
+    return names;
+  });
+  assert.throws(() => fixtureTreeSnapshot(f.root), /changed during snapshot/u);
+});
+
+test('fixture snapshots record symlink text without reading even an escaping or dangling target', options, async (t) => {
+  const f = await fixture(t);
+  const target = path.join(f.root, 'known-owned-target');
+  const directory = path.join(f.root, 'tree');
+  await mkdir(directory);
+  await writeFile(target, 'retained target bytes');
+  const alias = path.join(directory, 'alias');
+  const dangling = path.join(directory, 'dangling');
+  await symlink(target, alias);
+  await symlink('../../unowned-target', dangling);
+  const read = t.mock.method(fs, 'readSync', () => { throw new Error('Symlink targets must not be read'); });
+  const tree = fixtureTreeSnapshot(directory);
+  assert.equal(tree.entries.alias.link, target);
+  assert.equal(tree.entries.dangling.link, '../../unowned-target');
+  assert.equal(tree.entries.alias.stat.isSymbolicLink(), true);
+  assert.equal(tree.entries.alias.bytes, undefined);
+  assert.throws(() => fixtureFileSnapshot(alias));
+  assert.equal(read.mock.callCount(), 0);
+});
+
 test('isolated profile snapshots exempt only the exact bounded OS cache, never user files or other metadata', async (t) => {
   const f = await fixture(t);
   const profile = path.join(f.root, 'os-profile');
@@ -115,7 +234,10 @@ test('isolated profile snapshots exempt only the exact bounded OS cache, never u
   await writeFile(path.join(path.dirname(cache), 'unexpected-state'), 'must be detected');
   assert.notDeepEqual(snapshot(), withMode);
   await writeFile(cache, Buffer.alloc(65));
+  const read = t.mock.method(fs, 'readSync', () => { throw new Error('The invalid cache must not be read'); });
   assert.throws(snapshot, /Unexpected PowerShell startup-cache type, links or size/u);
+  assert.equal(read.mock.callCount(), 0);
+  read.mock.restore();
   await rm(cache);
   await link(foreign, cache);
   assert.throws(snapshot, /Unexpected PowerShell startup-cache type, links or size/u);
@@ -151,7 +273,21 @@ test('profile inventory retains the empty Windows Caches directory and detects a
   assert.deepEqual(Object.keys(observabilityFixtureSnapshot(caches).entries), ['unexpected-state']);
   await rm(path.join(caches, 'unexpected-state'));
   const beforeTimestamp = snapshot();
-  await utimes(caches, new Date('2020-01-01T00:00:00Z'), new Date('2020-01-01T00:00:00Z'));
+  const changedTime = new Date('2020-01-01T00:00:00Z');
+  if (process.platform === 'win32') {
+    // Intentional controlled mutation: Node cannot portably futimes a Windows
+    // directory descriptor. Keep the real mtime sensitivity check on that host.
+    await utimes(caches, changedTime, changedTime);
+  } else {
+    const directory = await open(caches, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+    try {
+      const held = await directory.stat({ bigint: true });
+      assert.equal(held.isDirectory(), true);
+      assert.equal(held.dev, info.dev);
+      assert.equal(held.ino, info.ino);
+      await directory.utimes(changedTime, changedTime);
+    } finally { await directory.close(); }
+  }
   assert.notDeepEqual(snapshot(), beforeTimestamp);
   const beforeType = snapshot();
   await rm(caches, { recursive: true });
@@ -195,15 +331,18 @@ async function fixture(t, extraEnv = {}) {
 }
 
 async function tree(root) {
-  const entries = await readdir(root, { withFileTypes: true });
-  const result = {};
-  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-    const full = path.join(root, entry.name);
-    const info = await lstat(full);
-    result[entry.name] = entry.isDirectory() ? await tree(full) :
-      { content: (await readFile(full)).toString('base64'), mtime: info.mtimeMs, mode: info.mode };
+  function entries(snapshot) {
+    return Object.fromEntries(Object.entries(snapshot.entries).map(([name, entry]) => {
+      const info = entry.stat;
+      return [name, {
+        mtime: Number(info.mtimeNs) / 1_000_000, mode: Number(info.mode),
+        device: String(info.dev), inode: String(info.ino), links: String(info.nlink),
+        ...(entry.entries !== undefined ? { entries: entries(entry) } :
+          entry.link !== undefined ? { link: entry.link } : { content: entry.bytes.toString('base64') }),
+      }];
+    }));
   }
-  return result;
+  return entries(fixtureTreeSnapshot(root));
 }
 
 async function log(f) {

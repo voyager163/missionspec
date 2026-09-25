@@ -1,12 +1,13 @@
 // TEST ONLY namespace ordering driver: no workflow, approval, host or lock-recovery capability.
 import {
-  closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, openSync, readFileSync,
+  closeSync, constants, existsSync, fsyncSync, lstatSync, openSync, readFileSync,
   renameSync, unlinkSync, writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
 import { syncWindowsPrivateDirectory, windowsPrivateEntries, WindowsDirectoryDurabilityError } from '../../dist/adapters/platform/windows-private-state.js';
 import { observeWorkspaceRoot } from '../../dist/adapters/filesystem/local-workspace.js';
 import { digestContent, parseWorkspaceBinding, sameWorkspaceBinding } from '../../dist/kernel/revisions.js';
+import { fixtureFileSnapshot, FixtureSnapshotChangedError } from './filesystem-snapshot.mjs';
 
 export const beforeSource = 'original source; namespace fixture only\n';
 export const afterSource = 'reviewed replacement; namespace fixture only\n';
@@ -38,17 +39,12 @@ function readOwned(filename, optional = false) {
     throw new ProtocolBlocked('unsafe-file');
   }
   windowsPrivateEntries([{ path: filename, directory: false, writable: true }]);
-  const descriptor = openSync(filename, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
-    const opened = fstatSync(descriptor, { bigint: true });
-    const content = readFileSync(descriptor, 'utf8');
-    const after = fstatSync(descriptor, { bigint: true });
-    const current = lstatSync(filename, { bigint: true });
-    if (entry.dev !== opened.dev || entry.ino !== opened.ino || current.dev !== entry.dev || current.ino !== entry.ino ||
-        opened.size !== after.size || opened.mtimeNs !== after.mtimeNs || opened.ctimeNs !== after.ctimeNs ||
-        after.mtimeNs !== current.mtimeNs || after.ctimeNs !== current.ctimeNs) throw new ProtocolBlocked('stale-file');
-    return content;
-  } finally { closeSync(descriptor); }
+    return fixtureFileSnapshot(filename, { maxBytes: 100_000, expected: entry }).bytes.toString('utf8');
+  } catch (error) {
+    if (error instanceof FixtureSnapshotChangedError) throw new ProtocolBlocked('stale-file');
+    throw error;
+  }
 }
 
 export async function runDirectoryProtocol(input) {

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { createReadStream, createWriteStream } from 'node:fs';
-import * as fs from 'node:fs/promises';
+import { constants, createReadStream, createWriteStream } from 'node:fs';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Readable, Transform } from 'node:stream';
@@ -185,12 +185,75 @@ export function validateLock(lock) {
   return { artifacts, files };
 }
 
+function sameObservation(before, after) {
+  return ['dev', 'ino', 'mode', 'uid', 'gid', 'nlink', 'size', 'mtimeNs', 'ctimeNs']
+    .every(key => before[key] === after[key]);
+}
+async function heldRegularFile(root, relative, maximum, consume) {
+  safePath(relative);
+  check(Number.isSafeInteger(maximum) && maximum > 0 && maximum <= MAX_ARTIFACT, 'Invalid held-file bound');
+  check(constants.O_NOFOLLOW && constants.O_NONBLOCK && constants.O_DIRECTORY, 'Source assembly requires qualified no-follow file opens');
+  const canonical = await fs.realpath(root), parents = [];
+  let handle;
+  const verifyParents = async () => {
+    for (const parent of parents) {
+      const current = await fs.lstat(parent.path, { bigint: true });
+      check(current.isDirectory() && !current.isSymbolicLink() && sameObservation(parent.info, current) &&
+        sameObservation(parent.info, await parent.handle.stat({ bigint: true })), 'Source parent changed while being read');
+    }
+  };
+  try {
+    let directory = canonical;
+    for (const part of ['', ...relative.split('/').slice(0, -1)]) {
+      if (part) directory = path.join(directory, part);
+      const parent = await fs.open(directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      const entry = { path: directory, handle: parent, info: undefined };
+      parents.push(entry);
+      const info = await parent.stat({ bigint: true });
+      entry.info = info;
+      check(info.isDirectory(), 'Unsafe source parent');
+    }
+    const file = path.join(canonical, relative);
+    try { handle = await fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
+    catch (error) {
+      if (error.code === 'ELOOP') fail(`File type/length mismatch: ${path.basename(file)}`);
+      throw error;
+    }
+    const before = await handle.stat({ bigint: true });
+    check(before.isFile() && before.nlink === 1n && before.size >= 0n && before.size <= BigInt(maximum),
+      `File type/length mismatch: ${path.basename(file)}`);
+    await verifyParents();
+    check(sameObservation(before, await fs.lstat(file, { bigint: true })), 'Source pathname changed before reading');
+    const value = await consume(handle, before);
+    const after = await handle.stat({ bigint: true }), current = await fs.lstat(file, { bigint: true });
+    check(sameObservation(before, after) && sameObservation(before, current), 'Source file changed while being read');
+    await verifyParents();
+    return value;
+  } finally {
+    const closed = await Promise.allSettled([handle, ...parents.reverse().map(parent => parent.handle)]
+      .filter(Boolean).map(file => file.close()));
+    const failure = closed.find(result => result.status === 'rejected');
+    if (failure) throw failure.reason;
+  }
+}
+async function consumeBounded(handle, maximum, consume) {
+  let size = 0;
+  const buffer = Buffer.alloc(Math.min(65536, maximum + 1));
+  for (;;) {
+    const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, maximum + 1 - size), size);
+    if (!bytesRead) return size;
+    size += bytesRead;
+    check(size <= maximum, 'File grew beyond its bounded reader');
+    consume(buffer.subarray(0, bytesRead));
+  }
+}
 export async function verifyFile(file, expected) {
-  const stat = await fs.lstat(file);
-  check(stat.isFile() && !stat.isSymbolicLink() && stat.size === expected.size, `File type/length mismatch: ${path.basename(file)}`);
-  const h = createHash('sha256');
-  for await (const chunk of createReadStream(file)) h.update(chunk);
-  check(h.digest('hex') === expected.sha256, `SHA256 mismatch: ${path.basename(file)}`);
+  return heldRegularFile(path.dirname(file), path.basename(file), expected.size, async (handle, before) => {
+    check(before.size === BigInt(expected.size), `File type/length mismatch: ${path.basename(file)}`);
+    const h = createHash('sha256');
+    const size = await consumeBounded(handle, expected.size, bytes => h.update(bytes));
+    check(size === expected.size && h.digest('hex') === expected.sha256, `SHA256 mismatch: ${path.basename(file)}`);
+  });
 }
 
 export async function acquireArtifact(artifact, cache, download = false, request = fetch) {
@@ -348,13 +411,13 @@ const SNAPSHOT_FILES = [
 const SNAPSHOT_TREES = ['src', 'schema', 'tests'].map(name => `services/telemetry-ingest/${name}`);
 
 async function regularFile(root, relative) {
-  const file = path.join(root, relative);
-  const real = await fs.realpath(file), rootReal = await fs.realpath(root);
-  check(real === path.join(rootReal, relative), 'Snapshot file escapes project root or uses a symlink');
-  const stat = await fs.lstat(file);
-  check(stat.isFile() && !stat.isSymbolicLink() && stat.size <= 4 * 1024 * 1024, 'Unsafe source snapshot file');
-  const bytes = await fs.readFile(file);
-  return { path: `service/${relative}`, bytes, size: bytes.length, sha256: sha256(bytes) };
+  return heldRegularFile(root, relative, 4 * 1024 * 1024, async (handle, before) => {
+    const chunks = [];
+    const size = await consumeBounded(handle, 4 * 1024 * 1024, bytes => chunks.push(Buffer.from(bytes)));
+    check(BigInt(size) === before.size, 'Source snapshot size changed');
+    const bytes = Buffer.concat(chunks, size);
+    return { path: `service/${relative}`, bytes, size, sha256: sha256(bytes) };
+  });
 }
 export async function serviceSnapshot(root) {
   const result = [];

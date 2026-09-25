@@ -17,6 +17,7 @@ import { parseWindowsWriterLock, requireWindowsProcessAbsent, windowsPrivateEntr
 import { digestContent } from '../dist/kernel/revisions.js';
 import { createPrivateFixtureRoot, removeFixtureRoot, privateEntry } from './fixtures/windows-private-state.mjs';
 import { windowsFileSecurity } from './fixtures/windows-file-security.mjs';
+import { fixtureInventory } from './fixtures/filesystem-snapshot.mjs';
 
 const windows = { skip: process.platform !== 'win32', timeout: 720_000 };
 const ok = (result) => { assert.equal(result.status, 'ok', JSON.stringify(result)); return result.value; };
@@ -24,12 +25,7 @@ const issued = (result) => { const value = ok(result); assert.equal(value.state,
 const childFile = fileURLToPath(new URL('./fixtures/windows-application-interruption.mjs', import.meta.url));
 
 function inventory(root) {
-  return readdirSync(root).sort().map((name) => {
-    const filename = path.join(root, name);
-    const stat = lstatSync(filename, { bigint: true });
-    return [name, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs,
-      stat.isDirectory() ? inventory(filename) : digestContent(readFileSync(filename))];
-  });
+  return fixtureInventory(root, digestContent);
 }
 
 function writeExisting(filename, value) {

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
@@ -15,6 +15,7 @@ import { digestContent } from '../dist/kernel/revisions.js';
 import { planRuntimeMigration } from '../dist/application/runtime-migrations.js';
 import { inspectRuntimeReplica } from '../dist/adapters/persistence/sqlite-runtime-store.js';
 import { WindowsPrivateStateError, windowsFailureDiagnostic } from '../dist/adapters/platform/windows-private-state.js';
+import { fixtureFileSnapshot, fixtureInventory, fixtureTreeSnapshot } from './fixtures/filesystem-snapshot.mjs';
 
 const ok = (result) => { assert.equal(result.status, 'ok', JSON.stringify(result)); return result.value; };
 const posix = { skip: process.platform === 'win32' };
@@ -45,12 +46,8 @@ function authorityFixture() {
 }
 
 function inventory(root) {
-  return readdirSync(root).sort().map((name) => {
-    const filename = path.join(root, name);
-    const stat = lstatSync(filename, { bigint: true });
-    return [name, stat.ino, stat.size, stat.mode, stat.mtimeNs, stat.ctimeNs,
-      stat.isDirectory() ? inventory(filename) : digestContent(readFileSync(filename))];
-  });
+  return fixtureInventory(root, digestContent, (name, stat, contents) =>
+    [name, stat.ino, stat.size, stat.mode, stat.mtimeNs, stat.ctimeNs, contents, stat.dev, stat.nlink]);
 }
 async function fixture(t) {
   const root = path.join(process.cwd(), `.runtime-lifecycle-test-${randomUUID()}`);
@@ -577,14 +574,15 @@ async function interruptedSelectorStage(f) {
 test('real POSIX exit after selector stage fsync resumes that exact inode rather than recreating it', posix, async (t) => {
   const f = await fixture(t);
   const interrupted = await interruptedSelectorStage(f);
-  const retained = lstatSync(interrupted.stageFile, { bigint: true });
-  const bytes = readFileSync(interrupted.stageFile);
+  const { stat: retained, bytes } = fixtureFileSnapshot(interrupted.stageFile);
   const originalLedger = readFileSync(path.join(f.directory, 'ledger.sqlite'));
   const plan = await f.service.previewActivationRecovery(interrupted.id, interrupted.transaction);
   await f.service.recoverActivation(interrupted.id, interrupted.transaction, f.authority.issue(plan.request));
   const filename = path.join(f.root, '.missionspec/runtime-selection.json');
-  assert.equal(lstatSync(filename, { bigint: true }).ino, retained.ino);
-  assert.deepEqual(readFileSync(filename), bytes);
+  const published = fixtureFileSnapshot(filename);
+  assert.equal(published.stat.dev, retained.dev);
+  assert.equal(published.stat.ino, retained.ino);
+  assert.deepEqual(published.bytes, bytes);
   assert.equal(existsSync(interrupted.stageFile), false);
   assert.deepEqual(await f.app.files.pending(), []);
   assert.equal((await f.service.status()).selection, 'external');
@@ -599,22 +597,33 @@ test('POSIX recovery preserves mismatched, insecure and linked retained stages o
       if (change === 'content') writeFileSync(interrupted.stageFile, 'user replacement bytes');
       if (change === 'mode') chmodSync(interrupted.stageFile, 0o400);
       if (change === 'hard-link') linkSync(interrupted.stageFile, path.join(f.root, 'other-link'));
+      const other = path.join(f.root, 'other-file');
       if (change === 'symlink') {
-        const bytes = readFileSync(interrupted.stageFile);
+        const { bytes } = fixtureFileSnapshot(interrupted.stageFile);
         unlinkSync(interrupted.stageFile);
-        const other = path.join(f.root, 'other-file');
         writeFileSync(other, bytes, { mode: 0o600 });
         symlinkSync(other, interrupted.stageFile);
       }
-      const stat = lstatSync(interrupted.stageFile, { bigint: true });
-      const bytes = readFileSync(interrupted.stageFile);
+      const retained = fixtureTreeSnapshot(interrupted.stageFile);
+      // This is the explicit target created above, never a path obtained by
+      // following an arbitrary link in the stage slot.
+      const target = change === 'symlink' ? fixtureFileSnapshot(other) : undefined;
+      if (target !== undefined) assert.equal(retained.link, other);
       const plan = await f.service.previewActivationRecovery(interrupted.id, interrupted.transaction);
       for (let attempt = 0; attempt < 2; attempt += 1) {
         await assert.rejects(f.service.recoverActivation(interrupted.id, interrupted.transaction, f.authority.issue(plan.request)));
-        const current = lstatSync(interrupted.stageFile, { bigint: true });
-        assert.equal(current.ino, stat.ino);
-        assert.equal(current.mode, stat.mode);
-        assert.deepEqual(readFileSync(interrupted.stageFile), bytes);
+        const current = fixtureTreeSnapshot(interrupted.stageFile);
+        for (const field of ['dev', 'ino', 'mode', 'nlink', 'size', 'mtimeNs', 'ctimeNs']) {
+          assert.equal(current.stat[field], retained.stat[field], field);
+        }
+        assert.equal(current.link, retained.link);
+        assert.deepEqual(current.bytes, retained.bytes);
+        if (target !== undefined) {
+          const currentTarget = fixtureFileSnapshot(other);
+          assert.equal(currentTarget.stat.dev, target.stat.dev);
+          assert.equal(currentTarget.stat.ino, target.stat.ino);
+          assert.deepEqual(currentTarget.bytes, target.bytes);
+        }
         assert.deepEqual(await f.app.files.pending(), [interrupted.transaction]);
         assert.equal(existsSync(path.join(f.root, '.missionspec/runtime-selection.json')), false);
       }

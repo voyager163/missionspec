@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
+import mutableFs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import test from 'node:test';
 import {
   acquireArtifact, assemble, inspectTarGzip, packageFromStatus, safePath,
-  validateLock, validateUrl, verifyDsc, verifyFile, verifyUpstream, writeArchive,
+  serviceSnapshot, validateLock, validateUrl, verifyDsc, verifyFile, verifyUpstream, writeArchive,
 } from '../scripts/runtime-sources.mjs';
 
 const service = fileURLToPath(new URL('../', import.meta.url));
@@ -260,4 +261,73 @@ test('source snapshots fail closed on missing build scripts and private/symlink 
   await fs.rm(path.join(f.projectRoot, 'services/telemetry-ingest/Dockerfile'));
   await assert.rejects(assemble(f), /ENOENT/);
   await assert.rejects(fs.stat(f.output), /ENOENT/);
+});
+
+test('source snapshots bind the opened file and parent identities before admitting bytes', async t => {
+  for (const race of ['symlink-before-open', 'parent-before-open', 'replacement-during-read', 'growth-during-read']) {
+    await t.test(race, async t => {
+      const f = await fixture(await scratch(t));
+      const file = path.join(f.projectRoot, 'LICENSE');
+      const originalOpen = mutableFs.open;
+      let armed = true;
+      t.mock.method(mutableFs, 'open', async function (filename, ...args) {
+        if (filename !== file || !armed) return originalOpen.call(this, filename, ...args);
+        armed = false;
+        if (race === 'symlink-before-open') {
+          const outside = path.join(f.cache, 'unexpected');
+          await fs.writeFile(outside, 'must not be included');
+          await fs.unlink(file);
+          await fs.symlink(outside, file);
+        }
+        if (race === 'parent-before-open') {
+          await fs.rename(f.projectRoot, `${f.projectRoot}.retained`);
+          await fs.mkdir(f.projectRoot);
+          await fs.writeFile(file, 'replacement parent bytes');
+        }
+        const handle = await originalOpen.call(this, filename, ...args);
+        if (race.endsWith('during-read')) {
+          const read = handle.read.bind(handle);
+          let first = true;
+          handle.read = async (...input) => {
+            if (first) {
+              first = false;
+              if (race === 'replacement-during-read') {
+                await fs.rename(file, `${file}.retained`);
+                await fs.writeFile(file, 'replacement pathname bytes');
+              } else await fs.writeFile(file, Buffer.alloc(4 * 1024 * 1024 + 1, 65));
+            }
+            return read(...input);
+          };
+        }
+        return handle;
+      });
+      await assert.rejects(serviceSnapshot(f.projectRoot),
+        /type\/length|parent changed|pathname changed|file changed|bounded reader/);
+      assert.equal(armed, false);
+    });
+  }
+});
+
+test('cached source artifacts cannot pass after pathname replacement during a held read', async t => {
+  const root = await scratch(t), filename = path.join(root, 'artifact.tar.gz');
+  const bytes = Buffer.from('reviewed source artifact');
+  await fs.writeFile(filename, bytes);
+  const originalOpen = mutableFs.open;
+  let replaced = false;
+  t.mock.method(mutableFs, 'open', async function (file, ...args) {
+    const handle = await originalOpen.call(this, file, ...args);
+    if (file !== filename) return handle;
+    const read = handle.read.bind(handle);
+    handle.read = async (...input) => {
+      if (!replaced) {
+        replaced = true;
+        await fs.rename(filename, `${filename}.retained`);
+        await fs.writeFile(filename, bytes);
+      }
+      return read(...input);
+    };
+    return handle;
+  });
+  await assert.rejects(verifyFile(filename, { size: bytes.length, sha256: hash(bytes) }), /file changed|parent changed/);
+  assert.equal(replaced, true);
 });

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
-import { chmod, mkdir, open, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { chmod, lstat, mkdir, open, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { execFileSync, spawn } from 'node:child_process';
@@ -23,6 +24,7 @@ import {
 } from '../dist/adapters/logging/diagnostics.js';
 import { createAuthorizedJsonlSink, MAX_LOG_BYTES } from '../dist/adapters/logging/jsonl.js';
 import { createObservabilityLifecycle } from '../dist/composition/observability.js';
+import { fixtureFileSnapshot } from './fixtures/filesystem-snapshot.mjs';
 
 const secret = 'SENSITIVE-path-prompt-token-stack-DO-NOT-LOG';
 const scratch = resolve('src/observability', `.local-tests-${process.pid}`);
@@ -489,9 +491,9 @@ test('persistent controls disable, re-enable and update disclosure as atomic pat
   assert.throws(() => parsePreference({ disclosureVersion: null }));
   assert.equal((await store.save({})).reason, 'invalid');
   assert.equal((await store.save({ disclosureVersion: 999 })).reason, 'invalid');
-  const before = await readFile(path);
+  const { bytes: before } = fixtureFileSnapshot(path, { maxBytes: MAX_PREFERENCE_STORE_BYTES });
   assert.equal((await store.save({ preference: secret })).reason, 'invalid');
-  assert.deepEqual(await readFile(path), before);
+  assert.deepEqual(fixtureFileSnapshot(path, { maxBytes: MAX_PREFERENCE_STORE_BYTES }).bytes, before);
 });
 
 test('concurrent initialization and symlinks fail explicitly rather than replacing an existing authority', async () => {
@@ -785,24 +787,47 @@ test('authorized JSONL appends private bounded records, serializes writers and p
   const logger = createDiagnostics({ clock, stderr: { async write(line) { lines.push(line); } }, localLog: sink });
   const results = await Promise.all(Array.from({ length: 8 }, () => logger.emit(diagnostic, 'authorized-local-log')));
   assert.ok(results.every((result) => result.state === 'emitted' && result.destination === 'local-log'));
-  const before = await readFile(path, 'utf8');
+  const original = fixtureFileSnapshot(path, { maxBytes: MAX_LOG_BYTES });
+  const before = original.bytes.toString('utf8');
   assert.equal(before.trim().split('\n').length, 8);
-  assert.equal((await stat(path)).mode & 0o077, 0);
+  assert.equal(original.stat.mode & 0o077n, 0n);
   assert.equal(lines.length, 0);
   await assert.rejects(sink.write(`{"raw":"${secret}"}\n`), /persistence unavailable/);
-  assert.equal(await readFile(path, 'utf8'), before);
+  assert.equal(fixtureFileSnapshot(path, { maxBytes: MAX_LOG_BYTES }).bytes.toString('utf8'), before);
   await writeFile(`${path}.lock`, '');
   assert.deepEqual(await logger.emit(diagnostic, 'authorized-local-log'), { state: 'unavailable', consoleFallback: 'emitted' });
   await rm(`${path}.lock`);
   const record = serializeDiagnosticEvent(diagnostic, clock.wallTime());
   const full = record.repeat(Math.floor(MAX_LOG_BYTES / Buffer.byteLength(record)));
-  await writeFile(path, full, { mode: 0o600 });
+  const fill = await open(path, constants.O_WRONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const held = await fill.stat({ bigint: true });
+    const current = await lstat(path, { bigint: true });
+    assert.equal(held.isFile(), true);
+    assert.equal(held.uid, BigInt(process.getuid()));
+    assert.equal(held.mode & 0o777n, 0o600n);
+    assert.equal(held.nlink, 1n);
+    for (const field of ['dev', 'ino', 'mode', 'nlink', 'size', 'mtimeNs', 'ctimeNs']) {
+      assert.equal(held[field], original.stat[field], field);
+      assert.equal(current[field], held[field], field);
+    }
+    // Deliberately fill the existing log; a production bounded writer must reject
+    // this fixture operation. Truncation and all bytes use the verified descriptor.
+    await fill.truncate(0);
+    await fill.writeFile(full);
+    const after = await fill.stat({ bigint: true });
+    const published = await lstat(path, { bigint: true });
+    assert.equal(after.size, BigInt(Buffer.byteLength(full)));
+    for (const field of ['dev', 'ino', 'mode', 'nlink', 'size', 'mtimeNs', 'ctimeNs']) {
+      assert.equal(published[field], after[field], field);
+    }
+  } finally { await fill.close(); }
   assert.deepEqual(await logger.emit(diagnostic, 'authorized-local-log'), { state: 'unavailable', consoleFallback: 'emitted' });
   assert.equal((await stat(path)).size, Buffer.byteLength(full));
   const reviewed = await sink.previewPrune();
   assert.equal(reviewed.state, 'ready');
   assert.deepEqual(await sink.prune(reviewed), { state: 'pruned' });
-  assert.equal(await readFile(path, 'utf8'), '');
+  assert.equal(fixtureFileSnapshot(path, { maxBytes: MAX_LOG_BYTES }).bytes.toString('utf8'), '');
   assert.equal(lines.every((line) => !line.includes(secret)), true);
 });
 
@@ -1109,7 +1134,7 @@ test('reviewed manual log pruning requires trusted exact-scope reference authori
   await lifecycle.run({ ...observedDraft, persistence: 'authorized-local-log' }, async () => 0, completed);
   const files = (await readdir(scratch)).sort();
   const preview = await lifecycle.previewLogPrune();
-  const original = await readFile(logPath);
+  const { bytes: original } = fixtureFileSnapshot(logPath, { maxBytes: MAX_LOG_BYTES });
   assert.equal(preview.state, 'ready');
   assert.equal(preview.scope, 'local-diagnostics-only');
   assert.equal(preview.bytes, original.length);
@@ -1136,13 +1161,13 @@ test('reviewed manual log pruning requires trusted exact-scope reference authori
   assert.deepEqual(await lifecycle.pruneLog({ ...preview, path: join(scratch, 'other.jsonl') }, approval), {
     state: 'unavailable', reason: 'invalid-preview', effect: 'unchanged',
   });
-  assert.deepEqual(await readFile(logPath), original);
+  assert.deepEqual(fixtureFileSnapshot(logPath, { maxBytes: MAX_LOG_BYTES }).bytes, original);
   await lifecycle.run({ ...observedDraft, persistence: 'authorized-local-log' }, async () => 0, completed);
-  const appended = await readFile(logPath);
+  const { bytes: appended } = fixtureFileSnapshot(logPath, { maxBytes: MAX_LOG_BYTES });
   assert.deepEqual(await lifecycle.pruneLog(preview, approval), {
     state: 'unavailable', reason: 'stale-preview', effect: 'unchanged',
   });
-  assert.deepEqual(await readFile(logPath), appended);
+  assert.deepEqual(fixtureFileSnapshot(logPath, { maxBytes: MAX_LOG_BYTES }).bytes, appended);
   const current = await lifecycle.previewLogPrune();
   assert.deepEqual(await lifecycle.pruneLog(current, approval), {
     state: 'unavailable', reason: 'authorization-rejected', effect: 'unchanged',

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -15,6 +15,7 @@ import { openLocalAuthority } from '../dist/adapters/authority/local-authority.j
 import { createPrivateFixtureRoot, removeFixtureRoot } from './fixtures/windows-private-state.mjs';
 import { windowsFileSecurity } from './fixtures/windows-file-security.mjs';
 import { controlHelper } from './fixtures/windows-controlled-helper.mjs';
+import { fixtureFileSnapshot } from './fixtures/filesystem-snapshot.mjs';
 
 const windows = { skip: process.platform !== 'win32', timeout: 240_000 };
 const helper = fileURLToPath(new URL('../assets/platform/windows-private-state.ps1', import.meta.url));
@@ -162,14 +163,15 @@ function publicationFixture(t, present = true) {
 
 test('held same-directory rename preserves identity before the replacement protocol', windows, (t) => {
   const f = publicationFixture(t, false);
-  const before = lstatSync(f.stage, { bigint: true });
+  const before = fixtureFileSnapshot(f.stage);
   assert.equal(existsSync(f.target), false);
   assert.equal(windowsPublication(f.scope, f.publication), 'published');
-  const after = lstatSync(f.target, { bigint: true });
-  assert.equal(after.dev, before.dev);
-  assert.equal(after.ino, before.ino);
-  assert.equal(after.nlink, 1n);
-  assert.equal(readFileSync(f.target, 'utf8'), 'reviewed replacement');
+  const after = fixtureFileSnapshot(f.target);
+  assert.equal(after.stat.dev, before.stat.dev);
+  assert.equal(after.stat.ino, before.stat.ino);
+  assert.equal(after.stat.nlink, 1n);
+  assert.equal(after.bytes.toString('utf8'), 'reviewed replacement');
+  assert.deepEqual(after.bytes, before.bytes);
   assert.equal(existsSync(f.stage), false);
   assert.equal(existsSync(f.operation.backup), false);
 });

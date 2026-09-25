@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { lstatSync, readFileSync, readdirSync, unlinkSync } from 'node:fs';
+import { readFileSync, readdirSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { LocalWorkflow } from '../dist/application/local-workflow.js';
@@ -10,18 +10,14 @@ import { digestContent } from '../dist/kernel/revisions.js';
 import { createPrivateFixtureRoot, removeFixtureRoot, privateEntry, checkPrivateFixturePathBudget } from './fixtures/windows-private-state.mjs';
 import { WindowsPrivateStateError, windowsFailureDiagnostic, windowsPrivateStateDiagnostic } from '../dist/adapters/platform/windows-private-state.js';
 import { failure } from '../dist/adapters/persistence/failures.js';
+import { fixtureInventory } from './fixtures/filesystem-snapshot.mjs';
 
 const windows = { skip: process.platform !== 'win32', timeout: 720_000 };
 const ok = (result) => { assert.equal(result.status, 'ok', JSON.stringify(result)); return result.value; };
 const fixtureId = '00000000-0000-0000-0000-000000000000';
 const reservedPublication = `.missionspec/recovery/selection-generation-${'0'.repeat(64)}.json.msn-${fixtureId}.before`;
 function inventory(root) {
-  return readdirSync(root).sort().map((name) => {
-    const filename = path.join(root, name);
-    const stat = lstatSync(filename, { bigint: true });
-    return [name, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs,
-      stat.isDirectory() ? inventory(filename) : digestContent(readFileSync(filename))];
-  });
+  return fixtureInventory(root, digestContent);
 }
 
 test('Windows lifecycle fixtures reserve the complete publication path, including the retained preimage', () => {

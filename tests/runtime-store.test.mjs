@@ -10,6 +10,7 @@ import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { openRuntimeStore as openBoundRuntimeStore } from '../dist/adapters/persistence/index.js';
 import { digestContent } from '../dist/kernel/revisions.js';
+import { fixtureInventory } from './fixtures/filesystem-snapshot.mjs';
 
 const workspace = { workspaceId: 'WSP-local', rootDigest: digestContent('test-worktree-root') };
 const openRuntimeStore = (options) => openBoundRuntimeStore({ expectedWorkspace: workspace, ...options });
@@ -62,14 +63,10 @@ async function opened(t, directory, mode = 'create', busyTimeoutMs = 25) {
   return store;
 }
 function inventory(directory) {
-  return readdirSync(directory).sort().map((name) => {
-    const filename = path.join(directory, name);
-    const stat = lstatSync(filename, { bigint: true });
-    return {
-      name, mode: stat.mode, size: stat.size, mtime: stat.mtimeNs, ctime: stat.ctimeNs, ino: stat.ino,
-      contents: stat.isDirectory() ? inventory(filename) : digestContent(readFileSync(filename)),
-    };
-  });
+  return fixtureInventory(directory, digestContent, (name, stat, contents) => ({
+    name, mode: stat.mode, size: stat.size, mtime: stat.mtimeNs, ctime: stat.ctimeNs, ino: stat.ino,
+    dev: stat.dev, nlink: stat.nlink, contents,
+  }));
 }
 function mutate(filename, operation) {
   const db = new DatabaseSync(filename);

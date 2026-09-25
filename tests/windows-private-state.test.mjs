@@ -23,6 +23,7 @@ import { openLocalAuthority } from '../dist/adapters/authority/local-authority.j
 import { TerminalAuthority } from '../dist/adapters/authority/terminal.js';
 import { digestContent } from '../dist/kernel/revisions.js';
 import { windowsFileSecurity } from './fixtures/windows-file-security.mjs';
+import { fixtureInventory } from './fixtures/filesystem-snapshot.mjs';
 
 const windows = { skip: process.platform !== 'win32', timeout: 240_000 };
 const ok = (result) => { assert.equal(result.status, 'ok', JSON.stringify(result)); return result.value; };
@@ -196,12 +197,7 @@ async function fixture(t) {
 }
 
 function inventory(root) {
-  return readdirSync(root).sort().map((name) => {
-    const target = path.join(root, name);
-    const stat = lstatSync(target, { bigint: true });
-    return [name, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs,
-      stat.isDirectory() ? inventory(target) : readFileSync(target).toString('base64')];
-  });
+  return fixtureInventory(root, (bytes) => bytes.toString('base64'));
 }
 
 test('Windows path grammar rejects namespaces, alternate streams, aliases and devices on every platform', () => {
