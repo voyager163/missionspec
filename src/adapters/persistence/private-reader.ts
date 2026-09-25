@@ -1,7 +1,7 @@
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, type BigIntStats } from 'node:fs';
 import path from 'node:path';
 import { StoreFailure } from './failures.js';
-import { readWindowsPrivateFile } from '../platform/windows-private-state.js';
+import { readWindowsPrivateFile, readWindowsSqliteHeader } from '../platform/windows-private-state.js';
 
 export function checkPosixAncestors(directory: string): void {
   let current = path.parse(directory).root;
@@ -34,16 +34,17 @@ export function samePrivateObservation(left: BigIntStats, right: BigIntStats): b
 
 /** Admission precedes every read; O_NONBLOCK prevents FIFO substitution from hanging admission. */
 export function readPrivateBytes(filename: string, maxBytes: number, options: {
-  readonly expected?: { readonly dev: number | bigint; readonly ino: number | bigint };
+  readonly expected?: { readonly dev: bigint; readonly ino: bigint };
   readonly prefix?: boolean;
 } = {}): Buffer {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 8_000_000) {
     throw new StoreFailure('capacity', 'Private reader requires an explicit bounded byte limit.');
   }
   const initial = lstatSync(filename, { bigint: true });
-  if (options.expected !== undefined && (initial.dev !== BigInt(options.expected.dev) || initial.ino !== BigInt(options.expected.ino))) {
+  if (options.expected !== undefined && (initial.dev !== options.expected.dev || initial.ino !== options.expected.ino)) {
     throw new StoreFailure('stale-revision', 'Private input differs from its expected identity.');
   }
+
   if (process.platform === 'win32') return readWindowsPrivateFile(filename, initial, maxBytes, options.prefix === true);
   checkPosixAncestors(path.dirname(filename));
   checkPrivateDescriptor(initial);
@@ -74,4 +75,10 @@ export function readPrivateBytes(filename: string, maxBytes: number, options: {
     }
     return bytes.subarray(0, length);
   } finally { closeSync(descriptor); }
+}
+
+/** Only the SQLite admission path may share with existing read/write database handles. */
+export function readPrivateSqliteHeader(filename: string, expected: { readonly dev: bigint; readonly ino: bigint }): Buffer {
+  if (process.platform === 'win32') return readWindowsSqliteHeader(filename, expected);
+  return readPrivateBytes(filename, 100, { expected, prefix: true });
 }

@@ -20,10 +20,12 @@ function Effect-Info([IntPtr]$handle) {
     [Runtime.InteropServices.Marshal]::Copy($information, $bytes, 0, 52)
     $inode = [decimal]([BitConverter]::ToUInt32($bytes, 44)) * 4294967296 + [decimal]([BitConverter]::ToUInt32($bytes, 48))
     $size = [decimal]([BitConverter]::ToUInt32($bytes, 32)) * 4294967296 + [decimal]([BitConverter]::ToUInt32($bytes, 36))
+    $written = [decimal]([BitConverter]::ToUInt32($bytes, 24)) * 4294967296 + [decimal]([BitConverter]::ToUInt32($bytes, 20))
     return [ordered]@{
       device=([BitConverter]::ToUInt32($bytes, 28)).ToString([Globalization.CultureInfo]::InvariantCulture)
       inode=$inode.ToString('0', [Globalization.CultureInfo]::InvariantCulture)
       size=$size.ToString('0', [Globalization.CultureInfo]::InvariantCulture)
+      written=$written.ToString('0', [Globalization.CultureInfo]::InvariantCulture)
     }
   } finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($information) }
 }
@@ -180,14 +182,96 @@ function Effect-PinDirectory($context, [string]$p, [bool]$create = $false) {
   return $parent
 }
 
-function Effect-OpenFile($context, [string]$p, [bool]$destructive = $false, [bool]$optional = $false, [bool]$writable = $false) {
+function Effect-OpenFile($context, [string]$p, [bool]$destructive = $false, [bool]$optional = $false, [bool]$writable = $false, [bool]$sqliteHeader = $false) {
   $parent = Effect-PinDirectory $context ([IO.Path]::GetDirectoryName($p))
   $access = if ($destructive) { 0x130089 } else { 0x120089 }
   if ($writable) { $access = $access -bor 0x102 }
-  $item = Effect-OpenRelative $context $parent ([IO.Path]::GetFileName($p)) $false $false $access 1 $null $optional
+  if ($sqliteHeader -and ($destructive -or $writable -or !$context.sqliteHeader)) { throw 'effect-operation' }
+  $sharing = if ($sqliteHeader) { 3 } else { 1 }
+  $item = Effect-OpenRelative $context $parent ([IO.Path]::GetFileName($p)) $false $false $access $sharing $null $optional
   if ($null -eq $item) { return $null }
   CheckEntry $p $true $false (!$context.readOnly) $false $null $true $item.handle
   return $item
+}
+
+function Effect-SqliteReadLock($item) {
+  $script:phase = 'sqlite-read-lock'
+  $size = 3 * [IntPtr]::Size + 8
+  $pending = [Runtime.InteropServices.Marshal]::AllocHGlobal($size)
+  $shared = [Runtime.InteropServices.Marshal]::AllocHGlobal($size)
+  $pendingHeld = $false
+  try {
+    [Runtime.InteropServices.Marshal]::Copy([byte[]]::new($size), 0, $pending, $size)
+    [Runtime.InteropServices.Marshal]::Copy([byte[]]::new($size), 0, $shared, $size)
+    # SQLite's Windows rollback-journal PENDING_BYTE and SHARED_FIRST/SHARED_SIZE.
+    [Runtime.InteropServices.Marshal]::WriteInt32($pending, 2 * [IntPtr]::Size, 0x40000000)
+    [Runtime.InteropServices.Marshal]::WriteInt32($shared, 2 * [IntPtr]::Size, 0x40000002)
+    if (!$native::LockFileEx($item.handle, 1, 0, 1, 0, $pending)) {
+      $script:nativeStatus = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+      if ($script:nativeStatus -eq 33) { throw 'sqlite-read-busy' }
+      throw 'sqlite-read-lock'
+    }
+    $pendingHeld = $true
+    if (!$native::LockFileEx($item.handle, 1, 0, 510, 0, $shared)) {
+      $script:nativeStatus = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+      if ($script:nativeStatus -eq 33) { throw 'sqlite-read-busy' }
+      throw 'sqlite-read-lock'
+    }
+    # The shared lock remains attached to this handle until confirmed CloseHandle.
+  } finally {
+    try {
+      if ($pendingHeld -and !$native::UnlockFileEx($item.handle, 0, 1, 0, $pending)) {
+        $script:nativeStatus = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        throw 'sqlite-read-lock'
+      }
+    } finally {
+      [Runtime.InteropServices.Marshal]::FreeHGlobal($shared)
+      [Runtime.InteropServices.Marshal]::FreeHGlobal($pending)
+    }
+  }
+}
+
+function Invoke-EffectRead($context, $operation) {
+  $fields = @('kind', 'root', 'rootIdentity', 'path', 'expected', 'maxBytes', 'prefix')
+  if (@($operation.psobject.Properties.Name).Count -ne $fields.Count -or
+      @($fields | Where-Object { $_ -cnotin @($operation.psobject.Properties.Name) }).Count -ne 0 -or
+      $operation.kind -isnot [string] -or $operation.kind -cnotin @('read', 'sqlite-header') -or
+      $operation.root -isnot [string] -or $operation.path -isnot [string] -or
+      ($operation.maxBytes -isnot [int] -and $operation.maxBytes -isnot [long]) -or
+      $operation.maxBytes -lt 1 -or $operation.maxBytes -gt 8000000 -or
+      $operation.prefix -isnot [bool] -or $null -eq $operation.expected -or
+      @($operation.expected.psobject.Properties.Name).Count -ne 2 -or
+      $operation.expected.device -isnot [string] -or $operation.expected.inode -isnot [string] -or
+      [string]$operation.expected.device -cnotmatch '^(0|[1-9][0-9]{0,9})$' -or
+      [decimal]$operation.expected.device -gt 4294967295 -or
+      [string]$operation.expected.inode -cnotmatch '^[1-9][0-9]{0,19}$' -or
+      [decimal]$operation.expected.inode -gt [decimal]'18446744073709551615') { throw 'effect-read' }
+  if ($context.sqliteHeader -and ($operation.maxBytes -ne 100 -or !$operation.prefix -or
+      [IO.Path]::GetFileName([string]$operation.path) -cne 'ledger.sqlite' -or
+      [IO.Path]::GetFileName($context.root) -cne 'state' -or
+      [IO.Path]::GetFileName([IO.Path]::GetDirectoryName($context.root)) -cne '.missionspec')) { throw 'sqlite-header' }
+  $item = Effect-OpenFile $context ([string]$operation.path) $false $false $false $context.sqliteHeader
+  if (!(Effect-SameIdentity (Effect-Info $item.handle) $operation.expected)) { throw 'effect-identity' }
+  if ($context.sqliteHeader) { Effect-SqliteReadLock $item }
+  $before = Effect-Info $item.handle
+  Effect-Progress 'read-held'
+  CheckEntry $item.path $true $false $false $false $null $true $item.handle
+  $security = Effect-Security $item
+  $bytes = Effect-Read $item ([int]$operation.maxBytes) ([bool]$operation.prefix)
+  if ($context.sqliteHeader) {
+    if ($bytes.Length -ne 100 -or
+        [Text.Encoding]::ASCII.GetString($bytes, 0, 16) -cne ('SQLite format 3' + [char]0)) { throw 'sqlite-header' }
+    Effect-Progress 'sqlite-header-read'
+    CheckEntry $item.path $true $false $false $false $null $true $item.handle
+    $again = Effect-Read $item 100 $true
+    if ((Effect-HashBytes $bytes) -cne (Effect-HashBytes $again)) { throw 'sqlite-header' }
+  }
+  CheckEntry $item.path $true $false $false $false $null $true $item.handle
+  $after = Effect-Info $item.handle
+  if (!(Effect-SameIdentity $before $after) -or $before.size -cne $after.size -or
+      $before.written -cne $after.written -or
+      $security.fingerprint -cne (Effect-Security $item).fingerprint) { throw 'effect-identity' }
+  return @{device=$after.device;inode=$after.inode;contentBase64=[Convert]::ToBase64String($bytes)}
 }
 
 function Effect-Progress([string]$phaseName) {
@@ -421,7 +505,8 @@ function Invoke-MissionSpecFileOperation($operation) {
   $script:phase = 'file-operation'
   $context = @{
     root=[string]$operation.root;identity=$operation.rootIdentity
-    readOnly=([string]$operation.kind -ceq 'read')
+    readOnly=([string]$operation.kind -cin @('read', 'sqlite-header'))
+    sqliteHeader=([string]$operation.kind -ceq 'sqlite-header')
     directories=[Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
     handles=[Collections.Generic.List[object]]::new()
   }
@@ -433,30 +518,10 @@ function Invoke-MissionSpecFileOperation($operation) {
     if ($null -ne $operation.lease) { [void](Effect-Lease $context $operation.lease) }
     switch ([string]$operation.kind) {
       'read' {
-        $fields = @('kind', 'root', 'rootIdentity', 'path', 'expected', 'maxBytes', 'prefix')
-        if (@($operation.psobject.Properties.Name).Count -ne $fields.Count -or
-            @($fields | Where-Object { $_ -cnotin @($operation.psobject.Properties.Name) }).Count -ne 0 -or
-            ($operation.maxBytes -isnot [int] -and $operation.maxBytes -isnot [long]) -or
-            $operation.maxBytes -lt 1 -or $operation.maxBytes -gt 8000000 -or
-            $operation.prefix -isnot [bool] -or $null -eq $operation.expected -or
-            @($operation.expected.psobject.Properties.Name).Count -ne 2 -or
-            $operation.expected.device -isnot [string] -or $operation.expected.inode -isnot [string] -or
-            [string]$operation.expected.device -cnotmatch '^(0|[1-9][0-9]{0,9})$' -or
-            [decimal]$operation.expected.device -gt 4294967295 -or
-            [string]$operation.expected.inode -cnotmatch '^[1-9][0-9]{0,19}$' -or
-            [decimal]$operation.expected.inode -gt [decimal]'18446744073709551615') { throw 'effect-read' }
-        $item = Effect-OpenFile $context ([string]$operation.path)
-        $before = Effect-Info $item.handle
-        if (!(Effect-SameIdentity $before $operation.expected)) { throw 'effect-identity' }
-        Effect-Progress 'read-held'
-        CheckEntry $item.path $true $false $false $false $null $true $item.handle
-        $security = Effect-Security $item
-        $bytes = Effect-Read $item ([int]$operation.maxBytes) ([bool]$operation.prefix)
-        CheckEntry $item.path $true $false $false $false $null $true $item.handle
-        $after = Effect-Info $item.handle
-        if (!(Effect-SameIdentity $before $after) -or $before.size -cne $after.size -or
-            $security.fingerprint -cne (Effect-Security $item).fingerprint) { throw 'effect-identity' }
-        return @{device=$after.device;inode=$after.inode;contentBase64=[Convert]::ToBase64String($bytes)}
+        return Invoke-EffectRead $context $operation
+      }
+      'sqlite-header' {
+        return Invoke-EffectRead $context $operation
       }
       'parents' {
         [void](Effect-PinDirectory $context ([string]$operation.path) $true)

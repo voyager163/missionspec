@@ -21,7 +21,11 @@ export function failure<T>(error: unknown): Outcome<T> {
   }
   let issue = error instanceof StoreFailure ? error : undefined;
   if (error instanceof WindowsPrivateStateError) {
-    issue = new StoreFailure('unavailable', `Windows private runtime storage is unavailable (${windowsPrivateStateDiagnostic(error)}).`);
+    const diagnostic = windowsPrivateStateDiagnostic(error);
+    const details = diagnostic.split('; ');
+    issue = details[0] === 'sqlite-read-busy' && details.includes('phase=sqlite-read-lock') && details.includes('nativeStatus=33')
+      ? new StoreFailure('busy', 'Runtime store is busy; native SQLite header read-lock admission is nonblocking.')
+      : new StoreFailure('unavailable', `Windows private runtime storage is unavailable (${diagnostic}).`);
   }
   if (issue === undefined && typeof error === 'object' && error !== null) {
     const code: unknown = Reflect.get(error, 'code');

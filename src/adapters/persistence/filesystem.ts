@@ -1,12 +1,12 @@
 import {
-  closeSync, constants, lstatSync, mkdirSync, openSync, type Stats,
+  closeSync, constants, lstatSync, mkdirSync, openSync, type BigIntStats,
 } from 'node:fs';
 import path from 'node:path';
 import { parseWorkspaceBinding, type WorkspaceBinding } from '../../kernel/revisions.js';
 import { ContractError, integer, oneOf, record, text } from '../../kernel/validation.js';
 import { StoreFailure } from './failures.js';
 import { requireWindowsPrivateState, validateWindowsStatePath, windowsPrivateEntries } from '../platform/windows-private-state.js';
-import { checkPosixAncestors as checkAncestors, readPrivateBytes } from './private-reader.js';
+import { checkPosixAncestors as checkAncestors, readPrivateSqliteHeader } from './private-reader.js';
 
 export interface RuntimeStoreOptions {
   readonly directory: string;
@@ -19,8 +19,8 @@ export interface RuntimeStoreOptions {
 export interface StoreFiles {
   readonly directory: string;
   readonly filename: string;
-  readonly directoryIdentity: Stats;
-  readonly identity: Stats;
+  readonly directoryIdentity: BigIntStats;
+  readonly identity: BigIntStats;
   readonly writable: boolean;
 }
 
@@ -54,20 +54,20 @@ export function parseOptions(value: unknown): Required<RuntimeStoreOptions> {
   };
 }
 
-function exists(filename: string): Stats | undefined {
+function exists(filename: string): BigIntStats | undefined {
   try {
-    return lstatSync(filename);
+    return lstatSync(filename, { bigint: true });
   } catch (error) {
     if (typeof error === 'object' && error !== null && Reflect.get(error, 'code') === 'ENOENT') return undefined;
     throw error;
   }
 }
 
-function checkPrivate(stat: Stats, directory: boolean, writable: boolean): void {
-  const required = directory ? (writable ? 0o700 : 0o500) : (writable ? 0o600 : 0o400);
+function checkPrivate(stat: BigIntStats, directory: boolean, writable: boolean): void {
+  const required = directory ? (writable ? 0o700n : 0o500n) : (writable ? 0o600n : 0o400n);
   if (stat.isSymbolicLink() || (directory ? !stat.isDirectory() : !stat.isFile()) ||
-      stat.uid !== process.getuid?.() || (stat.mode & 0o077) !== 0 ||
-      (stat.mode & required) !== required || (!directory && stat.nlink !== 1)) {
+      stat.uid !== BigInt(process.getuid!()) || (stat.mode & 0o077n) !== 0n ||
+      (stat.mode & required) !== required || (!directory && stat.nlink !== 1n)) {
     throw new StoreFailure('unavailable', 'Runtime store requires an owner-only directory and single-link owner-only regular file.');
   }
 
@@ -79,7 +79,7 @@ export function checkPrivatePath(filename: string, directory: boolean, writable 
     windowsPrivateEntries([{ path: filename, directory, writable }]);
   } else {
     checkAncestors(path.dirname(filename));
-    checkPrivate(lstatSync(filename), directory, writable);
+    checkPrivate(lstatSync(filename, { bigint: true }), directory, writable);
   }
 }
 
@@ -91,7 +91,7 @@ function checkSidecars(filename: string): void {
   }
 }
 
-function sameFile(left: Stats, right: Stats): boolean {
+function sameFile(left: BigIntStats, right: BigIntStats): boolean {
   return left.dev === right.dev && left.ino === right.ino;
 }
 
@@ -127,7 +127,7 @@ export function prepareFiles(options: Required<RuntimeStoreOptions>): StoreFiles
     if (options.mode === 'create' && exists(options.directory) === undefined) {
       windowsPrivateEntries([{ path: options.directory, directory: true, writable: true, create: true }]);
     }
-    const directoryIdentity = lstatSync(options.directory);
+    const directoryIdentity = lstatSync(options.directory, { bigint: true });
     windowsPrivateEntries([{ path: options.directory, directory: true, writable }]);
     const filename = path.join(options.directory, 'ledger.sqlite');
     checkSidecars(filename);
@@ -135,7 +135,7 @@ export function prepareFiles(options: Required<RuntimeStoreOptions>): StoreFiles
       if (exists(filename) !== undefined) throw new StoreFailure('conflict', 'Exclusive runtime store creation found an existing path.');
       windowsPrivateEntries([{ path: filename, directory: false, writable: true, create: true }]);
     }
-    const identity = lstatSync(filename);
+    const identity = lstatSync(filename, { bigint: true });
     windowsPrivateEntries([{ path: filename, directory: false, writable }]);
     const files = { directory: options.directory, filename, directoryIdentity, identity, writable };
     if (options.mode !== 'create') checkFiles(files);
@@ -151,7 +151,7 @@ export function prepareFiles(options: Required<RuntimeStoreOptions>): StoreFiles
   if (options.mode === 'create' && existingDirectory === undefined) {
     mkdirSync(options.directory, { mode: 0o700 });
   }
-  const directoryIdentity = lstatSync(options.directory);
+  const directoryIdentity = lstatSync(options.directory, { bigint: true });
   checkPrivate(directoryIdentity, true, writable);
   const filename = path.join(options.directory, 'ledger.sqlite');
   checkSidecars(filename);
@@ -160,7 +160,7 @@ export function prepareFiles(options: Required<RuntimeStoreOptions>): StoreFiles
       constants.O_NOFOLLOW, 0o600);
     closeSync(descriptor);
   }
-  const identity = lstatSync(filename);
+  const identity = lstatSync(filename, { bigint: true });
   checkPrivate(identity, false, writable);
   const files = { directory: options.directory, filename, directoryIdentity, identity, writable };
   if (options.mode !== 'create') checkFiles(files);
@@ -175,8 +175,8 @@ export function checkFiles(files: StoreFiles): void {
       { path: files.filename, directory: false, writable: files.writable },
     ]);
   } else checkAncestors(path.dirname(files.directory));
-  const directory = lstatSync(files.directory);
-  const file = lstatSync(files.filename);
+  const directory = lstatSync(files.directory, { bigint: true });
+  const file = lstatSync(files.filename, { bigint: true });
   if (process.platform !== 'win32') {
     checkPrivate(directory, true, files.writable);
     checkPrivate(file, false, files.writable);
@@ -188,7 +188,7 @@ export function checkFiles(files: StoreFiles): void {
   rejectPrototypeFiles(files.directory);
   checkSidecars(files.filename);
   {
-    const header = readPrivateBytes(files.filename, 100, { expected: files.identity, prefix: true });
+    const header = readPrivateSqliteHeader(files.filename, files.identity);
     if (header.length !== 100 ||
         header.subarray(0, 16).toString('ascii') !== 'SQLite format 3\0') {
       throw new StoreFailure('corrupt', 'Runtime store has an invalid SQLite header.');
@@ -197,4 +197,5 @@ export function checkFiles(files: StoreFiles): void {
       throw new StoreFailure('incompatible', 'Only rollback/DELETE-journal runtime stores are supported; WAL is not ignored.');
     }
   }
+  checkSidecars(files.filename);
 }

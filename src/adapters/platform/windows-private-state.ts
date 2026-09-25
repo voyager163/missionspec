@@ -33,6 +33,7 @@ const diagnosticPhases = [
   'file-operation', 'effect-root', 'effect-path', 'effect-open', 'effect-read', 'effect-write', 'effect-size',
   'effect-identity', 'effect-preimage', 'effect-flush', 'effect-rename', 'effect-delete', 'effect-cancelled',
   'effect-operation', 'handle-close', 'publication-intent', 'publication-state',
+  'sqlite-read-lock', 'sqlite-read-busy', 'sqlite-header',
 ];
 const exceptionTypes = [
   'none', 'other', 'RuntimeException', 'MethodException', 'MethodInvocationException', 'PSInvalidCastException',
@@ -284,13 +285,29 @@ export function inspectWindowsPrivateFile(scope: WindowsFileScope, filename: str
 /** ACL/type/identity admission and bounded bytes are obtained from the same native held object. */
 export function readWindowsPrivateFile(filename: string, expected: { readonly dev: bigint; readonly ino: bigint },
   maxBytes: number, prefix = false): Buffer {
+  return readWindowsHeldFile('read', filename, expected, maxBytes, prefix);
+}
+
+/** A fixed 100-byte header under SQLite's shared byte-range lock; not an immutable JSON reader. */
+export function readWindowsSqliteHeader(filename: string, expected: { readonly dev: bigint; readonly ino: bigint }): Buffer {
+  if (path.basename(filename) !== 'ledger.sqlite' || path.basename(path.dirname(filename)) !== 'state' ||
+      path.basename(path.dirname(path.dirname(filename))) !== '.missionspec') throw new WindowsPrivateStateError('sqlite-header');
+  return readWindowsHeldFile('sqlite-header', filename, expected, 100, true);
+}
+
+function readWindowsHeldFile(kind: 'read' | 'sqlite-header', filename: string,
+  expected: { readonly dev: bigint; readonly ino: bigint }, maxBytes: number, prefix: boolean): Buffer {
   requireWindowsPrivateState();
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 8_000_000) throw new WindowsPrivateStateError('effect-size');
+  if (typeof expected.dev !== 'bigint' || expected.dev < 0n || expected.dev > 0xffff_ffffn ||
+      typeof expected.ino !== 'bigint' || expected.ino <= 0n || expected.ino > 0xffff_ffff_ffff_ffffn) {
+    throw new WindowsPrivateStateError('effect-identity');
+  }
   const root = path.dirname(filename);
   const parent = lstatSync(root, { bigint: true });
   const scope = { root, dev: parent.dev, ino: parent.ino };
   const value = closedRecord(invokeWindowsHelper({ operation: {
-    ...operationScope(scope), kind: 'read', path: operationPath(scope, filename),
+    ...operationScope(scope), kind, path: operationPath(scope, filename),
     expected: { device: String(expected.dev), inode: String(expected.ino) }, maxBytes, prefix,
   } }, Math.ceil(maxBytes / 3) * 4 + 16_384), ['device', 'inode', 'contentBase64'], 'effect-read');
   if (value.device !== String(expected.dev) || value.inode !== String(expected.ino) ||
@@ -299,7 +316,8 @@ export function readWindowsPrivateFile(filename: string, expected: { readonly de
     throw new WindowsPrivateStateError('effect-read');
   }
   const bytes = Buffer.from(value.contentBase64, 'base64');
-  if (bytes.length > maxBytes || bytes.toString('base64') !== value.contentBase64) throw new WindowsPrivateStateError('effect-size');
+  if (bytes.length > maxBytes || (kind === 'sqlite-header' && bytes.length !== 100) ||
+      bytes.toString('base64') !== value.contentBase64) throw new WindowsPrivateStateError('effect-size');
   return bytes;
 }
 
@@ -448,7 +466,7 @@ function invokeWindowsHelper(input: object, maxBuffer = 16_384): unknown {
   });
   const lines = result.stdout.trim().split(/\r?\n/u);
   const last = lines.pop() ?? '';
-  const phases = new Set(['created-held', 'file-written', 'read-held', 'delete-held', 'publication-held', 'intent-durable', 'preimage-renamed',
+  const phases = new Set(['created-held', 'file-written', 'read-held', 'sqlite-header-read', 'delete-held', 'publication-held', 'intent-durable', 'preimage-renamed',
     'preimage-retained', 'source-published', 'publication-durable', 'preimage-delete-held']);
   let value: unknown;
   try {

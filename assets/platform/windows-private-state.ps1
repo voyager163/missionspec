@@ -41,6 +41,8 @@ try {
   Native 'ReadFile' 'kernel32.dll' ([bool]) @([IntPtr], [IntPtr], [uint32], [uint32].MakeByRefType(), [IntPtr])
   Native 'WriteFile' 'kernel32.dll' ([bool]) @([IntPtr], [IntPtr], [uint32], [uint32].MakeByRefType(), [IntPtr])
   Native 'SetFilePointerEx' 'kernel32.dll' ([bool]) @([IntPtr], [int64], [int64].MakeByRefType(), [uint32])
+  Native 'LockFileEx' 'kernel32.dll' ([bool]) @([IntPtr], [uint32], [uint32], [uint32], [uint32], [IntPtr])
+  Native 'UnlockFileEx' 'kernel32.dll' ([bool]) @([IntPtr], [uint32], [uint32], [uint32], [IntPtr])
   Native 'SetSecurityInfo' 'advapi32.dll' ([uint32]) @([IntPtr], [int], [uint32], [IntPtr], [IntPtr], [IntPtr], [IntPtr])
   Native 'GetSecurityDescriptorOwner' 'advapi32.dll' ([bool]) @([IntPtr], [IntPtr].MakeByRefType(), [bool].MakeByRefType())
   Native 'GetSecurityDescriptorGroup' 'advapi32.dll' ([bool]) @([IntPtr], [IntPtr].MakeByRefType(), [bool].MakeByRefType())
@@ -504,7 +506,7 @@ try {
       'file-security-dacl','file-security-descriptor','file-security-policy','file-security-set')) { $reason = $failure.Exception.Message }
   if ($failure.Exception.Message -in @('effect-root','effect-path','effect-open','effect-read','effect-write','effect-size',
       'effect-identity','effect-preimage','effect-flush','effect-rename','effect-delete','effect-cancelled','effect-operation',
-      'handle-close','publication-intent','publication-state')) { $reason = $failure.Exception.Message }
+      'handle-close','publication-intent','publication-state','sqlite-read-lock','sqlite-read-busy','sqlite-header')) { $reason = $failure.Exception.Message }
   $knownTypes = @('RuntimeException', 'MethodException', 'MethodInvocationException', 'PSInvalidCastException',
     'ParameterBindingException', 'ArgumentException', 'ArgumentNullException', 'InvalidOperationException',
     'NotSupportedException', 'TypeLoadException', 'MissingMethodException', 'IOException', 'UnauthorizedAccessException',

@@ -135,9 +135,13 @@ owner-only readable mode and single-link count **before reading**, bind it to
 the pre-open identity, use `O_NOFOLLOW | O_NONBLOCK`, bound all bytes, and recheck
 descriptor, pathname and real ancestor observations. A permissive, linked,
 special or identical-content replacement cannot be silently treated as the
-original observation. Windows reads use the separately qualified native
+original observation. The Windows held-reader extension is undergoing native
+qualification independently of the earlier storage paths. It uses the
 directory-relative held reader described in [Windows state](windows-state.md);
 a completed external ACL check is not attributed to a later Node descriptor.
+SQLite-header admission uses its own shared byte-range locking mode; ordinary
+private-file reads still exclude competing writes. Exact bigint device/inode
+observations avoid NTFS identity loss through JavaScript-number rounding.
 
 An interrupted preparation can be retried with the same selection review. Its
 own demonstrably dead writer lock may be reclaimed; live, unrelated or replaced

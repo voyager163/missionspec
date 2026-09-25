@@ -23,20 +23,35 @@ read path is **pending Windows qualification**, independently of the historical
 write/delete qualification above. It no longer attributes a completed external
 ACL check to a later Node file descriptor. The existing native helper pins
 ancestors and opens the actual regular single-link object directory-relatively,
-without write/delete sharing, checks its current-user SID/ACL and expected
+checks its current-user SID/ACL and expected
 pre-open device/inode before reading, and rechecks admission/security/identity
 after a bounded read. Read-only handles do not request directory write or flush
 rights. No POSIX mode values are treated as Windows ACL evidence.
 
 The `read` wire request includes the pinned root identity, exact file identity,
-an explicit limit of 1–8,000,000 bytes, and a boolean prefix mode (used for the
-100-byte SQLite header). The sole success value has exactly `device`, `inode`
+an explicit limit of 1–8,000,000 bytes, and a boolean prefix mode. Ordinary
+private-file reads deny write/delete sharing, including prefix reads. A separate
+`sqlite-header` operation is restricted to the 100-byte header of
+`.missionspec/state/ledger.sqlite`. Only that operation permits write sharing,
+so it can coexist with an open SQLite connection, while denying delete sharing.
+It takes SQLite's nonblocking shared byte-range read lock before reading:
+a held exclusive database transaction reports busy instead of bypassing SQLite
+contention. Header bytes are read twice while the lock is held, with file size,
+last-write time, identity, ACL and link admission rechecked before returning.
+This is a coherent header observation, not immutable whole-database access.
+
+Store device/inode observations use `BigIntStats` end to end. Converting a
+rounded JavaScript-number inode to bigint is not accepted as exact NTFS identity.
+The sole success value has exactly `device`, `inode`
 and canonical `contentBase64`; the caller verifies shape, identity, decoded size
 and canonical encoding. Helper output is bounded from the requested size, not
 an unbounded process buffer. Unknown/malformed helper responses fail closed
 with the existing allowlisted diagnostics, never content-bearing error output.
 The `read-held` rendezvous allows native tests to attempt competing rename,
 write, hard-link and ACL changes before the reader rechecks admission.
+`sqlite-header-read` additionally pauses between the two header observations.
+The fixtures allocate private children beneath the OS-reported profile, never
+re-ACL the shared checkout, and exercise real concurrent SQLite connections.
 Writer schema-2 PID/creation-FILETIME leases and legacy-owner handling are unchanged.
 
 Required native qualification selectors (not counted as passing on POSIX):

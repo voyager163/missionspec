@@ -80,7 +80,7 @@ try {
   if(c.mode==='reader') {
     if(c.reader==='evidence') await inspectPrunableEvidence(files,c.workspace,c.item);
     else if(c.reader==='workspace') await files.read(c.item.path);
-    else if(c.reader==='header') readPrivateBytes(c.source,100,{expected:c.expected,prefix:true});
+    else if(c.reader==='header') readPrivateBytes(c.source,100,{expected:{dev:BigInt(c.expected.dev),ino:BigInt(c.expected.ino)},prefix:true});
     else readPrivateStateFile(c.source,16384);
   } else if(c.mode==='mutex-probe') {
     const release=acquirePosixWriterMutex(c.root,files.rootDigest);
@@ -358,8 +358,8 @@ test('held readers reject pre-open privacy/type/identity substitutions before re
     for (const mutation of ['mode', 'links', 'identical', 'fifo']) {
       await t.test(`${reader}-${mutation}`, async (t) => {
         const f = await fixture(t);
-        const expected = lstatSync(f.source);
-        const actor = start(t, f, 'reader', { reader, expected: { dev: expected.dev, ino: expected.ino } });
+        const expected = lstatSync(f.source, { bigint: true });
+        const actor = start(t, f, 'reader', { reader, expected: { dev: String(expected.dev), ino: String(expected.ino) } });
         assert.equal((await actor.next()).phase, 'pre-open');
         renameSync(f.source, `${f.source}.original`);
         if (mutation === 'links') {
