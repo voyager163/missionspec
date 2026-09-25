@@ -12,6 +12,8 @@ import type { FileMutation, FileSnapshot, LocalAuthorityPort } from '../../ports
 import { requireApproval, unavailableAuthority } from '../../application/authority.js';
 import { WorkflowError } from '../../application/errors.js';
 import { requireRuntimeLifecycleLease, type RuntimeLifecycleLease } from '../persistence/lifecycle-lease.js';
+import { acquirePosixWriterMutex } from '../persistence/writer-mutex.js';
+import { readPrivateBytes } from '../persistence/private-reader.js';
 import { parseTaskDefinition, type TaskDefinition } from '../../engines/planning/contracts.js';
 import {
   syncWindowsPrivateDirectory, validateWindowsStatePath, windowsPrivateEntries,
@@ -330,9 +332,18 @@ export class LocalWorkspace {
 
   async read(input: ProjectPath): Promise<FileSnapshot | null> {
     const relative = parseProjectPath(input);
+    if (relative === '.missionspec/writer-mutex.lock' || relative === '.missionspec/writer-mutex.sqlite' ||
+        relative === '.missionspec/writer-mutex.bootstrap') {
+      throw new WorkflowError('scope-exceeded', 'The stable writer mutex is not a workspace text input.');
+    }
     let handle;
     try {
       const target = await this.target(relative);
+      if (relative.startsWith('.missionspec/')) {
+        const bytes = readPrivateBytes(target, 8_000_000);
+        return { path: relative, content: new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes),
+          digest: digestContent(bytes) };
+      }
       handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
       const before = await handle.stat({ bigint: true });
       if (!before.isFile() || before.nlink !== 1n || before.size > 8_000_000n) {
@@ -523,6 +534,15 @@ export class LocalWorkspace {
   }
 
   async withRuntimeLock<T>(operation: () => Promise<T>): Promise<T> {
+    await this.writeRoot();
+    if (process.platform !== 'win32' && await this.read(parseProjectPath('.missionspec/transaction.lock')) !== null) {
+      throw new WorkflowError('conflict', 'Existing workspace writer metadata blocks runtime effects, including mutex bootstrap.');
+    }
+    const releaseMutex = acquirePosixWriterMutex(this.root, this.rootDigest);
+    try { return await this.withRuntimeOwner(operation); } finally { releaseMutex(); }
+  }
+
+  private async withRuntimeOwner<T>(operation: () => Promise<T>): Promise<T> {
     const lock = parseProjectPath('.missionspec/transaction.lock');
     const writer = process.platform === 'win32' ? currentWindowsProcessInstance() : undefined;
     const content = JSON.stringify({ kind: 'runtime', pid: process.pid,
@@ -625,7 +645,13 @@ export class LocalWorkspace {
     let locked = false;
     let prepared = false;
     let lockIdentity: WindowsFileReference | undefined;
+    let releaseMutex: (() => void) | undefined;
     try {
+      if (process.platform !== 'win32') {
+        if (recoveryId !== undefined && this.runtimeSelectionLease) await this.reclaimSelectionTransactionLock(lock, id, false);
+        else if (await this.read(lock) !== null) throw new WorkflowError('conflict', 'Existing workspace writer metadata blocks a new transaction.');
+      }
+      releaseMutex = acquirePosixWriterMutex(this.root, this.rootDigest);
       if (recoveryId !== undefined) {
         if (process.platform === 'win32') await this.reclaimWindowsTransactionLock(lock, id);
         else if (this.runtimeSelectionLease) await this.reclaimSelectionTransactionLock(lock, id);
@@ -760,18 +786,20 @@ export class LocalWorkspace {
       }
       throw error;
     } finally {
-      if (locked) {
-        this.windowsLease = undefined;
-        if (process.platform === 'win32') {
-          try {
-            if (lockIdentity === undefined) throw new Error('Writer lock identity unavailable');
-            removeWindowsPrivateFile(this.windowsScope(false), path.join(this.root, lock),
-              digestContent(lockContent), lockIdentity);
-          } catch {
-            throw new WorkflowError('effect-outcome-unknown', 'Writer-lock release was not confirmed; do not infer transaction completion or steal a replacement lock.');
-          }
-        } else { const target = await this.target(lock); await unlink(target); await this.syncDirectory(target); }
-      }
+      try {
+        if (locked) {
+          this.windowsLease = undefined;
+          if (process.platform === 'win32') {
+            try {
+              if (lockIdentity === undefined) throw new Error('Writer lock identity unavailable');
+              removeWindowsPrivateFile(this.windowsScope(false), path.join(this.root, lock),
+                digestContent(lockContent), lockIdentity);
+            } catch {
+              throw new WorkflowError('effect-outcome-unknown', 'Writer-lock release was not confirmed; do not infer transaction completion or steal a replacement lock.');
+            }
+          } else { const target = await this.target(lock); await unlink(target); await this.syncDirectory(target); }
+        }
+      } finally { releaseMutex?.(); }
     }
   }
 
@@ -790,7 +818,7 @@ export class LocalWorkspace {
     }
   }
 
-  private async reclaimSelectionTransactionLock(lock: ProjectPath, id: string): Promise<void> {
+  private async reclaimSelectionTransactionLock(lock: ProjectPath, id: string, reclaim = true): Promise<void> {
     const filename = await this.target(lock);
     const original = await this.read(lock);
     if (original === null) return;
@@ -808,8 +836,10 @@ export class LocalWorkspace {
         before.mtimeNs !== after.mtimeNs || (await this.read(lock))?.digest !== original.digest) {
       throw new WorkflowError('stale-revision', 'Selection writer lock changed; no unrelated lock was removed.');
     }
-    await unlink(filename);
-    await this.syncDirectory(filename);
+    if (reclaim) {
+      await unlink(filename);
+      await this.syncDirectory(filename);
+    }
   }
 
   async recoveryPlan(id: string): Promise<FilePlan> {

@@ -286,6 +286,15 @@ function legalDocuments(root, scope, scopeRoot, source, expression, reviewed) {
     }
     paths.push('lib/zlib/README');
   }
+  if (name === 'fs-native-extensions') {
+    const header = 'src/win32/nt.h';
+    if (scope !== 'cli' || version !== '1.5.1' || expression !== 'Apache-2.0' ||
+        source.resolved !== 'https://registry.npmjs.org/fs-native-extensions/-/fs-native-extensions-1.5.1.tgz' ||
+        source.integrity !== 'sha512-abjiHKkYdcH5M9ikBEJb0MKb/fEpPtZx/yfLHzTptvUAoiFayX0tIe0BTLBU4SAoRyjZLzA0dP1Rn2p0+QRyVg==') {
+      throw new Error('Native descriptor-lock source attribution requires its exact reviewed CLI tarball and Windows declarations header.');
+    }
+    paths.push(header);
+  }
   const supplement = name === '@nodable/entities' ? externalServiceNotice(root, scope, source, expression, paths) : undefined;
   if (!supplement && !paths.some((file) => primaryLicense.test(path.posix.basename(file)))) {
     throw new Error(`No retained license file in ${location}`);
@@ -293,6 +302,10 @@ function legalDocuments(root, scope, scopeRoot, source, expression, reviewed) {
   const documents = [...new Set(paths)].sort(compare).map((file) => {
     const source = readFileSync(inside(packageRoot, file));
     if (source.length === 0 || source.length > 1024 * 1024) throw new Error(`Invalid legal file size: ${location}/${file}`);
+    if (name === 'fs-native-extensions' && file === 'src/win32/nt.h' &&
+        sha256(source) !== '8c92b0e378a2a1614b3793b6dcef37435a5567d89448941b5ebf76fc37f4d2d2') {
+      throw new Error('Native descriptor-lock attribution bytes differ from the exact reviewed header.');
+    }
     const decoded = new TextDecoder('utf-8', { fatal: true }).decode(source);
     const text = normalize(decoded);
     if (!text.trim()) throw new Error(`Empty license text: ${location}/${file}`);

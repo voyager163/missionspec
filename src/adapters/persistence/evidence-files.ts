@@ -1,5 +1,5 @@
 import {
-  closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, readSync, unlinkSync, writeFileSync, type BigIntStats,
+  closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync, renameSync, unlinkSync, writeFileSync, type BigIntStats,
 } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -11,6 +11,9 @@ import { integer, oneOf, record, text } from '../../kernel/validation.js';
 import type { EvidencePruneObservation, EvidencePruneTarget } from '../../ports/evidence-pruning.js';
 import { parsePruneTarget } from './pruning.js';
 import { requireSupportedPlatform } from './filesystem.js';
+import { acquirePosixWriterMutex } from './writer-mutex.js';
+import { checkPosixAncestors, readPrivateBytes, samePrivateObservation } from './private-reader.js';
+import { readPrivateStateFile, writePrivateStateFile } from './lifecycle-files.js';
 import {
   inspectWindowsPrivateFile, removeWindowsPrivateFile, syncWindowsPrivateDirectory, windowsPrivateEntries, writeWindowsPrivateFile,
   currentWindowsProcessInstance, parseWindowsWriterLock,
@@ -18,6 +21,7 @@ import {
 } from '../platform/windows-private-state.js';
 
 const windowsLeases = new WeakMap<LocalWorkspace, WindowsWriterLease>();
+const posixJobs = new WeakMap<LocalWorkspace, ContentDigest>();
 
 function windowsScope(files: LocalWorkspace, lease = true): WindowsFileScope {
   const root = lstatSync(files.root, { bigint: true });
@@ -58,6 +62,7 @@ async function scope(files: LocalWorkspace, expected: WorkspaceBinding, area: 'e
   privateEntry(lstatSync(path.join(files.root, '.missionspec'), { bigint: true }), true);
   const directory = area === 'evidence' ? path.join(files.root, '.missionspec', 'evidence') : path.join(files.root, '.missionspec');
   privateEntry(lstatSync(directory, { bigint: true }), true);
+  if (process.platform !== 'win32') checkPosixAncestors(directory);
   if (process.platform === 'win32') {
     windowsPrivateEntries([
       { path: files.root, directory: true, writable: true },
@@ -79,7 +84,7 @@ function syncDirectory(directory: string): void {
   try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
 }
 
-function reclaimDeadPruneLock(filename: string, id: ContentDigest, kind: 'evidence-prune' | 'state-lifecycle'): void {
+function reclaimDeadPruneLock(filename: string, id: ContentDigest, kind: 'evidence-prune' | 'state-lifecycle', reclaim = true): void {
   const descriptor = openSync(filename, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stat = fstatSync(descriptor, { bigint: true });
@@ -104,8 +109,10 @@ function reclaimDeadPruneLock(filename: string, id: ContentDigest, kind: 'eviden
     if (!sameIdentity(stat, current) || stat.mtimeNs !== current.mtimeNs || stat.ctimeNs !== current.ctimeNs) {
       throw new WorkflowError('conflict', 'Writer lock changed before explicit recovery.');
     }
-    unlinkSync(filename);
-    syncDirectory(path.dirname(filename));
+    if (reclaim) {
+      unlinkSync(filename);
+      syncDirectory(path.dirname(filename));
+    }
   } finally { closeSync(descriptor); }
 }
 
@@ -134,7 +141,7 @@ async function withPrivateStateLock<T>(
     ...(writer === undefined ? {} : { process: writer }) });
   if (process.platform === 'win32') {
     let old: string | undefined;
-    try { old = readFileSync(filename, 'utf8'); } catch (error) { if (!missing(error)) throw error; }
+    try { old = readPrivateStateFile(filename, 2048); } catch (error) { if (!missing(error)) throw error; }
     if (old !== undefined) {
       try {
         const owner = parseWindowsWriterLock(JSON.parse(old) as unknown);
@@ -160,25 +167,30 @@ async function withPrivateStateLock<T>(
       }
     }
   }
-  let descriptor: number;
-  const flags = constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW;
-  try { descriptor = openSync(filename, flags, 0o600); } catch (error) {
-    if (typeof error !== 'object' || error === null || Reflect.get(error, 'code') !== 'EEXIST') throw error;
-    reclaimDeadPruneLock(filename, id, kind);
-    descriptor = openSync(filename, flags, 0o600);
-  }
-  let identity: BigIntStats;
+  // A live/foreign legacy owner blocks even first-time mutex provisioning.
+  if (maybeStat(filename) !== undefined) reclaimDeadPruneLock(filename, id, kind, false);
+  const releaseMutex = acquirePosixWriterMutex(files.root, files.rootDigest);
   try {
-    writeFileSync(descriptor, lockContent);
-    fsyncSync(descriptor);
-    identity = fstatSync(descriptor, { bigint: true });
-    syncDirectory(path.dirname(filename));
-  } finally { closeSync(descriptor); }
-  try {
-    if ((await files.pending()).length !== 0) throw new WorkflowError('conflict', 'Pending file transactions block pruning.');
-    return await operation();
-  } finally {
+    let descriptor: number;
+    const flags = constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW;
+    try { descriptor = openSync(filename, flags, 0o600); } catch (error) {
+      if (typeof error !== 'object' || error === null || Reflect.get(error, 'code') !== 'EEXIST') throw error;
+      reclaimDeadPruneLock(filename, id, kind);
+      descriptor = openSync(filename, flags, 0o600);
+    }
+    let identity: BigIntStats;
     try {
+      writeFileSync(descriptor, lockContent);
+      fsyncSync(descriptor);
+      identity = fstatSync(descriptor, { bigint: true });
+      syncDirectory(path.dirname(filename));
+    } finally { closeSync(descriptor); }
+    try {
+      if (kind === 'evidence-prune') posixJobs.set(files, id);
+      if ((await files.pending()).length !== 0) throw new WorkflowError('conflict', 'Pending file transactions block pruning.');
+      return await operation();
+    } finally {
+      posixJobs.delete(files);
       const current = lstatSync(filename, { bigint: true });
       privateEntry(current, false);
       if (!sameIdentity(identity, current) || identity.mtimeNs !== current.mtimeNs || identity.ctimeNs !== current.ctimeNs) {
@@ -186,19 +198,22 @@ async function withPrivateStateLock<T>(
       }
       unlinkSync(filename);
       syncDirectory(path.dirname(filename));
-    } catch (error) {
-      throw error;
     }
-  }
+  } finally { releaseMutex(); }
 }
 
 function readExact(directory: string, item: EvidencePruneTarget, allowAbsent: boolean) {
   const target = path.join(directory, `${item.id}.json`);
   let descriptor: number;
+  let entry: BigIntStats;
   try {
-    const entry = lstatSync(target, { bigint: true });
+    entry = lstatSync(target, { bigint: true });
     privateEntry(entry, false);
-    if (process.platform === 'win32') windowsPrivateEntries([{ path: target, directory: false, writable: true, ordinaryFile: true }]);
+    if (process.platform === 'win32') {
+      const bytes = readPrivateBytes(target, 8_000_000, { expected: entry });
+      if (digestContent(bytes) !== item.rawDigest) throw new WorkflowError('stale-revision', 'Raw evidence digest changed.');
+      return { descriptor: undefined, identity: entry, target, bytes };
+    }
     descriptor = openSync(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   } catch (error) {
     if (missing(error) && allowAbsent) return null;
@@ -208,6 +223,9 @@ function readExact(directory: string, item: EvidencePruneTarget, allowAbsent: bo
   try {
     const before = fstatSync(descriptor, { bigint: true });
     privateEntry(before, false);
+    if (!samePrivateObservation(entry, before)) {
+      throw new WorkflowError('stale-revision', 'Raw evidence changed before descriptor admission; an identical replacement is not the observed object.');
+    }
     if (before.size > 8_000_000n) throw new WorkflowError('limit-reached', 'Raw evidence exceeds the bounded pruning reader.');
     const bytes = Buffer.alloc(Number(before.size) + 1);
     let length = 0;
@@ -251,7 +269,180 @@ export async function inspectPrunableEvidence(
       result: oneOf(envelope.result, ['passed', 'failed'], 'prune.rawEvidence.result'),
       outputDigest: digestContent(envelope.output),
     };
-  } finally { closeSync(opened.descriptor); }
+  } finally { if (opened.descriptor !== undefined) closeSync(opened.descriptor); }
+}
+
+export class EvidenceQuarantineFailure extends WorkflowError {
+  constructor(readonly retainedPath: string) {
+    super('effect-outcome-unknown', `Evidence quarantine is unresolved; retain and inspect ${retainedPath}. No automatic restoration or overwrite is allowed.`);
+  }
+}
+
+const identityKeys = ['dev', 'ino', 'mode', 'uid', 'gid', 'nlink', 'size', 'mtimeNs', 'ctimeNs'] as const;
+type CapturedIdentity = Record<typeof identityKeys[number], string>;
+
+function capturedIdentity(stat: BigIntStats): CapturedIdentity {
+  return Object.fromEntries(identityKeys.map((key) => [key, String(stat[key])])) as CapturedIdentity;
+}
+
+function parseCapturedIdentity(value: unknown): CapturedIdentity {
+  const input = record(value, 'quarantine.identity', identityKeys);
+  for (const key of identityKeys) {
+    if (typeof input[key] !== 'string' || !/^[0-9]{1,30}$/u.test(input[key])) {
+      throw new WorkflowError('conflict', 'Quarantine identity is malformed; preserve all retained files.');
+    }
+  }
+  return input as CapturedIdentity;
+}
+
+function matchesCapture(stat: BigIntStats, expected: CapturedIdentity, moved = false): boolean {
+  return identityKeys.every((key) => moved && key === 'ctimeNs' || String(stat[key]) === expected[key]);
+}
+
+function maybeStat(filename: string): BigIntStats | undefined {
+  try { return lstatSync(filename, { bigint: true }); } catch (error) { if (missing(error)) return undefined; throw error; }
+}
+
+function quarantineDirectory(directory: string): BigIntStats {
+  try { mkdirSync(directory, { mode: 0o700 }); syncDirectory(path.dirname(directory)); }
+  catch (error) {
+    if (typeof error !== 'object' || error === null || Reflect.get(error, 'code') !== 'EEXIST') throw error;
+  }
+  const stat = lstatSync(directory, { bigint: true });
+  privateEntry(stat, true);
+  checkPosixAncestors(directory);
+  return stat;
+}
+
+function captureBytes(descriptor: number, expected: CapturedIdentity, digest: ContentDigest): BigIntStats {
+  const before = fstatSync(descriptor, { bigint: true });
+  privateEntry(before, false);
+  if (!matchesCapture(before, expected, true) || before.size > 8_000_000n) throw new Error('Captured object differs');
+  const bytes = Buffer.alloc(Number(before.size) + 1);
+  let length = 0;
+  while (length < bytes.length) {
+    const count = readSync(descriptor, bytes, length, bytes.length - length, length);
+    if (count === 0) break;
+    length += count;
+  }
+  const after = fstatSync(descriptor, { bigint: true });
+  privateEntry(after, false);
+  if (!samePrivateObservation(before, after) || BigInt(length) !== after.size ||
+      digestContent(bytes.subarray(0, length)) !== digest) throw new Error('Captured bytes differ');
+  return after;
+}
+
+/** The only POSIX unlink is inside a job-owned private UUID namespace while the stable kernel mutex is held. */
+function quarantinePreparedEvidence(files: LocalWorkspace, workspace: WorkspaceBinding, item: EvidencePruneTarget, directory: string):
+  'removed' | 'already-absent' {
+  const job = posixJobs.get(files);
+  if (job === undefined) throw new WorkflowError('conflict', 'Evidence quarantine requires the current exact-job kernel writer lease.');
+  const base = path.join(files.root, '.missionspec', 'prune-quarantine');
+  quarantineDirectory(base);
+  const jobDirectory = path.join(base, job.slice(7));
+  const jobIdentity = quarantineDirectory(jobDirectory);
+  const sourceParent = lstatSync(directory, { bigint: true });
+  if (jobIdentity.dev !== sourceParent.dev) throw new WorkflowError('scope-exceeded', 'Evidence quarantine must be on the same volume.');
+  const intentPath = path.join(jobDirectory, `${item.id}.intent.json`);
+  const deletedPath = path.join(jobDirectory, `${item.id}.deleted.json`);
+  const source = path.join(directory, `${item.id}.json`);
+  let intentContent: string;
+  try { intentContent = readPrivateStateFile(intentPath, 16_384); }
+  catch (error) {
+    if (!missing(error)) throw error;
+    if (maybeStat(deletedPath) !== undefined) throw new EvidenceQuarantineFailure(deletedPath);
+    const original = readExact(directory, item, true);
+    if (original === null || original.descriptor === undefined) throw new EvidenceQuarantineFailure(intentPath);
+    try {
+      const nonce = randomUUID();
+      const captureDirectory = path.join(jobDirectory, nonce);
+      // No existing UUID directory is ever adopted for a new intent.
+      mkdirSync(captureDirectory, { mode: 0o700 });
+      syncDirectory(jobDirectory);
+      intentContent = JSON.stringify({
+        schemaVersion: 1, job, workspace, target: item, nonce,
+        directory: capturedIdentity(lstatSync(captureDirectory, { bigint: true })),
+        original: capturedIdentity(original.identity),
+      });
+      writePrivateStateFile(files.root, intentPath, intentContent);
+    } finally { closeSync(original.descriptor); }
+  }
+  const intent = record(JSON.parse(intentContent) as unknown, 'quarantine.intent',
+    ['schemaVersion', 'job', 'workspace', 'target', 'nonce', 'directory', 'original']);
+  if (intent.schemaVersion !== 1 || intent.job !== job || JSON.stringify(intent.workspace) !== JSON.stringify(workspace) ||
+      JSON.stringify(intent.target) !== JSON.stringify(item) || typeof intent.nonce !== 'string' ||
+      !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(intent.nonce)) {
+    throw new EvidenceQuarantineFailure(intentPath);
+  }
+  const expected = parseCapturedIdentity(intent.original);
+  const expectedDirectory = parseCapturedIdentity(intent.directory);
+  const captureDirectory = path.join(jobDirectory, intent.nonce);
+  const captured = path.join(captureDirectory, 'captured');
+  const verifyDirectories = () => {
+    checkPosixAncestors(captureDirectory);
+    const current = lstatSync(captureDirectory, { bigint: true });
+    privateEntry(current, true);
+    const currentJob = lstatSync(jobDirectory, { bigint: true });
+    const currentSource = lstatSync(directory, { bigint: true });
+    privateEntry(currentSource, true);
+    if (String(current.dev) !== expectedDirectory.dev || String(current.ino) !== expectedDirectory.ino ||
+        current.mode.toString() !== expectedDirectory.mode || current.uid.toString() !== expectedDirectory.uid ||
+        !sameIdentity(currentJob, jobIdentity) || !sameIdentity(currentSource, sourceParent)) {
+      throw new EvidenceQuarantineFailure(captured);
+    }
+  };
+  verifyDirectories();
+  const receiptContent = JSON.stringify({ schemaVersion: 1, job, target: item.id, intentDigest: digestContent(intentContent), state: 'deleted' });
+  if (maybeStat(deletedPath) !== undefined) {
+    if (readPrivateStateFile(deletedPath, 16_384) !== receiptContent || maybeStat(captured) !== undefined ||
+        maybeStat(source) !== undefined) throw new EvidenceQuarantineFailure(captured);
+    return 'already-absent';
+  }
+  if (maybeStat(captured) === undefined) {
+    // Absence alone cannot distinguish a completed delete from lost/tampered
+    // state. Only an unchanged pre-move object permits resuming an intent.
+    const sourceStat = maybeStat(source);
+    if (sourceStat === undefined || !matchesCapture(sourceStat, expected)) throw new EvidenceQuarantineFailure(captured);
+    const original = readExact(directory, item, false);
+    if (original === null || original.descriptor === undefined) throw new EvidenceQuarantineFailure(captured);
+    try {
+      if (!matchesCapture(original.identity, expected)) throw new EvidenceQuarantineFailure(captured);
+      verifyDirectories();
+      if (maybeStat(captured) !== undefined) throw new EvidenceQuarantineFailure(captured);
+      renameSync(source, captured);
+      syncDirectory(directory);
+      syncDirectory(captureDirectory);
+      // The rename may have captured a replacement, not the descriptor we
+      // inspected. Never delete until the actual moved object is admitted.
+      if (!sameIdentity(fstatSync(original.descriptor, { bigint: true }), lstatSync(captured, { bigint: true }))) {
+        throw new EvidenceQuarantineFailure(captured);
+      }
+    } catch {
+      throw new EvidenceQuarantineFailure(captured);
+    } finally { closeSync(original.descriptor); }
+  }
+  let descriptor: number | undefined;
+  try {
+    verifyDirectories();
+    const entry = lstatSync(captured, { bigint: true });
+    privateEntry(entry, false);
+    if (!matchesCapture(entry, expected, true)) throw new EvidenceQuarantineFailure(captured);
+    descriptor = openSync(captured, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const admitted = captureBytes(descriptor, expected, item.rawDigest);
+    if (!samePrivateObservation(entry, admitted)) throw new EvidenceQuarantineFailure(captured);
+    verifyDirectories();
+    const current = lstatSync(captured, { bigint: true });
+    const held = fstatSync(descriptor, { bigint: true });
+    privateEntry(current, false);
+    privateEntry(held, false);
+    if (!samePrivateObservation(admitted, current) || !samePrivateObservation(current, held)) throw new EvidenceQuarantineFailure(captured);
+    unlinkSync(captured);
+    syncDirectory(captureDirectory);
+    writePrivateStateFile(files.root, deletedPath, receiptContent);
+    return 'removed';
+  } catch {
+    throw new EvidenceQuarantineFailure(captured);
+  } finally { if (descriptor !== undefined) closeSync(descriptor); }
 }
 
 export async function removePreparedEvidence(
@@ -259,6 +450,7 @@ export async function removePreparedEvidence(
 ): Promise<'removed' | 'already-absent'> {
   const item = parsePruneTarget(value);
   const directory = await scope(files, workspace);
+  if (process.platform !== 'win32') return quarantinePreparedEvidence(files, workspace, item, directory);
   const parent = lstatSync(directory, { bigint: true });
   const opened = readExact(directory, item, true);
   if (opened === null) {
@@ -273,28 +465,7 @@ export async function removePreparedEvidence(
       }
       removeWindowsPrivateFile(windowsScope(files), opened.target, item.rawDigest, reference);
       return 'removed';
-    } finally { closeSync(opened.descriptor); }
+    } finally { if (opened.descriptor !== undefined) closeSync(opened.descriptor); }
   }
-  try {
-    const currentParent = lstatSync(directory, { bigint: true });
-    privateEntry(currentParent, true);
-    const current = lstatSync(opened.target, { bigint: true });
-    privateEntry(current, false);
-    if (!sameIdentity(parent, currentParent) || !sameIdentity(opened.identity, current) ||
-        opened.identity.mtimeNs !== current.mtimeNs || opened.identity.ctimeNs !== current.ctimeNs) {
-      throw new WorkflowError('stale-revision', 'Evidence path changed immediately before deletion.');
-    }
-    // No await/callback between the verified read/hash, final identity check and unlink.
-    unlinkSync(opened.target);
-    {
-      const descriptor = openSync(directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
-      try {
-        if (!sameIdentity(currentParent, fstatSync(descriptor, { bigint: true }))) {
-          throw new WorkflowError('effect-outcome-unknown', 'Evidence directory identity changed before deletion could be durably confirmed.');
-        }
-        fsyncSync(descriptor);
-      } finally { closeSync(descriptor); }
-    }
-    return 'removed';
-  } finally { closeSync(opened.descriptor); }
+  throw new WorkflowError('capability-unavailable', 'No qualified evidence deletion protocol.');
 }

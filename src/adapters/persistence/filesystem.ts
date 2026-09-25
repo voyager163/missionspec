@@ -1,11 +1,12 @@
 import {
-  closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readSync, type Stats,
+  closeSync, constants, lstatSync, mkdirSync, openSync, type Stats,
 } from 'node:fs';
 import path from 'node:path';
 import { parseWorkspaceBinding, type WorkspaceBinding } from '../../kernel/revisions.js';
 import { ContractError, integer, oneOf, record, text } from '../../kernel/validation.js';
 import { StoreFailure } from './failures.js';
 import { requireWindowsPrivateState, validateWindowsStatePath, windowsPrivateEntries } from '../platform/windows-private-state.js';
+import { checkPosixAncestors as checkAncestors, readPrivateBytes } from './private-reader.js';
 
 export interface RuntimeStoreOptions {
   readonly directory: string;
@@ -59,29 +60,6 @@ function exists(filename: string): Stats | undefined {
   } catch (error) {
     if (typeof error === 'object' && error !== null && Reflect.get(error, 'code') === 'ENOENT') return undefined;
     throw error;
-  }
-}
-
-function checkAncestors(directory: string): void {
-  let current = path.parse(directory).root;
-  const ancestors = [current];
-  for (const part of directory.slice(current.length).split(path.sep)) {
-    if (part === '') continue;
-    current = path.join(current, part);
-    ancestors.push(current);
-  }
-  let parentWritable = false;
-  for (const ancestor of ancestors) {
-    const stat = lstatSync(ancestor);
-    const trustedOwner = stat.uid === 0 || stat.uid === process.getuid?.();
-    const writable = (stat.mode & 0o022) !== 0;
-    const protectedSticky = (stat.mode & 0o1000) !== 0 && trustedOwner;
-    if (!stat.isDirectory() || stat.isSymbolicLink() || (writable && !protectedSticky) ||
-        (parentWritable && !trustedOwner)) {
-      throw new StoreFailure('unavailable',
-        'Writable ancestors require a root/current-user-owned sticky directory and a root/current-user-owned child; symlinks are unsupported.');
-    }
-    parentWritable = writable;
   }
 }
 
@@ -209,20 +187,14 @@ export function checkFiles(files: StoreFiles): void {
   rejectPrototypeDirectory(files.directory);
   rejectPrototypeFiles(files.directory);
   checkSidecars(files.filename);
-  const descriptor = openSync(files.filename, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try {
-    if (!sameFile(fstatSync(descriptor), files.identity)) {
-      throw new StoreFailure('unavailable', 'Runtime store file changed while being opened.');
-    }
-    const header = Buffer.alloc(100);
-    if (readSync(descriptor, header, 0, header.length, 0) !== header.length ||
+  {
+    const header = readPrivateBytes(files.filename, 100, { expected: files.identity, prefix: true });
+    if (header.length !== 100 ||
         header.subarray(0, 16).toString('ascii') !== 'SQLite format 3\0') {
       throw new StoreFailure('corrupt', 'Runtime store has an invalid SQLite header.');
     }
     if (header[18] !== 1 || header[19] !== 1) {
       throw new StoreFailure('incompatible', 'Only rollback/DELETE-journal runtime stores are supported; WAL is not ignored.');
     }
-  } finally {
-    closeSync(descriptor);
   }
 }

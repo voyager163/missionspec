@@ -11,7 +11,7 @@ import { digestContent, parseDigest, sameWorkspaceBinding, type ContentDigest } 
 import type { Outcome } from '../kernel/outcomes.js';
 import { array, unique } from '../kernel/validation.js';
 import { evidencePruneRequest, makePrunePlan, parsePrunePlan, parsePrunePrepared } from '../adapters/persistence/pruning.js';
-import { inspectPrunableEvidence, removePreparedEvidence, withEvidencePruneLock } from '../adapters/persistence/evidence-files.js';
+import { EvidenceQuarantineFailure, inspectPrunableEvidence, removePreparedEvidence, withEvidencePruneLock } from '../adapters/persistence/evidence-files.js';
 
 export interface EvidencePrunePreview {
   readonly id: ContentDigest;
@@ -207,7 +207,8 @@ export class LocalEvidencePruning {
       return value(await this.capability().completeEvidencePrune(completion));
     } catch (error) {
       const code = error instanceof WorkflowError ? error.code : 'effect-outcome-unknown';
-      throw new WorkflowError(code, `Prune ${prepared.id} remains prepared until status confirms completion; preserve edited bytes and explicitly recover with current approval.`);
+      throw new WorkflowError(code, `Prune ${prepared.id} remains prepared until status confirms completion; preserve edited bytes and explicitly recover with current approval.` +
+        (error instanceof EvidenceQuarantineFailure ? ` Retained quarantine reference: ${error.retainedPath}. No automatic restoration or overwrite.` : ''));
     }
   }
 }

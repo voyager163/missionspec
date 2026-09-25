@@ -45,7 +45,8 @@ checks its own inventory and includes its notices and `runtime-inventory.json`
 in the separate image.
 
 The current direct CLI pins include `@modelcontextprotocol/sdk@1.30.0`,
-`ajv@8.20.0`, `mdast-util-from-markdown@2.0.3`, `yaml@2.9.1`, and `zod@4.6.5`.
+`ajv@8.20.0`, `fs-native-extensions@1.5.1`, `mdast-util-from-markdown@2.0.3`,
+`yaml@2.9.1`, and `zod@4.6.5`.
 The isolated service pins `@azure/identity@4.13.3`, `@azure/logger@1.3.0`,
 `@azure/monitor-ingestion@1.2.0`, `@azure/storage-queue@12.32.0`, and `ajv@8.20.0`.
 Its Queue-scoped overrides select `fast-xml-parser@5.7.0` and
@@ -145,6 +146,101 @@ Text evidence checks are guardrails, not a general legal-text classifier.
 Review newly added packages for supplemental or embedded notices that filename
 discovery cannot establish. A distribution change, vendored source, new license
 expression, or unusual license location requires deliberate review.
+
+### Native descriptor-lock dependency
+
+The user-approved native POSIX lock dependency is exactly
+`fs-native-extensions@1.5.1`, declared Apache-2.0. The approved published artifact is:
+
+- Registry tarball: `https://registry.npmjs.org/fs-native-extensions/-/fs-native-extensions-1.5.1.tgz`
+- Size: **467,359 bytes**
+- SHA-512 integrity: `sha512-abjiHKkYdcH5M9ikBEJb0MKb/fEpPtZx/yfLHzTptvUAoiFayX0tIe0BTLBU4SAoRyjZLzA0dP1Rn2p0+QRyVg==`
+- Published `gitHead`: `d67c02bf2abe79fa9f277035d4f14da5aa3c4007`
+- Source: [holepunchto/fs-native-extensions at that commit](https://github.com/holepunchto/fs-native-extensions/tree/d67c02bf2abe79fa9f277035d4f14da5aa3c4007)
+
+The downloaded tarball hash/size and registry metadata were checked, and all
+**38** installed files were compared byte-for-byte with that tarball. Its
+`src/apple.c` calls exclusive nonblocking `flock`; `src/linux.c` calls
+`F_OFD_SETLK`, not process-associated `F_SETLK`. The package supplies source and
+prebuilt Node (`.node`) and Bare (`.bare`) modules. MissionSpec uses the Node
+prebuild, N-API 9 according to the supplied CMake configuration, and does not
+compile native code or run an install script. This is provenance of a pinned
+publisher artifact, **not a reproducible-build attestation** for its binaries.
+
+The locked new CLI closure is:
+
+| Package | Version | Published gitHead |
+| --- | --- | --- |
+| `fs-native-extensions` | `1.5.1` | `d67c02bf2abe79fa9f277035d4f14da5aa3c4007` |
+| `require-addon` | `1.3.0` | `b4e29ff008cf5c90d810a7fd7ff23fb4acb4e492` |
+| `which-runtime` | `1.4.0` | `d4732d849da866990f532de53d7d0a02847ea374` |
+| `bare-addon-resolve` | `1.10.1` | `ed517fb0d5a09621828ff1d929934f6b55144550` |
+| `bare-module-resolve` | `1.12.5` | `7eb9db6c56af688e15c790cff460eb59794aa9ad` |
+| `bare-semver` | `1.1.0` | `25db5754521e65ccf1a32eff55a4e53f663744a9` |
+
+Each new tarball's SHA-512 was independently checked against its lock entry and
+registry metadata. All six installed `LICENSE` files match their tarballs and
+contain the same full Apache-2.0 text, SHA-256
+`c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4`.
+The supplemental `src/win32/nt.h` says its API declarations are mostly taken from
+`winternl.h` and Windows SDK documentation and retains
+**Copyright (c) Microsoft Corp. All rights reserved.**
+The notice generator retains that entire unmodified header (SHA-256
+`8c92b0e378a2a1614b3793b6dcef37435a5567d89448941b5ebf76fc37f4d2d2`)
+under an exact CLI version/tarball/header pin. This preserves attribution; it is
+not a new license grant or a generic exception for missing/conflicting licenses.
+
+The CLI inventory now has **133 runtime packages** (six added) and 28
+development-only classifications. The independent service remains **63**
+runtime packages; its lock, inventory, notices and exact external-entities
+provenance are unchanged.
+
+Audited Node prebuild SHA-256 values:
+
+| Target | SHA-256 | Qualification in this change |
+| --- | --- | --- |
+| `darwin-arm64` | `1e93b74e556b7d1767d57fabb197d9d1df5641453967170537278f72ed46f018` | Real macOS arm64, Node 24.21.0 |
+| `linux-arm64` | `895dd0dca09438454f28bba250bcafa3e69c937fe97ea46b1b6212dc3a81315c` | Actual local Linux Docker volume, Node 24.21.0 / glibc 2.36 |
+| `darwin-x64` | `973e4b2addf30901b955c75626ac153d3a37cebcfa621375bcd490f199884c8e` | Artifact checked; native execution pending |
+| `linux-x64` | `13657db7ce92f823ee8066cc7244f3a475340707fc065fd4f5aceeebbfa898c3` | Artifact checked; native execution pending |
+
+The Linux qualification uses already-cached
+`node@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6`
+with `--pull=never`, networking disabled, a read-only container root and
+owned native-volume test storage. No source, credentials or artifacts are
+uploaded. The loaded Linux target is the table's `linux-arm64` Node prebuild.
+The corresponding mutex FD-close/worker, competing recovery, quarantine
+interruption, lifecycle, store, workflow and source-patch selectors are:
+
+```sh
+npm run build
+node --test tests/posix-native-lock.test.mjs tests/persistence-mutex-fd.test.mjs tests/persistence-posix-races.test.mjs tests/evidence-pruning.test.mjs tests/runtime-lifecycle.test.mjs tests/runtime-store.test.mjs tests/local-workflow.test.mjs tests/source-patch.test.mjs
+```
+
+This exact selection passed **174/174 with zero skips** on both macOS arm64
+and the Linux/glibc arm64 volume. The macOS run including license-checker
+regressions passed **197/197**. The actual Alpine adapter probe separately
+confirmed read-only import succeeds and writer admission fails before creating
+any mutex/bootstrap state; that negative check is not native-lock qualification.
+
+**Packaging/platform constraints:** install the committed root lock with
+`npm ci --ignore-scripts`; new transitive resolutions require a renewed audit.
+The MissionSpec tarball ships these notices, inventory, adapter and provenance
+documentation; npm installs the original dependency tarballs separately, with
+their native prebuilds/source/legal files intact. No binaries are copied into
+MissionSpec's `dist`, no host compiler is required, and there is no system
+`flock`, SQLite-lock, mkdir/PID or native-rebuild fallback.
+The adapter lazily validates/loads only the pinned package on POSIX arm64/x64
+with Node >=24.21.0 <25. Read-only imports and Windows dispatch do not load it.
+
+**Alpine/musl is unsupported for native writer effects with this pin.**
+Actual Node 24.21.0 Alpine arm64 inspection found that `require-addon@1.3.0`
+requests `linux-arm64-musl`, which this tarball does not ship. Admission fails
+closed; the loader is not bypassed by directly loading a glibc binary.
+The upstream tarball's other targets, including Windows/Android and Bare, do
+not establish MissionSpec qualification. Existing Windows native write/lock
+handling is unchanged; the separate Windows held-read candidate still requires
+its own [native selectors](architecture/windows-state.md#persistence-held-read-candidate).
 
 ### Exact upstream service notice: entities 2.1.0
 

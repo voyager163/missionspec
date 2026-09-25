@@ -38,9 +38,9 @@ function Effect-HashBytes([byte[]]$bytes) {
   finally { $hash.Dispose() }
 }
 
-function Effect-Read($item, [int]$limit = 8000000) {
+function Effect-Read($item, [int]$limit = 8000000, [bool]$prefix = $false) {
   $info = Effect-Info $item.handle
-  if ([decimal]$info.size -gt $limit) { throw 'effect-size' }
+  if (!$prefix -and [decimal]$info.size -gt $limit) { throw 'effect-size' }
   $position = [int64]0
   if (!$native::SetFilePointerEx($item.handle, 0, [ref]$position, 0)) { throw 'effect-read' }
   $buffer = [Runtime.InteropServices.Marshal]::AllocHGlobal(65536)
@@ -48,14 +48,17 @@ function Effect-Read($item, [int]$limit = 8000000) {
   try {
     $bytes = [byte[]]::new(65536)
     while ($true) {
+      if ($prefix -and $output.Length -eq $limit) { break }
+      $requested = if ($prefix) { [uint32][Math]::Min(65536, $limit - $output.Length) } else { [uint32]65536 }
       $read = [uint32]0
-      if (!$native::ReadFile($item.handle, $buffer, 65536, [ref]$read, [IntPtr]::Zero)) { throw 'effect-read' }
+      if (!$native::ReadFile($item.handle, $buffer, $requested, [ref]$read, [IntPtr]::Zero)) { throw 'effect-read' }
       if ($read -eq 0) { break }
       if ($read -gt 65536 -or $output.Length + $read -gt $limit) { throw 'effect-size' }
       [Runtime.InteropServices.Marshal]::Copy($buffer, $bytes, 0, $read)
       $output.Write($bytes, 0, $read)
     }
-    if ($output.Length -ne [decimal]$info.size) { throw 'effect-identity' }
+    $expectedLength = if ($prefix) { [Math]::Min([decimal]$info.size, $limit) } else { [decimal]$info.size }
+    if ($output.Length -ne $expectedLength) { throw 'effect-identity' }
     return ,$output.ToArray()
   } finally { $output.Dispose(); [Runtime.InteropServices.Marshal]::FreeHGlobal($buffer) }
 }
@@ -163,13 +166,13 @@ function Effect-PinDirectory($context, [string]$p, [bool]$create = $false) {
     $next = [IO.Path]::Combine($parent.path, $name)
     if ($context.directories.ContainsKey($next)) { $parent = $context.directories[$next]; continue }
     $private = $next -ceq $context.root -or $next.StartsWith($context.root + '\', [StringComparison]::Ordinal)
-    $access = if ($private) { 0x1201BF } else { 0x1200A9 }
+    $access = if ($private -and !$context.readOnly) { 0x1201BF } else { 0x1200A9 }
     $entry = Effect-OpenRelative $context $parent $name $true $false $access 1 $null ($create -and $private -and $next -cne $context.root)
     if ($null -eq $entry) {
       $entry = Effect-OpenRelative $context $parent $name $true $true $access 1
       Effect-FlushDirectory $parent
     }
-    CheckEntry $next $private $true $private $false $null $false $entry.handle
+    CheckEntry $next $private $true ($private -and !$context.readOnly) $false $null $false $entry.handle
     if ($next -ceq $context.root -and !(Effect-SameIdentity (Effect-Info $entry.handle) $context.identity)) { throw 'effect-root' }
     $context.directories.Add($next, $entry)
     $parent = $entry
@@ -183,7 +186,7 @@ function Effect-OpenFile($context, [string]$p, [bool]$destructive = $false, [boo
   if ($writable) { $access = $access -bor 0x102 }
   $item = Effect-OpenRelative $context $parent ([IO.Path]::GetFileName($p)) $false $false $access 1 $null $optional
   if ($null -eq $item) { return $null }
-  CheckEntry $p $true $false $true $false $null $true $item.handle
+  CheckEntry $p $true $false (!$context.readOnly) $false $null $true $item.handle
   return $item
 }
 
@@ -418,6 +421,7 @@ function Invoke-MissionSpecFileOperation($operation) {
   $script:phase = 'file-operation'
   $context = @{
     root=[string]$operation.root;identity=$operation.rootIdentity
+    readOnly=([string]$operation.kind -ceq 'read')
     directories=[Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
     handles=[Collections.Generic.List[object]]::new()
   }
@@ -428,6 +432,32 @@ function Invoke-MissionSpecFileOperation($operation) {
     }
     if ($null -ne $operation.lease) { [void](Effect-Lease $context $operation.lease) }
     switch ([string]$operation.kind) {
+      'read' {
+        $fields = @('kind', 'root', 'rootIdentity', 'path', 'expected', 'maxBytes', 'prefix')
+        if (@($operation.psobject.Properties.Name).Count -ne $fields.Count -or
+            @($fields | Where-Object { $_ -cnotin @($operation.psobject.Properties.Name) }).Count -ne 0 -or
+            ($operation.maxBytes -isnot [int] -and $operation.maxBytes -isnot [long]) -or
+            $operation.maxBytes -lt 1 -or $operation.maxBytes -gt 8000000 -or
+            $operation.prefix -isnot [bool] -or $null -eq $operation.expected -or
+            @($operation.expected.psobject.Properties.Name).Count -ne 2 -or
+            $operation.expected.device -isnot [string] -or $operation.expected.inode -isnot [string] -or
+            [string]$operation.expected.device -cnotmatch '^(0|[1-9][0-9]{0,9})$' -or
+            [decimal]$operation.expected.device -gt 4294967295 -or
+            [string]$operation.expected.inode -cnotmatch '^[1-9][0-9]{0,19}$' -or
+            [decimal]$operation.expected.inode -gt [decimal]'18446744073709551615') { throw 'effect-read' }
+        $item = Effect-OpenFile $context ([string]$operation.path)
+        $before = Effect-Info $item.handle
+        if (!(Effect-SameIdentity $before $operation.expected)) { throw 'effect-identity' }
+        Effect-Progress 'read-held'
+        CheckEntry $item.path $true $false $false $false $null $true $item.handle
+        $security = Effect-Security $item
+        $bytes = Effect-Read $item ([int]$operation.maxBytes) ([bool]$operation.prefix)
+        CheckEntry $item.path $true $false $false $false $null $true $item.handle
+        $after = Effect-Info $item.handle
+        if (!(Effect-SameIdentity $before $after) -or $before.size -cne $after.size -or
+            $security.fingerprint -cne (Effect-Security $item).fingerprint) { throw 'effect-identity' }
+        return @{device=$after.device;inode=$after.inode;contentBase64=[Convert]::ToBase64String($bytes)}
+      }
       'parents' {
         [void](Effect-PinDirectory $context ([string]$operation.path) $true)
         return $null

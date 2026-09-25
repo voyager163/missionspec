@@ -1,8 +1,8 @@
-import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, readdirSync } from 'node:fs';
+import { lstatSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { digestContent, parseDigest, parseWorkspaceBinding, sameWorkspaceBinding, type ContentDigest, type WorkspaceBinding } from '../../kernel/revisions.js';
 import { record, text } from '../../kernel/validation.js';
-import { checkPrivatePath, parseOptions } from './filesystem.js';
+import { parseOptions } from './filesystem.js';
 import { StoreFailure } from './failures.js';
 import { readPrivateStateFile } from './lifecycle-files.js';
 
@@ -57,11 +57,9 @@ export function resolveRuntimeState(workspaceRoot: string, workspace: WorkspaceB
   const canonical = path.join(workspaceRoot, '.missionspec', 'state');
   parseOptions({ directory: canonical, expectedWorkspace: workspace, mode: 'read-only' });
   const filename = path.join(workspaceRoot, runtimeSelectionPath);
-  let descriptor: number;
+  let content: string;
   try {
-    lstatSync(filename);
-    checkPrivatePath(filename, false);
-    descriptor = openSync(filename, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    content = readPrivateStateFile(filename, 16_384);
   } catch (error) {
     if (typeof error === 'object' && error !== null && Reflect.get(error, 'code') === 'ENOENT') {
       try {
@@ -74,17 +72,7 @@ export function resolveRuntimeState(workspaceRoot: string, workspace: WorkspaceB
     }
     throw error;
   }
-  try {
-    const before = fstatSync(descriptor, { bigint: true });
-    if (before.size > 16_384n) throw new StoreFailure('corrupt', 'Runtime selection exceeds its bounded format.');
-    const bytes = Buffer.alloc(Number(before.size) + 1);
-    const size = readSync(descriptor, bytes, 0, bytes.length, 0);
-    const after = lstatSync(filename, { bigint: true });
-    if (BigInt(size) !== before.size || after.ino !== before.ino || after.dev !== before.dev ||
-        after.mtimeNs !== before.mtimeNs || after.ctimeNs !== before.ctimeNs) {
-      throw new StoreFailure('stale-revision', 'Runtime selection changed while being observed.');
-    }
-    const content = new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, size));
+  {
     const selected = record(JSON.parse(content) as unknown, 'runtimeSelection', ['schemaVersion', 'workspace', 'directory', 'generation']);
     if (selected.schemaVersion !== 1 || !sameWorkspaceBinding(parseWorkspaceBinding(selected.workspace), workspace)) {
       throw new StoreFailure('workspace-mismatch', 'Runtime selection has an unsupported or foreign workspace binding.');
@@ -95,7 +83,7 @@ export function resolveRuntimeState(workspaceRoot: string, workspace: WorkspaceB
     const revision = digestContent(content);
     checkSelectionHistory(workspaceRoot, workspace, revision, directory, generation);
     return { directory, workspaceRoot, revision, kind: directory === canonical ? 'default' : 'external' };
-  } finally { closeSync(descriptor); }
+  }
 }
 
 /** A missing selected external ledger is an error, never a fallback to a stale local copy. */

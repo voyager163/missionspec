@@ -16,6 +16,38 @@ These results qualify the tested private NTFS APIs, not a console channel,
 native execution, every Windows installation or physical power-loss behavior.
 POSIX success or mocked `process.platform` results are not Windows qualification.
 
+## Persistence held-read candidate
+
+The new private-workspace, selector, lifecycle-input, raw-evidence inspection and SQLite-header
+read path is **pending Windows qualification**, independently of the historical
+write/delete qualification above. It no longer attributes a completed external
+ACL check to a later Node file descriptor. The existing native helper pins
+ancestors and opens the actual regular single-link object directory-relatively,
+without write/delete sharing, checks its current-user SID/ACL and expected
+pre-open device/inode before reading, and rechecks admission/security/identity
+after a bounded read. Read-only handles do not request directory write or flush
+rights. No POSIX mode values are treated as Windows ACL evidence.
+
+The `read` wire request includes the pinned root identity, exact file identity,
+an explicit limit of 1–8,000,000 bytes, and a boolean prefix mode (used for the
+100-byte SQLite header). The sole success value has exactly `device`, `inode`
+and canonical `contentBase64`; the caller verifies shape, identity, decoded size
+and canonical encoding. Helper output is bounded from the requested size, not
+an unbounded process buffer. Unknown/malformed helper responses fail closed
+with the existing allowlisted diagnostics, never content-bearing error output.
+The `read-held` rendezvous allows native tests to attempt competing rename,
+write, hard-link and ACL changes before the reader rechecks admission.
+Writer schema-2 PID/creation-FILETIME leases and legacy-owner handling are unchanged.
+
+Required native qualification selectors (not counted as passing on POSIX):
+
+```sh
+npm run build
+node --test --test-concurrency=1 tests/persistence-held-read-windows.test.mjs tests/windows-private-state.test.mjs tests/windows-runtime-lifecycle.test.mjs
+node --test --test-concurrency=1 --test-name-pattern="^real Windows evidence-pruning preparation recovery" tests/windows-local-runtime.test.mjs
+node --test --test-concurrency=1 --test-name-pattern="^real Windows evidence-pruning partial-deletion recovery" tests/windows-local-runtime.test.mjs
+```
+
 ## Capability matrix
 
 | Surface | Windows behavior and qualification boundary |

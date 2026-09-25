@@ -4,12 +4,13 @@
   "packageName": "@msn-control/missionspec",
   "packageVersion": "0.0.0",
   "lockfile": "package-lock.json",
-  "lockfileDataSha256": "6bf3cdd71e42582fe356658d9c376c4c63f5bc806282d260284403a24c7e5e4b",
+  "lockfileDataSha256": "d610499273c8f01cb1478e2e7a57ab1d7c5f0432a4c0ee6c17c79aae651a38f8",
   "selection": "Complete locked runtime dependency/optional/peer closure; not a bundle or reachability analysis of executable code.",
   "provenanceLimit": "Tarball integrity is recorded from the lockfile; trust restoration via npm ci. This check does not independently authenticate installed source bytes.",
   "directDependencies": {
     "@modelcontextprotocol/sdk": "node_modules/@modelcontextprotocol/sdk",
     "ajv": "node_modules/ajv",
+    "fs-native-extensions": "node_modules/fs-native-extensions",
     "mdast-util-from-markdown": "node_modules/mdast-util-from-markdown",
     "yaml": "node_modules/yaml",
     "zod": "node_modules/zod"
@@ -229,6 +230,75 @@
           "path": "LICENSE",
           "sourceSha256": "9df3bb69929a3b650ed73b3bfa1756725aaff0ac296461605753547004eafeaf",
           "retainedSha256": "9df3bb69929a3b650ed73b3bfa1756725aaff0ac296461605753547004eafeaf"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/bare-addon-resolve",
+      "name": "bare-addon-resolve",
+      "version": "1.10.1",
+      "resolved": "https://registry.npmjs.org/bare-addon-resolve/-/bare-addon-resolve-1.10.1.tgz",
+      "integrity": "sha512-F/SD2du8keuYSb4xipnGz5j2E6yhNdHA8ZVxtHae6h2uOrpBIjjbhXvjzKZbr5XUOzqBzh/i8GVFycj2DlFQIA==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "Apache-2.0",
+      "optional": false,
+      "dependencies": {
+        "bare-module-resolve": "node_modules/bare-module-resolve",
+        "bare-semver": "node_modules/bare-semver"
+      },
+      "omittedOptional": [
+        "bare-url"
+      ],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "retainedSha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/bare-module-resolve",
+      "name": "bare-module-resolve",
+      "version": "1.12.5",
+      "resolved": "https://registry.npmjs.org/bare-module-resolve/-/bare-module-resolve-1.12.5.tgz",
+      "integrity": "sha512-VOncxVvVk8SQVw9vhcBnoTJD/74aR5DgdRPCm0gQ7uB5MsWpBJnoCeJrwEHKiz09O83ndf3NTjsz3LEuFxAq5A==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "Apache-2.0",
+      "optional": false,
+      "dependencies": {
+        "bare-semver": "node_modules/bare-semver"
+      },
+      "omittedOptional": [
+        "bare-url"
+      ],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "retainedSha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/bare-semver",
+      "name": "bare-semver",
+      "version": "1.1.0",
+      "resolved": "https://registry.npmjs.org/bare-semver/-/bare-semver-1.1.0.tgz",
+      "integrity": "sha512-1Hw5qJ7hXdVt3uPUqjeFTuxyvBUJauvz5A1I2jk8gzjZMHp04n//6nV9MDbG9CMw78JHY2lGV0w6s//LrASm2w==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "Apache-2.0",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "retainedSha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
         }
       ]
     },
@@ -986,6 +1056,34 @@
           "path": "LICENSE",
           "sourceSha256": "a0ec0dab16b3666f24950f86d257930ac2ad475557b4bfe245620e0817d8a45d",
           "retainedSha256": "a0ec0dab16b3666f24950f86d257930ac2ad475557b4bfe245620e0817d8a45d"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/fs-native-extensions",
+      "name": "fs-native-extensions",
+      "version": "1.5.1",
+      "resolved": "https://registry.npmjs.org/fs-native-extensions/-/fs-native-extensions-1.5.1.tgz",
+      "integrity": "sha512-abjiHKkYdcH5M9ikBEJb0MKb/fEpPtZx/yfLHzTptvUAoiFayX0tIe0BTLBU4SAoRyjZLzA0dP1Rn2p0+QRyVg==",
+      "relationship": "direct",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "Apache-2.0",
+      "optional": false,
+      "dependencies": {
+        "require-addon": "node_modules/require-addon",
+        "which-runtime": "node_modules/which-runtime"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "retainedSha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        },
+        {
+          "path": "src/win32/nt.h",
+          "sourceSha256": "8c92b0e378a2a1614b3793b6dcef37435a5567d89448941b5ebf76fc37f4d2d2",
+          "retainedSha256": "8c92b0e378a2a1614b3793b6dcef37435a5567d89448941b5ebf76fc37f4d2d2"
         }
       ]
     },
@@ -2337,6 +2435,28 @@
       ]
     },
     {
+      "location": "node_modules/require-addon",
+      "name": "require-addon",
+      "version": "1.3.0",
+      "resolved": "https://registry.npmjs.org/require-addon/-/require-addon-1.3.0.tgz",
+      "integrity": "sha512-j8pifaPNZI7ShKY3ihXZwF0qaEjua8zmlqPvDil0a8SBnyRvjCbAiEQuzO0UcoXH1sqU5U/ilXSjYd1W5NYwAA==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "Apache-2.0",
+      "optional": false,
+      "dependencies": {
+        "bare-addon-resolve": "node_modules/bare-addon-resolve"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "retainedSha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ]
+    },
+    {
       "location": "node_modules/require-from-string",
       "name": "require-from-string",
       "version": "2.0.2",
@@ -2786,6 +2906,26 @@
           "path": "LICENSE",
           "sourceSha256": "4ec3d4c66cd87f5c8d8ad911b10f99bf27cb00cdfcff82621956e379186b016b",
           "retainedSha256": "4ec3d4c66cd87f5c8d8ad911b10f99bf27cb00cdfcff82621956e379186b016b"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/which-runtime",
+      "name": "which-runtime",
+      "version": "1.4.0",
+      "resolved": "https://registry.npmjs.org/which-runtime/-/which-runtime-1.4.0.tgz",
+      "integrity": "sha512-0ugbP4CJW4e2D20jvEcC4973dCgIaHI4Rw1PT+26U9zEve7FyYdWAIwUnoeOYvoCfn+wXHoHTKb1KhkYlb60Pw==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "Apache-2.0",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "retainedSha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
         }
       ]
     },

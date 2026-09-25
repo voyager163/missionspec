@@ -129,6 +129,16 @@ SIDs and ACLs remain excluded.
 These controls are not protection against an adversarial machine owner or
 same-user process rewriting all private state.
 
+Selector, lifecycle journal/backup and SQLite-header reads now share held-object
+admission. POSIX readers validate the actual descriptor's regular type, UID,
+owner-only readable mode and single-link count **before reading**, bind it to
+the pre-open identity, use `O_NOFOLLOW | O_NONBLOCK`, bound all bytes, and recheck
+descriptor, pathname and real ancestor observations. A permissive, linked,
+special or identical-content replacement cannot be silently treated as the
+original observation. Windows reads use the separately qualified native
+directory-relative held reader described in [Windows state](windows-state.md);
+a completed external ACL check is not attributed to a later Node descriptor.
+
 An interrupted preparation can be retried with the same selection review. Its
 own demonstrably dead writer lock may be reclaimed; live, unrelated or replaced
 locks cannot. An incomplete SQLite file is not erased: preserve it and use a new
@@ -154,6 +164,17 @@ publication instead of attempting exclusive recreation. Mismatched, linked,
 insecure or replaced stages are preserved, not overwritten or removed. Already
 published outputs are revalidated and flushed before a recovered transaction
 can record completion.
+
+All compatible POSIX workspace writers, including selection recovery, now hold
+the native descriptor lock described in [evidence pruning](evidence-pruning.md#cooperative-writer-lock-recovery)
+before reclaiming, publishing or releasing `transaction.lock` owner metadata.
+The rejected SQLite mutex prototype is not a fallback. The replacement retains
+one OS descriptor on `writer-mutex.lock` and uses Darwin `flock` or Linux
+`F_OFD_SETLK`; unrelated same-process/worker descriptor closes cannot release it.
+This is a separate version-1 filesystem protocol, not a ledger migration.
+Read-only resolution creates no mutex and does not load the addon. Interrupted
+bootstrap, invalid mutex content and experimental SQLite mutex files fail
+closed; older binaries must be quiesced before upgrading.
 
 ## Version policy and migration tooling
 

@@ -281,6 +281,28 @@ export function inspectWindowsPrivateFile(scope: WindowsFileScope, filename: str
   } }));
 }
 
+/** ACL/type/identity admission and bounded bytes are obtained from the same native held object. */
+export function readWindowsPrivateFile(filename: string, expected: { readonly dev: bigint; readonly ino: bigint },
+  maxBytes: number, prefix = false): Buffer {
+  requireWindowsPrivateState();
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 8_000_000) throw new WindowsPrivateStateError('effect-size');
+  const root = path.dirname(filename);
+  const parent = lstatSync(root, { bigint: true });
+  const scope = { root, dev: parent.dev, ino: parent.ino };
+  const value = closedRecord(invokeWindowsHelper({ operation: {
+    ...operationScope(scope), kind: 'read', path: operationPath(scope, filename),
+    expected: { device: String(expected.dev), inode: String(expected.ino) }, maxBytes, prefix,
+  } }, Math.ceil(maxBytes / 3) * 4 + 16_384), ['device', 'inode', 'contentBase64'], 'effect-read');
+  if (value.device !== String(expected.dev) || value.inode !== String(expected.ino) ||
+      typeof value.contentBase64 !== 'string' ||
+      value.contentBase64.length > Math.ceil(maxBytes / 3) * 4 || /[^A-Za-z0-9+/=]/u.test(value.contentBase64)) {
+    throw new WindowsPrivateStateError('effect-read');
+  }
+  const bytes = Buffer.from(value.contentBase64, 'base64');
+  if (bytes.length > maxBytes || bytes.toString('base64') !== value.contentBase64) throw new WindowsPrivateStateError('effect-size');
+  return bytes;
+}
+
 export function syncWindowsPrivateFile(scope: WindowsFileScope, filename: string, digest: string): void {
   invokeWindowsHelper({ operation: {
     ...operationScope(scope), kind: 'sync', path: operationPath(scope, filename), digest: operationDigest(digest),
@@ -416,17 +438,17 @@ export function requireWindowsProcessAbsent(pid: number): void {
   invokeWindowsHelper({ entries: [], absentProcess: pid });
 }
 
-function invokeWindowsHelper(input: object): unknown {
+function invokeWindowsHelper(input: object, maxBuffer = 16_384): unknown {
   validateSystemPowerShell();
   const result = spawnSync(systemPowerShell, [
     '-NoLogo', '-NoProfile', '-NonInteractive', '-File', helper,
   ], {
     input: `${JSON.stringify(input)}\n${Object.hasOwn(input, 'operation') ? 'continue\n'.repeat(32) : ''}`, encoding: 'utf8', windowsHide: true,
-    timeout: 20_000, maxBuffer: 16_384, shell: false,
+    timeout: 20_000, maxBuffer, shell: false,
   });
   const lines = result.stdout.trim().split(/\r?\n/u);
   const last = lines.pop() ?? '';
-  const phases = new Set(['created-held', 'file-written', 'delete-held', 'publication-held', 'intent-durable', 'preimage-renamed',
+  const phases = new Set(['created-held', 'file-written', 'read-held', 'delete-held', 'publication-held', 'intent-durable', 'preimage-renamed',
     'preimage-retained', 'source-published', 'publication-durable', 'preimage-delete-held']);
   let value: unknown;
   try {

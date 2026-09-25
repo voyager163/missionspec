@@ -3,6 +3,25 @@
   "purpose": "Pinned legal-text evidence from reviewed locked dependency sets and the exact upstream service supplement; not a legal opinion. The --write inventory command must not update this file.",
   "reviewedFiles": [
     {
+      "licenseExpression": "Apache-2.0",
+      "retainedSha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+      "observedAt": [
+        "cli:fs-native-extensions@1.5.1:LICENSE",
+        "cli:require-addon@1.3.0:LICENSE",
+        "cli:which-runtime@1.4.0:LICENSE",
+        "cli:bare-addon-resolve@1.10.1:LICENSE",
+        "cli:bare-module-resolve@1.12.5:LICENSE",
+        "cli:bare-semver@1.1.0:LICENSE"
+      ]
+    },
+    {
+      "licenseExpression": "Apache-2.0",
+      "retainedSha256": "8c92b0e378a2a1614b3793b6dcef37435a5567d89448941b5ebf76fc37f4d2d2",
+      "observedAt": [
+        "cli:fs-native-extensions@1.5.1:src/win32/nt.h (complete upstream declarations and Microsoft attribution; not an independent license grant)"
+      ]
+    },
+    {
       "licenseExpression": "MIT",
       "retainedSha256": "750cb3fb6362804957ef52caaf9b5c824015be44d494637330d7cd8834d31d40",
       "observedAt": [

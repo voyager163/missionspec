@@ -1,27 +1,11 @@
-import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, fsyncSync, lstatSync, openSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { WorkflowError } from '../../application/errors.js';
 import { checkPrivatePath } from './filesystem.js';
+import { readPrivateBytes } from './private-reader.js';
 import { syncWindowsPrivateDirectory, writeWindowsPrivateFile } from '../platform/windows-private-state.js';
 
 export function readPrivateStateFile(filename: string, maxBytes: number): string {
-  lstatSync(filename);
-  checkPrivatePath(filename, false);
-  const descriptor = openSync(filename, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-  try {
-    const before = fstatSync(descriptor, { bigint: true });
-    if (before.size > BigInt(maxBytes)) throw new WorkflowError('limit-reached', 'Private state input exceeds its bounded reader.');
-    const bytes = Buffer.alloc(Number(before.size) + 1);
-    const size = readSync(descriptor, bytes, 0, bytes.length, 0);
-    const current = lstatSync(filename, { bigint: true });
-    const after = fstatSync(descriptor, { bigint: true });
-    if (BigInt(size) !== before.size || before.dev !== current.dev || before.ino !== current.ino ||
-        before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs ||
-        after.mtimeNs !== current.mtimeNs || after.ctimeNs !== current.ctimeNs) {
-      throw new WorkflowError('stale-revision', 'Private state input changed while being read.');
-    }
-    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes.subarray(0, size));
-  } finally { closeSync(descriptor); }
+  return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(readPrivateBytes(filename, maxBytes));
 }
 
 export function syncStateDirectory(directory: string): void {
