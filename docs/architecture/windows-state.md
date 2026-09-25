@@ -18,9 +18,13 @@ POSIX success or mocked `process.platform` results are not Windows qualification
 
 ## Persistence held-read candidate
 
-The new private-workspace, selector, lifecycle-input, raw-evidence inspection and SQLite-header
-read path is **pending Windows qualification**, independently of the historical
-write/delete qualification above. It no longer attributes a completed external
+The private-workspace, selector, lifecycle-input, raw-evidence inspection and
+SQLite-header component checks passed at `0c2bace` in
+[run 36109084309](https://github.com/voyager163/missionspec/actions/runs/36109084309).
+However, the full source and runtime-lifecycle scenarios exceeded their
+unchanged 720-second limits. **End-to-end qualification is still pending**;
+component success does not clear those failures or authorize alert adjudication.
+The reader no longer attributes a completed external
 ACL check to a later Node file descriptor. The existing native helper pins
 ancestors and opens the actual regular single-link object directory-relatively,
 checks its current-user SID/ACL and expected
@@ -39,6 +43,19 @@ a held exclusive database transaction reports busy instead of bypassing SQLite
 contention. Header bytes are read twice while the lock is held, with file size,
 last-write time, identity, ACL and link admission rechecked before returning.
 This is a coherent header observation, not immutable whole-database access.
+
+The follow-up removes duplicate helper launches, not admission checks or
+deadlines. Private workspace reads pin `.missionspec` and every private
+descendant in the same native invocation that returns the bytes. Missing-file
+reads still validate existing private ancestors before returning absence.
+Store checks supply a closed `store` header-admission object containing the
+expected state-directory identity and required writable access. The helper
+validates `.missionspec`, `state`, and the held database together, rechecking
+private-directory ACLs before and after reading. Ordinary reads cannot use that
+object. Native regression cases require exactly one helper invocation for each
+combined read/check and retain unsafe-ancestor, read-only, identity-substitution,
+and SQLite-contention rejection. The two long integration scenarios report
+only aggregate helper-kind counts and elapsed milliseconds, not paths or bytes.
 
 Store device/inode observations use `BigIntStats` end to end. Converting a
 rounded JavaScript-number inode to bigint is not accepted as exact NTFS identity.

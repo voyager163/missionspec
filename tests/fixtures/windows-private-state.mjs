@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
+import childProcess, { spawnSync } from 'node:child_process';
 import { lstatSync, rmdirSync, rmSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import path from 'node:path';
 import {
   validateWindowsStatePath, windowsPrivateEntries, windowsPrivateStateDiagnostic, WindowsPrivateStateError,
@@ -11,6 +12,35 @@ import { parseProjectPath } from '../../dist/kernel/identifiers.js';
 export const windows = { skip: process.platform !== 'win32', timeout: 240_000 };
 export const privateEntry = (target, directory = false, create = false) =>
   windowsPrivateEntries([{ path: target, directory, writable: true, create }]);
+
+export function profileWindowsHelpers(t) {
+  const original = childProcess.spawnSync;
+  const calls = [];
+  childProcess.spawnSync = function(command, args, options) {
+    if (command !== 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' ||
+        !args?.some((value) => /[\\/]windows-private-state\.ps1$/u.test(value))) {
+      return original.call(this, command, args, options);
+    }
+    const request = JSON.parse(options.input.split('\n')[0]);
+    const kind = request.operation?.kind ?? request.kind ?? 'entries';
+    const started = performance.now();
+    try { return original.call(this, command, args, options); }
+    finally { calls.push({ kind, elapsedMs: performance.now() - started }); }
+  };
+  syncBuiltinESMExports();
+  t.after(() => {
+    childProcess.spawnSync = original;
+    syncBuiltinESMExports();
+    const summary = {};
+    for (const call of calls) {
+      const entry = summary[call.kind] ??= { count: 0, elapsedMs: 0 };
+      entry.count += 1;
+      entry.elapsedMs += Math.round(call.elapsedMs);
+    }
+    t.diagnostic(`Native helper calls/time only: ${JSON.stringify(summary)}`);
+  });
+  return calls;
+}
 
 export function powershell(source, value) {
   const script = "[Console]::InputEncoding = [Text.UTF8Encoding]::new($false, $true)\n" +

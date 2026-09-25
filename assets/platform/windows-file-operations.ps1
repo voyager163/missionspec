@@ -231,8 +231,18 @@ function Effect-SqliteReadLock($item) {
   }
 }
 
+function Check-EffectReadDirectories($context, [bool]$writable) {
+  foreach ($directory in $context.directories.Values) {
+    if ($directory.path -ceq $context.root -or $directory.path.StartsWith($context.root + '\', [StringComparison]::Ordinal)) {
+      CheckEntry $directory.path $true $true $writable $false $null $false $directory.handle
+    }
+  }
+}
+
 function Invoke-EffectRead($context, $operation) {
   $fields = @('kind', 'root', 'rootIdentity', 'path', 'expected', 'maxBytes', 'prefix')
+  $storeAdmission = 'store' -cin @($operation.psobject.Properties.Name)
+  if ($storeAdmission) { $fields += 'store' }
   if (@($operation.psobject.Properties.Name).Count -ne $fields.Count -or
       @($fields | Where-Object { $_ -cnotin @($operation.psobject.Properties.Name) }).Count -ne 0 -or
       $operation.kind -isnot [string] -or $operation.kind -cnotin @('read', 'sqlite-header') -or
@@ -246,27 +256,49 @@ function Invoke-EffectRead($context, $operation) {
       [decimal]$operation.expected.device -gt 4294967295 -or
       [string]$operation.expected.inode -cnotmatch '^[1-9][0-9]{0,19}$' -or
       [decimal]$operation.expected.inode -gt [decimal]'18446744073709551615') { throw 'effect-read' }
+  $ledgerDirectory = [IO.Path]::GetDirectoryName([string]$operation.path)
+  $stateRoot = [IO.Path]::GetDirectoryName($ledgerDirectory)
   if ($context.sqliteHeader -and ($operation.maxBytes -ne 100 -or !$operation.prefix -or
       [IO.Path]::GetFileName([string]$operation.path) -cne 'ledger.sqlite' -or
-      [IO.Path]::GetFileName($context.root) -cne 'state' -or
-      [IO.Path]::GetFileName([IO.Path]::GetDirectoryName($context.root)) -cne '.missionspec')) { throw 'sqlite-header' }
+      [IO.Path]::GetFileName($ledgerDirectory) -cne 'state' -or
+      [IO.Path]::GetFileName($stateRoot) -cne '.missionspec' -or
+      (!$storeAdmission -and $context.root -cne $ledgerDirectory))) { throw 'sqlite-header' }
+  if ($storeAdmission) {
+    $store = $operation.store
+    if (!$context.sqliteHeader -or $context.root -cne $stateRoot -or $null -eq $store -or
+        @($store.psobject.Properties.Name).Count -ne 2 -or
+        @('directoryIdentity','writable' | Where-Object { $_ -cnotin @($store.psobject.Properties.Name) }).Count -ne 0 -or
+        $store.writable -isnot [bool] -or $null -eq $store.directoryIdentity -or
+        @($store.directoryIdentity.psobject.Properties.Name).Count -ne 2 -or
+        $store.directoryIdentity.device -isnot [string] -or $store.directoryIdentity.inode -isnot [string] -or
+        $store.directoryIdentity.device -cnotmatch '^(0|[1-9][0-9]{0,9})$' -or
+        [decimal]$store.directoryIdentity.device -gt 4294967295 -or
+        $store.directoryIdentity.inode -cnotmatch '^[1-9][0-9]{0,19}$' -or
+        [decimal]$store.directoryIdentity.inode -gt [decimal]'18446744073709551615') { throw 'sqlite-header' }
+  }
   $item = Effect-OpenFile $context ([string]$operation.path) $false $false $false $context.sqliteHeader
   if (!(Effect-SameIdentity (Effect-Info $item.handle) $operation.expected)) { throw 'effect-identity' }
+  if ($storeAdmission) {
+    if (!(Effect-SameIdentity (Effect-Info $item.parent.handle) $store.directoryIdentity)) { throw 'effect-identity' }
+  }
+  $writable = $storeAdmission -and $store.writable
   if ($context.sqliteHeader) { Effect-SqliteReadLock $item }
   $before = Effect-Info $item.handle
   Effect-Progress 'read-held'
-  CheckEntry $item.path $true $false $false $false $null $true $item.handle
+  Check-EffectReadDirectories $context $writable
+  CheckEntry $item.path $true $false $writable $false $null $true $item.handle
   $security = Effect-Security $item
   $bytes = Effect-Read $item ([int]$operation.maxBytes) ([bool]$operation.prefix)
   if ($context.sqliteHeader) {
     if ($bytes.Length -ne 100 -or
         [Text.Encoding]::ASCII.GetString($bytes, 0, 16) -cne ('SQLite format 3' + [char]0)) { throw 'sqlite-header' }
     Effect-Progress 'sqlite-header-read'
-    CheckEntry $item.path $true $false $false $false $null $true $item.handle
+    CheckEntry $item.path $true $false $writable $false $null $true $item.handle
     $again = Effect-Read $item 100 $true
     if ((Effect-HashBytes $bytes) -cne (Effect-HashBytes $again)) { throw 'sqlite-header' }
   }
-  CheckEntry $item.path $true $false $false $false $null $true $item.handle
+  Check-EffectReadDirectories $context $writable
+  CheckEntry $item.path $true $false $writable $false $null $true $item.handle
   $after = Effect-Info $item.handle
   if (!(Effect-SameIdentity $before $after) -or $before.size -cne $after.size -or
       $before.written -cne $after.written -or

@@ -11,8 +11,10 @@ import { readPrivateStateFile } from '../dist/adapters/persistence/lifecycle-fil
 import { readPrivateBytes, readPrivateSqliteHeader } from '../dist/adapters/persistence/private-reader.js';
 import { readWindowsPrivateFile, windowsPrivateEntries, windowsPrivateStateDiagnostic } from '../dist/adapters/platform/windows-private-state.js';
 import { failure } from '../dist/adapters/persistence/failures.js';
+import { LocalWorkspace } from '../dist/adapters/filesystem/local-workspace.js';
+import { checkFiles } from '../dist/adapters/persistence/filesystem.js';
 import { windowsFileSecurity } from './fixtures/windows-file-security.mjs';
-import { createPrivateFixtureRoot, removeFixtureRoot } from './fixtures/windows-private-state.mjs';
+import { createPrivateFixtureRoot, removeFixtureRoot, profileWindowsHelpers } from './fixtures/windows-private-state.mjs';
 
 const windows = { skip: process.platform !== 'win32', timeout: 180_000 };
 const helper = fileURLToPath(new URL('../assets/platform/windows-private-state.ps1', import.meta.url));
@@ -213,4 +215,82 @@ test('Windows SQLite header admission retains foreign replacements and rejects n
   assert.throws(() => readPrivateSqliteHeader(f.filename, current));
   rmSync(`${f.filename}.alias`);
   assert.equal(readPrivateSqliteHeader(f.filename, current).length, 100);
+});
+
+test('Windows private workspace reads validate every private ancestor in one native invocation', windows, async (t) => {
+  const f = fixture(t);
+  const root = path.join(f.root, '.missionspec');
+  const nested = path.join(root, 'nested');
+  for (const directory of [root, nested]) {
+    windowsPrivateEntries([{ path: directory, directory: true, writable: true, create: true }]);
+  }
+  const filename = path.join(nested, 'private.json');
+  renameSync(f.filename, filename);
+  const files = await LocalWorkspace.open(f.root);
+  const calls = profileWindowsHelpers(t);
+  assert.equal((await files.read('.missionspec/nested/private.json')).content, f.content);
+  assert.deepEqual(calls.map((call) => call.kind), ['read']);
+  for (const directory of [root, nested]) {
+    const saved = windowsFileSecurity({ path: directory, directory: true }).sddl;
+    try {
+      windowsFileSecurity({ path: directory, directory: true, publicRead: true });
+      await assert.rejects(files.read('.missionspec/nested/private.json'));
+      await assert.rejects(files.read('.missionspec/nested/missing.json'));
+    } finally { windowsFileSecurity({ path: directory, directory: true, restoreSddl: saved }); }
+  }
+  assert.equal(await files.read('.missionspec/nested/missing.json'), null);
+  const identity = lstatSync(filename, { bigint: true });
+  const parent = lstatSync(root, { bigint: true });
+  const reader = heldReader({
+    kind: 'read', root, rootIdentity: { device: String(parent.dev), inode: String(parent.ino) },
+    path: filename, expected: { device: String(identity.dev), inode: String(identity.ino) },
+    maxBytes: 30_000, prefix: false,
+  });
+  const saved = windowsFileSecurity({ path: root, directory: true }).sddl;
+  try {
+    assert.deepEqual(await reader.next(), { phase: 'read-held' });
+    windowsFileSecurity({ path: root, directory: true, publicRead: true });
+    reader.proceed();
+    const result = await reader.next();
+    assert.equal(result.ok, false);
+    assert.equal(Object.hasOwn(result, 'value'), false);
+    assert.notEqual(await reader.finish(), 0);
+  } finally {
+    await reader.stop();
+    windowsFileSecurity({ path: root, directory: true, restoreSddl: saved });
+  }
+});
+
+test('Windows store checks fuse held header, exact directory identity and writable ACL admission', windows, (t) => {
+  const f = sqliteFixture(t);
+  const directory = path.dirname(f.filename);
+  const files = {
+    filename: f.filename, directory, directoryIdentity: lstatSync(directory, { bigint: true }),
+    identity: f.identity, writable: true,
+  };
+  const calls = profileWindowsHelpers(t);
+  try {
+    checkFiles(files);
+    assert.deepEqual(calls.map((call) => call.kind), ['sqlite-header']);
+    assert.throws(() => readPrivateSqliteHeader(f.filename, f.identity, {
+      directoryIdentity: { dev: files.directoryIdentity.dev, ino: files.directoryIdentity.ino + 1n }, writable: true,
+    }), (error) => windowsPrivateStateDiagnostic(error).startsWith('effect-identity'));
+    for (const target of [path.dirname(directory), directory]) {
+      const saved = windowsFileSecurity({ path: target, directory: true }).sddl;
+      try {
+        windowsFileSecurity({ path: target, directory: true, publicRead: true });
+        assert.throws(() => checkFiles(files));
+      } finally { windowsFileSecurity({ path: target, directory: true, restoreSddl: saved }); }
+    }
+    const saved = windowsFileSecurity({ path: directory, directory: true }).sddl;
+    try {
+      windowsFileSecurity({ path: directory, directory: true, readOnly: true });
+      assert.throws(() => checkFiles(files));
+      assert.doesNotThrow(() => checkFiles({ ...files, writable: false }));
+    } finally { windowsFileSecurity({ path: directory, directory: true, restoreSddl: saved }); }
+    f.db.exec('BEGIN EXCLUSIVE');
+    try { assert.throws(() => checkFiles(files), (error) => failure(error).error.fields.includes('busy')); }
+    finally { f.db.exec('ROLLBACK'); }
+    assert.doesNotThrow(() => checkFiles(files));
+  } finally { f.db.close(); }
 });

@@ -168,13 +168,7 @@ export function prepareFiles(options: Required<RuntimeStoreOptions>): StoreFiles
 }
 
 export function checkFiles(files: StoreFiles): void {
-  if (process.platform === 'win32') {
-    windowsPrivateEntries([
-      { path: path.dirname(files.directory), directory: true, writable: files.writable },
-      { path: files.directory, directory: true, writable: files.writable },
-      { path: files.filename, directory: false, writable: files.writable },
-    ]);
-  } else checkAncestors(path.dirname(files.directory));
+  if (process.platform !== 'win32') checkAncestors(path.dirname(files.directory));
   const directory = lstatSync(files.directory, { bigint: true });
   const file = lstatSync(files.filename, { bigint: true });
   if (process.platform !== 'win32') {
@@ -188,7 +182,9 @@ export function checkFiles(files: StoreFiles): void {
   rejectPrototypeFiles(files.directory);
   checkSidecars(files.filename);
   {
-    const header = readPrivateSqliteHeader(files.filename, files.identity);
+    const header = readPrivateSqliteHeader(files.filename, files.identity, {
+      directoryIdentity: files.directoryIdentity, writable: files.writable,
+    });
     if (header.length !== 100 ||
         header.subarray(0, 16).toString('ascii') !== 'SQLite format 3\0') {
       throw new StoreFailure('corrupt', 'Runtime store has an invalid SQLite header.');

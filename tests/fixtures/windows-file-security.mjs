@@ -9,7 +9,16 @@ $ErrorActionPreference = 'Stop'
 $v = [Console]::In.ReadToEnd() | ConvertFrom-Json
 . $v.policy
 $sections = [Security.AccessControl.AccessControlSections]'Owner, Group, Access'
-$security = [IO.File]::GetAccessControl($v.path, $sections)
+$entry = if ($v.directory) { [IO.Directory] } else { [IO.File] }
+$security = $entry::GetAccessControl($v.path, $sections)
+if ($v.readOnly) {
+  $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+  $security.SetAccessRuleProtection($true, $false)
+  $security.PurgeAccessRules($sid)
+  $inherit = if ($v.directory) { [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit' } else { [Security.AccessControl.InheritanceFlags]::None }
+  $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+    $sid, 'ReadAndExecute', $inherit, 'None', 'Allow'))
+}
 if ($v.removeSystem) {
   foreach ($rule in @($security.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]))) {
     if ($rule.IdentityReference.Value -eq 'S-1-5-18') { $security.RemoveAccessRuleSpecific($rule) }
@@ -20,8 +29,8 @@ if ($v.publicRead) {
     [Security.Principal.SecurityIdentifier]::new('S-1-1-0'), 'Read', 'Allow'))
 }
 if ($null -ne $v.restoreSddl) { $security.SetSecurityDescriptorSddlForm($v.restoreSddl, $sections) }
-if ($v.removeSystem -or $v.publicRead -or $null -ne $v.restoreSddl) { [IO.File]::SetAccessControl($v.path, $security) }
-$sddl = [IO.File]::GetAccessControl($v.path, $sections).GetSecurityDescriptorSddlForm($sections)
+if ($v.removeSystem -or $v.publicRead -or $v.readOnly -or $null -ne $v.restoreSddl) { $entry::SetAccessControl($v.path, $security) }
+$sddl = $entry::GetAccessControl($v.path, $sections).GetSecurityDescriptorSddlForm($sections)
 $key = Get-MissionSpecFileSecurityKey $sddl
 $hash = [Security.Cryptography.SHA256]::Create()
 try { $fingerprint = [BitConverter]::ToString($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes($key))).Replace('-', '').ToLowerInvariant() }

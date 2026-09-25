@@ -336,11 +336,14 @@ export class LocalWorkspace {
         relative === '.missionspec/writer-mutex.bootstrap') {
       throw new WorkflowError('scope-exceeded', 'The stable writer mutex is not a workspace text input.');
     }
+    const nativePrivateRead = process.platform === 'win32' && relative.startsWith('.missionspec/');
     let handle;
     try {
-      const target = await this.target(relative);
+      if (nativePrivateRead) this.windowsScope(false);
+      const target = nativePrivateRead ? path.join(this.root, relative) : await this.target(relative);
       if (relative.startsWith('.missionspec/')) {
-        const bytes = readPrivateBytes(target, 8_000_000);
+        const bytes = readPrivateBytes(target, 8_000_000,
+          nativePrivateRead ? { privateRoot: path.join(this.root, '.missionspec') } : {});
         return { path: relative, content: new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes),
           digest: digestContent(bytes) };
       }
@@ -366,7 +369,10 @@ export class LocalWorkspace {
       const content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes.subarray(0, length));
       return { path: relative, content, digest: digestContent(bytes.subarray(0, length)) };
     } catch (error) {
-      if (missing(error)) return null;
+      if (missing(error)) {
+        if (nativePrivateRead) await this.target(relative);
+        return null;
+      }
       throw error;
     } finally { await handle?.close(); }
   }

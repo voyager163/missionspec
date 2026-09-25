@@ -7,7 +7,7 @@ import { LocalRuntimeState } from '../dist/application/runtime-state.js';
 import { openLocalAuthority } from '../dist/adapters/authority/local-authority.js';
 import { openRuntimeStore, openWorkspaceRuntimeStore } from '../dist/adapters/persistence/index.js';
 import { digestContent } from '../dist/kernel/revisions.js';
-import { createPrivateFixtureRoot, removeFixtureRoot, privateEntry, checkPrivateFixturePathBudget } from './fixtures/windows-private-state.mjs';
+import { createPrivateFixtureRoot, removeFixtureRoot, privateEntry, checkPrivateFixturePathBudget, profileWindowsHelpers } from './fixtures/windows-private-state.mjs';
 import { WindowsPrivateStateError, windowsFailureDiagnostic, windowsPrivateStateDiagnostic } from '../dist/adapters/platform/windows-private-state.js';
 import { failure } from '../dist/adapters/persistence/failures.js';
 import { fixtureInventory } from './fixtures/filesystem-snapshot.mjs';
@@ -61,6 +61,7 @@ test('runtime error translation preserves bounded Windows diagnostics without ex
 });
 
 test('Windows native private runtime backup, raw restore, migration and external selection preserve current facts', windows, async (t) => {
+  profileWindowsHelpers(t);
   const fixture = createPrivateFixtureRoot([reservedPublication]);
   const stores = [];
   t.after(() => {

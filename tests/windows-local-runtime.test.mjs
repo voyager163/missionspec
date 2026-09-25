@@ -15,7 +15,7 @@ import { TerminalAuthority } from '../dist/adapters/authority/terminal.js';
 import { openRuntimeStore } from '../dist/adapters/persistence/index.js';
 import { parseWindowsWriterLock, requireWindowsProcessAbsent, windowsPrivateEntries } from '../dist/adapters/platform/windows-private-state.js';
 import { digestContent } from '../dist/kernel/revisions.js';
-import { createPrivateFixtureRoot, removeFixtureRoot, privateEntry } from './fixtures/windows-private-state.mjs';
+import { createPrivateFixtureRoot, removeFixtureRoot, privateEntry, profileWindowsHelpers } from './fixtures/windows-private-state.mjs';
 import { windowsFileSecurity } from './fixtures/windows-file-security.mjs';
 import { fixtureInventory } from './fixtures/filesystem-snapshot.mjs';
 
@@ -70,6 +70,7 @@ function child(input, status) {
 
 describe('Windows real application integration', { ...windows, timeout: 780_000 }, () => {
 test('real Windows setup, callback receipts, draft/capture and exact source patches preserve private data and ACLs', windows, async (t) => {
+  profileWindowsHelpers(t);
   const f = await fixture(t);
   for (const decision of ['decline', 'cancel', true, { approved: true }]) {
     f.decisions.value = decision;
