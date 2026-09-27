@@ -13,6 +13,7 @@ import { IMAGE_PHASES, buildDisabledImagePhase, receiverAnchor, prepareReceiverP
 import { QUEUE_PHASES, durableQueueCost, buildQueuePhase, queueEnvironment, queueTopology,
   qualifiedQueueRecords, verifyQueueTopology, verifyQueueReview, verifyQueueRecord, verifyQueueProviderOperations, verifyQueueApiCatalog,
   verifyQueueResource, verifyQueuePrivacy, verifyQueueDrain, verifyQueueWhatIf, queuePreflightBaseline, QueueTopologyController } from './durable-queue.mjs';
+import { collectEffectivePolicies, verifyEffectivePolicyEvidence, effectivePolicyScopes } from './effective-policy.mjs';
 import { PHASES, buildPhase, deploymentName, validateConfig, ids, digest, json, fail, sameId, storageContract, firstReleaseCost, assertOwned, RECEIVER_COMMAND,
   closed, budgetConfiguration, projectBudgetFilter, verifyFoundationBudgets, reconciliationBinding, assignmentRoleTargets,
   TOGGLE_PHASES, SYNTHETIC_LIMITS, SYNTHETIC_FIXTURES, requireAccess, validateWindowInstance } from './definition.mjs';
@@ -147,7 +148,7 @@ export async function load(directory, name, optional = false) {
   }
 }
 export async function sourceDigest() {
-  const names = ['definition.mjs', 'policy.mjs', 'controller.mjs', 'arm-whatif.py', 'receiver-upgrade.mjs', 'durable-queue.mjs'];
+  const names = ['definition.mjs', 'policy.mjs', 'controller.mjs', 'arm-whatif.py', 'receiver-upgrade.mjs', 'durable-queue.mjs', 'effective-policy.mjs'];
   const hash = createHash('sha256');
   for (const name of names) hash.update(name).update(await readFile(resolve(here, name)));
   const contract = await storageContract(); hash.update(json(contract));
@@ -442,18 +443,19 @@ export async function asyncWhatIf(c, phase, directory, options = {}) {
     throw error;
   }
 }
-export function transport(c, phase, directory, invoke = az, topology) {
+export function transport(c, phase, directory, invoke = az, topology, policyReads = new Set()) {
   const r = ids(c);
   const forbiddenOperations = new Set(['listkeys', 'listsecrets', 'listaccountsas', 'listservicesas', 'regeneratekey', 'register']);
   if (topology) verifyQueueTopology(c, topology);
   const diagnosticTargets = [r.workspace, r.environment, r.app, ...(topology ? [topology.ids.account, topology.ids.service] : [])]
     .map(id => id + '/providers/Microsoft.Insights/diagnosticSettings');
   return async (method, id, version, body, filter, beforeDispatch, beforeAssignmentWrite, beforeToggleWrite) => {
+    const policyRead = method === 'GET' && body === undefined && policyReads.has(json([id, version, filter ?? null]));
     const diagnosticRead = diagnosticTargets.includes(id) && method === 'GET' && version === DIAGNOSTIC_API && body === undefined && filter === undefined;
     const queueOperationsRead = topology && id === '/providers/Microsoft.Storage/operations' && method === 'GET' &&
       version === '2025-01-01' && body === undefined && filter === undefined;
-    if (!['GET', 'POST', 'PUT'].includes(method) || (!queueOperationsRead && id !== r.sub && !id.startsWith(`${r.sub}/`)) ||
-        /[?#\\]|\.\.|%/u.test(id) || (!/^\d{4}-\d{2}-\d{2}$/u.test(version) && !diagnosticRead) ||
+    if (!['GET', 'POST', 'PUT'].includes(method) || (!queueOperationsRead && !policyRead && id !== r.sub && !id.startsWith(`${r.sub}/`)) ||
+        /[?#\\]|\.\.|%/u.test(id) || (!/^\d{4}-\d{2}-\d{2}$/u.test(version) && !diagnosticRead && !policyRead) ||
         (id.toLowerCase().includes('/providers/microsoft.insights/diagnosticsettings') && !diagnosticRead) ||
         id.split('/').some(component => forbiddenOperations.has(component.toLowerCase()))) fail('ARM_SCOPE_FORBIDDEN');
     if (method === 'PUT' && id !== phase.deploymentId) fail('FIXED_PHASE_PUT_ONLY');
@@ -465,7 +467,7 @@ export function transport(c, phase, directory, invoke = az, topology) {
     if (method === 'POST' && id !== `${r.sub}/providers/Microsoft.ContainerRegistry/checkNameAvailability`) fail('NONMUTATING_POST_ONLY');
     const inventoryMetadata = method === 'GET' && id === `${r.group}/resources` && version === '2021-04-01' &&
       body === undefined && filter === '$expand=createdTime,changedTime';
-    if (filter && !filter.startsWith('$filter=') && !inventoryMetadata) fail('QUERY_NOT_SUPPORTED');
+    if (filter && !filter.startsWith('$filter=') && !inventoryMetadata && !policyRead) fail('QUERY_NOT_SUPPORTED');
     const args = ['rest', '--method', method, '--url', `https://management.azure.com${id}?api-version=${version}${filter ? '&' + filter : ''}`,
       '--subscription', c.subscriptionId, '--only-show-errors', '--output', 'json'];
     let name;
@@ -482,7 +484,7 @@ export function transport(c, phase, directory, invoke = az, topology) {
       // No await between the guard and transport invocation, including body-file preparation.
       if (method === 'PUT' && beforeDispatch() !== undefined) fail('DISPATCH_GUARD_REQUIRED');
       const result = await invoke(args);
-      if (result?.nextLink) fail('PAGINATION_REQUIRES_REVIEW');
+      if (result?.nextLink && !policyRead) fail('PAGINATION_REQUIRES_REVIEW');
       return result;
     } finally { if (name) await rm(resolve(directory, name)); }
   };
@@ -555,7 +557,12 @@ export async function publishedSourceDigest(commitSha, run = execute) {
     await run('git', ['merge-base', '--is-ancestor', commitSha, 'HEAD'], options);
     const file = async path => (await run('git', ['--no-pager', 'show', `${commitSha}:${path}`], options)).stdout;
     const hash = createHash('sha256');
-    for (const name of ['definition.mjs', 'policy.mjs', 'controller.mjs']) hash.update(name).update(await file(`infrastructure/arm/telemetry/${name}`));
+    let controller;
+    for (const name of ['definition.mjs', 'policy.mjs', 'controller.mjs']) {
+      const bytes = await file(`infrastructure/arm/telemetry/${name}`);
+      if (name === 'controller.mjs') controller = bytes.toString();
+      hash.update(name).update(bytes);
+    }
     const bridgePath = 'infrastructure/arm/telemetry/arm-whatif.py';
     const bridge = (await run('git', ['ls-tree', '--name-only', commitSha, '--', bridgePath], options)).stdout.toString().trim();
     if (bridge) {
@@ -573,6 +580,10 @@ export async function publishedSourceDigest(commitSha, run = execute) {
     if (queue) {
       if (queue !== queuePath) fail('PUBLISHED_ORIGIN_INVALID');
       hash.update('durable-queue.mjs').update(await file(queuePath));
+    }
+    // Historical controllers did not import this module or include it in their digest.
+    if (controller.includes("from './effective-policy.mjs'")) {
+      hash.update('effective-policy.mjs').update(await file('infrastructure/arm/telemetry/effective-policy.mjs'));
     }
     const schema = JSON.parse(await file('assets/schemas/telemetry-event.schema.json'));
     const columns = JSON.parse(await file('services/telemetry-ingest/schema/storage-columns.json'));
@@ -993,6 +1004,32 @@ export async function readQueuePrivacy(topology, arm) {
   verifyQueuePrivacy(topology, value);
   return value;
 }
+export async function checkEffectivePolicies(c, phase, directory, invoke, topology, expectedSha256, options = {}) {
+  if (effectivePolicyScopes(phase).some(scope => !sameId(scope, ids(c).sub) && !sameId(scope, ids(c).group))) fail('EFFECTIVE_POLICY_SCOPE_FORBIDDEN');
+  const now = options.now ?? Date.now, deadline = Math.min(options.deadline ?? invokeDeadlines.get(invoke) ?? now() + 120000, now() + 120000);
+  const policyReads = new Set(), arm = transport(c, phase, directory,
+    limitReadConcurrency(boundedInvoke(deadline, invoke, now)), topology, policyReads);
+  const name = `${phase.phase}-effective-policy${expectedSha256 ? '-dispatch' : ''}`;
+  let failedRead;
+  try {
+    const evidence = await collectEffectivePolicies(phase, async (id, apiVersion, filter) => {
+      policyReads.add(json([id, apiVersion, filter ?? null]));
+      try { return await arm('GET', id, apiVersion, undefined, filter); }
+      catch (error) { failedRead ??= { id, apiVersion, filter: filter ?? null }; throw error; }
+    }, readBatch, snapshot => save(directory, `${name}-reads.json`, snapshot));
+    if (now() >= deadline) fail('WINDOW_READ_DEADLINE');
+    await save(directory, `${name}.json`, evidence);
+    if (!evidence.qualified) fail('EFFECTIVE_POLICY_CONFLICT');
+    verifyEffectivePolicyEvidence(phase, evidence);
+    const effectivePolicySha256 = digest(json(evidence));
+    if (expectedSha256 && expectedSha256 !== effectivePolicySha256) fail('EFFECTIVE_POLICY_DRIFT');
+    return { effectivePolicyVersion: 1, effectivePolicySha256, effectivePolicy: evidence };
+  } catch (error) {
+    await save(directory, `${name}-failure.json`, { phaseSha256: digest(json(phase)), failure: safeOperationFailure(error),
+      ...(failedRead ? { failedRead, failedReadSha256: digest(json(failedRead)) } : {}) });
+    throw error;
+  }
+}
 export async function checkReadOnly(c, phase, origin, receipts, directory, evidenceFiles, invoke = az, lookup = publishedSourceDigest, transition, options = {}) {
   const now = options.now ?? Date.now, started = now(), deadline = Math.min(options.deadline ?? invokeDeadlines.get(invoke) ?? started + 120000, started + 120000);
   const bounded = boundedInvoke(deadline, invoke, now);
@@ -1095,6 +1132,7 @@ export async function checkReadOnly(c, phase, origin, receipts, directory, evide
   }
   const baseline = digest(json({ policies: evidence.policies, defender: evidence.defender }));
   if (baseline !== origin.policyBaselineSha256) fail('POLICY_OR_SECURITY_DRIFT');
+  const effectivePolicy = queuePhase ? await checkEffectivePolicies(c, phase, directory, invoke, topology, undefined, { now, deadline }) : undefined;
   const known = knownResourceIds(c, receipts);
   if (evidence['telemetry-inventory'].value.some(v => !known.some(id => sameId(id, v.id)))) fail('UNEXPECTED_TELEMETRY_RESOURCE');
   let providerOperationsSha256;
@@ -1165,6 +1203,7 @@ export async function checkReadOnly(c, phase, origin, receipts, directory, evide
     ...(roleDefinitionsSha256 ? { foundationBaselineSha256: baseline, roleDefinitionsSha256 } : {}),
     ...(receiverCandidate ? { receiverScanExpiresAt: receiverCandidate.profile.scan.databaseNextUpdate } : {}),
     ...(topology ? { topologyReviewSha256: digest(json(evidenceFiles.queueReview)), providerOperationsSha256, preservedIds: known } : {}),
+    ...(effectivePolicy ?? {}),
     ...(currentApp ? { ...(imagePhase ? {} : { transitionSha256: syntheticTransitionHash(phase) }), observedFlag: admissionFlag(currentApp),
       appObservationSha256: digest(json(currentApp)) } : {}),
     cost, computedValuesReviewed: phase.computedReadbacksRequired.length === 0 };
@@ -1978,9 +2017,13 @@ export function queueTopologyIO(c, phase, receipts, origin, evidence, directory,
       return proof;
     },
     verifyCurrent: async deadline => {
+      if (proof?.effectivePolicyVersion !== 1 || proof.effectivePolicySha256 !== digest(json(proof.effectivePolicy))) fail('EFFECTIVE_POLICY_BINDING_REQUIRED');
+      verifyEffectivePolicyEvidence(phase, proof.effectivePolicy);
       if (!isDeepStrictEqual(phase, buildQueuePhase(c, phase.phase, topology, identity))) fail('QUEUE_PHASE_CHANGED');
       verifyQueueReview(c, topology, evidence.queueReview, await sourceDigest(), now());
       await common.security(deadline);
+      await checkEffectivePolicies(c, phase, directory, limitReadConcurrency(boundedInvoke(deadline, invoke, now)),
+        topology, proof.effectivePolicySha256, { now, deadline });
       const arm = armAt(deadline);
       const operations = await arm('GET', '/providers/Microsoft.Storage/operations', '2025-01-01');
       if (verifyQueueProviderOperations(operations) !== proof.providerOperationsSha256) fail('QUEUE_PROVIDER_PERMISSION_MISMATCH');

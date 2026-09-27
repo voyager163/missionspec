@@ -36,11 +36,27 @@ only queue is `telemetry-events-v1`, in the existing telemetry group in
 Australia East. This is a **new** StorageV2 / Standard_LRS account, not reuse
 of private runtime-state storage. HTTPS/TLS1_2, `allowSharedKeyAccess: false`,
 `allowBlobPublicAccess: false` and OAuth defaults are explicit. Its public
-endpoint accommodates the existing no-VNet Container App using Entra; it
+endpoint was intended to accommodate the existing no-VNet Container App using Entra; it
 does not introduce a VM, VNet, private endpoint, firewall/security exception,
 SAS, key, connection string or anonymous queue access. Inherited Defender
 and subscription policy stay unchanged. CORS, diagnostics and exports stay
 empty; the worker cannot create/delete a queue or manage service properties.
+
+**Current deployment hold.** The storage-only deployment created its account,
+service and queue, but the inherited storage public-network policy rewrote the
+requested `Enabled` value to `Disabled`. All eight explicit post-create fields
+matched; the full-resource check still correctly refused qualification. A
+successful ARM deployment or partial checklist is not a qualified queue receipt.
+The failed intent remains immutable, and neither creation replay nor subsequent
+queue permissions/image deployment is authorized by that result.
+
+The existing receiver environment has no VNet integration. A policy-compliant
+networking revision is under design review; neither NSP nor Private Link has
+been selected or deployed. Do not add an exemption, exclusion tag or policy
+change to make the original topology pass. If NSP is selected later, an account
+flag of `Disabled` alone must not be described as denying all traffic: active
+perimeter associations and rules can still allow access. Receiver admission
+shutdown, queue network revocation and their propagation evidence are distinct.
 
 The existing ingest UAMI keeps `Main` lifecycle; registry pull keeps `None`.
 The custom role is assignable and assigned **only at that exact queue**:
@@ -170,6 +186,18 @@ record, so omission acceptance cannot authorize enqueue or bypass the
 postcondition. The earlier failed preview/read-only evidence stays immutable;
 new policy requires a fresh reviewed-source context rather than resetting it.
 
+Actual readback handling permits only two optional provider defaults:
+`networkAcls.ipv6Rules: []` and queue-service
+`logging: { delete: false, read: false, write: false, version: "1.0",
+retentionPolicy: { enabled: false } }`. Each must match that exact shape, without
+extra fields; inputs are not stripped or modified. These allowances do not
+apply to CREATE previews, remove any of the eight postconditions, or change
+authentication, TLS, RBAC or network requirements. A network mismatch still
+reports `QUEUE_NETWORK_POLICY_MISMATCH`; unknown readback fields report
+`QUEUE_READBACK_SHAPE_UNREVIEWED`, without copying their names or values into
+the journal. A later corrected readback cannot replay a failed intent or
+rewrite it as a successful execution.
+
 `queue-review.json` is a closed `accept-exact-durable-queue-topology` review
 binding config, topology and current policy source, canonical approval/expiry
 (at most one hour), and all-false `QUEUE_AUTHORITY`. `check-queue` repeats the
@@ -179,6 +207,25 @@ role reads and full validate/what-if. `execute-queue` separately requires
 changes, independent reads are limited to four in flight, each request to
 15 seconds and preflight to 120 seconds. A durable intent permits one PUT and
 a bounded 120-second rollout; uncertainty requires reconciliation, never retry.
+
+**Effective-policy binding in the local revision.** The preflight hardening
+adds version-1 effective-policy evidence for new queue execution, rather than
+relying only on assignment hashes and what-if. Its proof binds
+`effectivePolicyVersion`, `effectivePolicySha256` and the retained
+`effectivePolicy` analysis/read evidence into the approval baseline. An
+incomplete or mismatched binding cannot authorize dispatch. The previous
+baseline algorithm remains available only to verify historical records;
+historical verification does not admit a new operation without the new proof.
+
+This is a conservative evaluator for the exact phase, not a general Azure
+Policy interpreter. Effective scopes, definition versions and parameter
+bindings must be established; unsupported potentially applicable mutations,
+incomplete listings and unverified exemptions stop execution. An unknown
+tag/exemption condition is not permission to ignore a policy. Exact policy
+evidence must also be refreshed before dispatch. Evaluating a supported
+`SecuredByPerimeter` condition does not establish NSP association, reachability,
+propagation or data authorization. This update remains a local integration
+candidate until its published source and actual required checks are reviewed.
 
 Each successful queue phase writes a new immutable `<phase>-record.json`.
 For the next private revision, retain those full records under their exact

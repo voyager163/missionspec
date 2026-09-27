@@ -240,7 +240,7 @@ closed; the loader is not bypassed by directly loading a glibc binary.
 The upstream tarball's other targets, including Windows/Android and Bare, do
 not establish MissionSpec qualification. Existing Windows native write/lock
 handling is unchanged; the separate Windows held-read candidate still requires
-its own [native selectors](architecture/windows-state.md#persistence-held-read-candidate).
+its own [native selectors](architecture/windows-state.md#persistence-held-read-qualification).
 
 ### Exact upstream service notice: entities 2.1.0
 

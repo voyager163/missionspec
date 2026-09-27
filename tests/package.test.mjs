@@ -1,16 +1,22 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import test from 'node:test';
-import { packageLinkProblems, packageProblems, parsePackPreview } from '../scripts/check-package.mjs';
-import { OPERATION_IDS } from '../dist/kernel/registry.js';
+import {
+  createInstallFixture, installSmokeGuard, packageLinkProblems, packageManifestProblems,
+  packageProblems, parsePackPreview, requiredPackageFiles,
+} from '../scripts/check-package.mjs';
 
 const name = '@msn-control/missionspec';
-const files = [
-  'package.json', 'LICENSE', 'THIRD_PARTY_NOTICES', 'licenses/cli-runtime.json',
-  'README.md', 'CONTRIBUTING.md', 'SECURITY.md', 'CODE_OF_CONDUCT.md',
-  'dist/cli/main.js', 'dist/api/index.js', 'dist/api/index.d.ts',
-  'assets/operations/manifest.yaml', 'assets/schemas/operation-manifest.schema.json',
-  ...OPERATION_IDS.map((id) => `assets/operations/${id}.md`)
-].map((path) => ({ path }));
+const files = requiredPackageFiles.map((path) => ({ path }));
+const manifest = {
+  name, version: '0.0.0', private: true, type: 'module', license: 'Apache-2.0',
+  bin: { missionspec: 'dist/cli/main.js' }, types: './dist/api/index.d.ts',
+  exports: {
+    '.': { types: './dist/api/index.d.ts', import: './dist/api/index.js' },
+    './package.json': './package.json',
+  },
+};
 
 test('package preview supports actual npm 12 keyed output and prior array output explicitly', () => {
   const value = { name, files };
@@ -29,14 +35,93 @@ test('package requires exact named operation bodies, not merely a matching count
 });
 
 test('state, credentials, unbuilt source and operator packages must not be shipped in the CLI', () => {
-  for (const forbidden of ['.missionspec/state/ledger.sqlite', '.env.production', 'services/telemetry-ingest/package.json', 'infrastructure/main.tf', 'src/private.ts', 'node_modules/a/index.js', 'licenses/telemetry-runtime.json', 'licenses/TELEMETRY_THIRD_PARTY_NOTICES']) {
+  for (const forbidden of [
+    '.missionspec/state/ledger.sqlite', '.env.production', 'services/telemetry-ingest/package.json',
+    'infrastructure/main.tf', 'src/private.ts', 'node_modules/a/index.js', 'licenses/telemetry-runtime.json',
+    'licenses/TELEMETRY_THIRD_PARTY_NOTICES', '.operator-private/deployment.json',
+    'dist/.missionspec/approval.json', 'docs/.operator-private/credentials.json',
+    'assets/build-cache/native.node', 'dist/.build-cache/output', 'dist/compile.tsbuildinfo',
+    'assets/secrets/token.json', 'assets/secrets.json', 'docs/.npmrc', 'assets/credentials/private.key',
+    'dist/services/telemetry-ingest/index.js', 'unreviewed.txt',
+  ]) {
     assert(packageProblems({ name, files: [...files, { path: forbidden }] }).some((problem) => problem.includes('Unintended')));
   }
 });
 
 test('preview parsing rejects duplicate and escaping paths instead of hiding them in a set', () => {
-  for (const bad of [[{ path: '../secret' }], [{ path: '/secret' }], [{ path: 'a\\b' }], [{ path: 'a' }, { path: 'a' }]]) {
+  for (const bad of [
+    ...['', '../secret', '/secret', 'C:/secret', 'C:secret', 'a\\b', 'a/./b', 'a//b', 'a\0b'].map((path) => [{ path }]),
+    [{ path: 'a' }, { path: 'a' }],
+  ]) {
     assert.throws(() => parsePackPreview(JSON.stringify({ [name]: { name, files: bad } })), /Invalid/);
+  }
+});
+
+test('package requires non-skill runtime assets including platform helpers and workflow examples', () => {
+  for (const required of [
+    'assets/schemas/telemetry-event.schema.json', 'assets/platform/windows-access-policy.ps1',
+    'assets/platform/windows-file-operations.ps1', 'assets/platform/windows-execution-native.ps1',
+    'assets/workflows/compact/workflow.yaml', 'assets/workflows/standard/workflow.yaml',
+    'assets/workflows/standard/examples/specs/filters.md',
+  ]) {
+    assert(packageProblems({ name, files: files.filter((file) => file.path !== required) })
+      .some((problem) => problem === `Missing packaged file: ${required}`));
+  }
+});
+
+test('pre-release package manifest preserves public exports, bin, privacy and no install hooks', () => {
+  assert.deepEqual(packageManifestProblems(manifest), []);
+  for (const change of [
+    { private: false }, { version: '1.0.0' }, { bin: { unexpected: 'dist/cli/main.js' } },
+    { exports: { '.': './src/api/index.ts' } }, { types: './missing.d.ts' },
+    { bundledDependencies: ['fs-native-extensions'] },
+    ...['preinstall', 'install', 'postinstall', 'prepare'].map((hook) => ({ scripts: { [hook]: 'unexpected' } })),
+  ]) {
+    assert(packageManifestProblems({ ...manifest, ...change }).length > 0);
+  }
+});
+
+test('offline install fixture preserves the exact reviewed runtime closure, not fresh semver resolution', () => {
+  const source = { ...manifest, dependencies: { runtime: '1.0.0' } };
+  const integrity = `sha512-${Buffer.alloc(64).toString('base64')}`;
+  const record = { version: '1.0.0', resolved: 'https://registry.npmjs.org/runtime/-/runtime-1.0.0.tgz', integrity,
+    dependencies: { transitive: '^2.0.0' } };
+  const lock = { lockfileVersion: 3, packages: {
+    '': source, 'node_modules/runtime': record,
+    'node_modules/transitive': { version: '2.0.3', resolved: 'https://registry.npmjs.org/transitive/-/transitive-2.0.3.tgz', integrity },
+    'node_modules/development': { dev: true, version: '9.0.0' },
+  } };
+  const fixture = createInstallFixture(source, lock, { integrity });
+  assert.deepEqual(fixture.locations, ['node_modules/runtime', 'node_modules/transitive']);
+  assert.deepEqual(fixture.lock.packages['node_modules/runtime'], record);
+  assert.equal(fixture.lock.packages['node_modules/transitive'].version, '2.0.3');
+  assert.equal(fixture.lock.packages[`node_modules/${name}`].integrity, integrity);
+  assert.equal(fixture.manifest.dependencies[name], 'file:../candidate.tgz');
+  assert(!Object.hasOwn(fixture.lock.packages, 'node_modules/development'));
+  for (const change of [
+    { hasInstallScript: true }, { link: true }, { inBundle: true },
+    { resolved: 'https://unexpected.invalid/package.tgz' }, { integrity: undefined },
+  ]) {
+    assert.throws(() => createInstallFixture(source,
+      { ...lock, packages: { ...lock.packages, 'node_modules/runtime': { ...record, ...change } } }, { integrity }));
+  }
+  assert.throws(() => createInstallFixture({ ...source, dependencies: { runtime: '2.0.0' } }, lock, { integrity }), /disagree/);
+});
+
+test('offline smoke guard fails even swallowed network, subprocess or optional model SDK attempts', async () => {
+  const execute = promisify(execFile);
+  const guard = `await (${installSmokeGuard.toString()})();\n`;
+  await execute(process.execPath, ['--input-type=module', '--eval', `${guard}console.log("inert");`]);
+  for (const attempt of [
+    'await fetch("https://example.invalid")',
+    '(await import("node:https")).get("https://example.invalid")',
+    '(await import("node:child_process")).spawn("not-a-real-host")',
+    'await import("@github/copilot-sdk")',
+    'await import("@anthropic-ai/claude-agent-sdk")',
+  ]) {
+    await assert.rejects(execute(process.execPath, ['--input-type=module', '--eval',
+      `${guard}try { ${attempt}; } catch { /* A swallowed activation must still fail the smoke. */ }`]),
+    (error) => error.code === 1 && /forbidden activation attempt/.test(error.stderr));
   }
 });
 

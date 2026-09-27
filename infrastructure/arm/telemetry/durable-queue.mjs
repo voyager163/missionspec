@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { assertOwned, BUDGET, closed, deploymentName, digest, fail, firstReleaseCost, ids, json,
   ownerTags, sameId, stableGuid, validateConfig } from './definition.mjs';
 import { canonicalInstant, verifyApproval, verifyDeploymentIdentity, verifyFreshReview } from './policy.mjs';
+import { verifyEffectivePolicyEvidence } from './effective-policy.mjs';
 
 export const QUEUE_PHASES = Object.freeze(['queue-storage', 'queue-role', 'queue-assignment']);
 export const QUEUE_PROFILE_KIND = 'reviewed-durable-queue-receiver';
@@ -207,13 +208,14 @@ export function queuePostCreateRequirements(c, topology) {
     [topology.ids.queue, 'Microsoft.Storage/storageAccounts/queueServices/queues', 'properties.metadata', {}],
   ].map(([resourceId, type, path, expected]) => ({ resourceId, type, apiVersion: api, path, expected }));
 }
-function only(value, fields) {
-  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(k => !fields.includes(k))) fail('QUEUE_RESOURCE_DRIFT');
+function only(value, fields, code = 'QUEUE_RESOURCE_DRIFT') {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(k => !fields.includes(k))) fail(code);
 }
 export function verifyQueueResource(c, topology, descriptor, actual, whatIf = false) {
   verifyQueueTopology(c, topology);
   const e = descriptor.expected, p = actual?.properties;
-  only(actual, ['id', 'name', 'type', 'apiVersion', 'location', 'tags', 'kind', 'sku', 'properties', 'systemData', 'etag', 'scope', 'dependsOn']);
+  const shapeCode = whatIf ? 'QUEUE_RESOURCE_DRIFT' : 'QUEUE_READBACK_SHAPE_UNREVIEWED';
+  only(actual, ['id', 'name', 'type', 'apiVersion', 'location', 'tags', 'kind', 'sku', 'properties', 'systemData', 'etag', 'scope', 'dependsOn'], shapeCode);
   if (!sameId(actual.id, descriptor.id) || !sameId(actual.type, e.type) ||
       (actual.apiVersion !== undefined && actual.apiVersion !== descriptor.apiVersion) ||
       (actual.scope !== undefined && actual.scope !== e.scope) ||
@@ -226,7 +228,7 @@ export function verifyQueueResource(c, topology, descriptor, actual, whatIf = fa
   if (e.type === 'Microsoft.Storage/storageAccounts') {
     only(p, [...Object.keys(e.properties), 'provisioningState', 'creationTime', 'primaryLocation', 'statusOfPrimary',
       'primaryEndpoints', 'privateEndpointConnections', 'accessTier', 'isHnsEnabled', 'isLocalUserEnabled',
-      'isSftpEnabled', 'allowCrossTenantReplication', 'keyCreationTime']);
+      'isSftpEnabled', 'allowCrossTenantReplication', 'keyCreationTime'], shapeCode);
     only(actual.sku, ['name', 'tier']);
     if (actual.kind !== 'StorageV2' || actual.sku.name !== 'Standard_LRS' ||
         (actual.sku.tier !== undefined && actual.sku.tier !== 'Standard') ||
@@ -235,9 +237,13 @@ export function verifyQueueResource(c, topology, descriptor, actual, whatIf = fa
         [p.isHnsEnabled, p.isLocalUserEnabled, p.isSftpEnabled, p.allowCrossTenantReplication].some(v => v !== undefined && v !== false) ||
         (p.accessTier !== undefined && p.accessTier !== 'Hot')) fail('QUEUE_RESOURCE_DRIFT');
     for (const [k, v] of Object.entries(e.properties)) {
-      if (k === 'encryption') continue;
-      if (!isDeepStrictEqual(p[k], v)) fail('QUEUE_RESOURCE_DRIFT');
+      if (['encryption', 'networkAcls'].includes(k)) continue;
+      if (!isDeepStrictEqual(p[k], v)) fail(k === 'publicNetworkAccess' ? 'QUEUE_NETWORK_POLICY_MISMATCH' : 'QUEUE_RESOURCE_DRIFT');
     }
+    only(p.networkAcls, [...Object.keys(e.properties.networkAcls), ...(!whatIf ? ['ipv6Rules'] : [])], shapeCode);
+    const hasIpv6Rules = Object.hasOwn(p.networkAcls, 'ipv6Rules');
+    if (hasIpv6Rules && !isDeepStrictEqual(p.networkAcls.ipv6Rules, [])) fail('QUEUE_IPV6_RULES_DRIFT');
+    if (!isDeepStrictEqual(p.networkAcls, hasIpv6Rules ? { ...e.properties.networkAcls, ipv6Rules: [] } : e.properties.networkAcls)) fail('QUEUE_NETWORK_POLICY_MISMATCH');
     only(p.encryption, ['keySource', 'services', 'requireInfrastructureEncryption']);
     if (p.encryption.keySource !== 'Microsoft.Storage' ||
         (p.encryption.requireInfrastructureEncryption !== undefined && typeof p.encryption.requireInfrastructureEncryption !== 'boolean')) fail('QUEUE_RESOURCE_DRIFT');
@@ -249,8 +255,11 @@ export function verifyQueueResource(c, topology, descriptor, actual, whatIf = fa
     if (!p.encryption.services.queue || (!whatIf && p.primaryEndpoints?.queue !== `https://${topology.ids.accountName}.queue.core.windows.net/`)) fail('QUEUE_ENDPOINT_DRIFT');
     if (!whatIf && !Number.isFinite(Date.parse(p.creationTime))) fail('QUEUE_CREATION_IDENTITY_REQUIRED');
   } else if (e.type.endsWith('/queueServices')) {
-    only(p, ['cors']);
-    if (!isDeepStrictEqual(p, e.properties)) fail('QUEUE_CORS_DRIFT');
+    only(p, ['cors', ...(!whatIf ? ['logging'] : [])], shapeCode);
+    const logging = { delete: false, read: false, write: false, version: '1.0', retentionPolicy: { enabled: false } };
+    const hasLogging = Object.hasOwn(p, 'logging');
+    if (hasLogging && !isDeepStrictEqual(p.logging, logging)) fail('QUEUE_LOGGING_DRIFT');
+    if (!isDeepStrictEqual(p, hasLogging ? { ...e.properties, logging } : e.properties)) fail('QUEUE_CORS_DRIFT');
   } else if (e.type.endsWith('/queues')) {
     only(p, ['metadata', 'approximateMessageCount']);
     if (!isDeepStrictEqual(p.metadata, {}) ||
@@ -326,6 +335,13 @@ export function queuePreflightBaseline(proof) {
     'preservedIdsSha256', 'queuePreviewSha256', 'requiredPostCreateReadbacksSha256', 'validatedTemplateSha256'];
   const values = { ...proof, preservedIdsSha256: digest(json(proof.preservedIds)) };
   if (keys.some(key => !sha(values[key]))) fail('QUEUE_PREFLIGHT_BINDING_REQUIRED');
+  const policyFields = ['effectivePolicyVersion', 'effectivePolicySha256', 'effectivePolicy'];
+  if (policyFields.some(key => Object.hasOwn(proof, key))) {
+    if (!policyFields.every(key => Object.hasOwn(proof, key)) || proof.effectivePolicyVersion !== 1 ||
+        !sha(proof.effectivePolicySha256) || proof.effectivePolicy?.qualified !== true ||
+        proof.effectivePolicySha256 !== digest(json(proof.effectivePolicy))) fail('QUEUE_PREFLIGHT_BINDING_REQUIRED');
+    keys.push('effectivePolicyVersion', 'effectivePolicySha256');
+  }
   return digest(json(Object.fromEntries(keys.map(key => [key, values[key]]))));
 }
 export function verifyQueuePreflight(c, phase, topology, proof) {
@@ -349,6 +365,7 @@ export function verifyQueuePreflight(c, phase, topology, proof) {
       proof.computedValuesReviewed !== (required.length === 0) ||
       proof.baselineSha256 !== queuePreflightBaseline(proof) ||
       !Array.isArray(preview.requestedButNotPredicted)) fail('QUEUE_PREFLIGHT_BINDING_REQUIRED');
+  if (Object.hasOwn(proof, 'effectivePolicyVersion')) verifyEffectivePolicyEvidence(phase, proof.effectivePolicy);
   const seen = new Set();
   for (const omission of preview.requestedButNotPredicted) {
     closed(omission, ['resourceId', 'type', 'path', 'requested']);
@@ -464,6 +481,7 @@ export class QueueTopologyController {
     if (await io.loadJournal()) fail('QUEUE_INTENT_REPLAY_FORBIDDEN');
     const started = io.now(), proof = await io.check();
     const guard = deadline => {
+      if (!Object.hasOwn(proof ?? {}, 'effectivePolicyVersion') || proof.effectivePolicyVersion !== 1) fail('QUEUE_EFFECTIVE_POLICY_REQUIRED');
       verifyQueueReview(c, topology, review, source, io.now());
       verifyApproval(approval, c, phase, source, io.now());
       verifyFreshReview(proof, approval, started, io.now());

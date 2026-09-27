@@ -16,14 +16,23 @@ These results qualify the tested private NTFS APIs, not a console channel,
 native execution, every Windows installation or physical power-loss behavior.
 POSIX success or mocked `process.platform` results are not Windows qualification.
 
-## Persistence held-read candidate
+## Persistence held-read qualification
 
 The private-workspace, selector, lifecycle-input, raw-evidence inspection and
 SQLite-header component checks passed at `0c2bace` in
 [run 36109084309](https://github.com/voyager163/missionspec/actions/runs/36109084309).
-However, the full source and runtime-lifecycle scenarios exceeded their
-unchanged 720-second limits. **End-to-end qualification is still pending**;
-component success does not clear those failures or authorize alert adjudication.
+The source and runtime-lifecycle scenarios initially exceeded their unchanged
+720-second limits. Follow-up **`b5772fb`** passed the complete repository workflow
+in [run 36112833873](https://github.com/voyager163/missionspec/actions/runs/36112833873):
+41 private-state cases with zero skips, source integration in 522.8 seconds,
+and runtime lifecycle in 592.3 seconds. These are actual Windows observations,
+not inferred POSIX results or relaxed deadlines.
+
+After that native success, the thirteen individually reviewed CodeQL findings
+were adjudicated with the user's explicit conditional approval: five
+held-descriptor/exclusive-creation operations and eight deliberate race fixtures.
+Each has its own explanation; no query, rule or blanket test exclusion changed.
+All twenty-two required checks passed, including the native CodeQL gate.
 The reader no longer attributes a completed external
 ACL check to a later Node file descriptor. The existing native helper pins
 ancestors and opens the actual regular single-link object directory-relatively,

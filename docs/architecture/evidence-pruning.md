@@ -284,7 +284,7 @@ on macOS arm64 / Node 24.21.0: the three native/POSIX suites plus evidence pruni
 runtime lifecycle/store, local workflow and source patches, with zero skips.
 The isolated Linux qualification and exact artifact/platform limits are recorded
 in [licensing](../licensing.md#native-descriptor-lock-dependency).
-Native Windows held-read selectors in [Windows state](windows-state.md#persistence-held-read-candidate)
+Native Windows held-read selectors in [Windows state](windows-state.md#persistence-held-read-qualification)
 still need their separate qualification; historical Windows results do not
 qualify the new held-reader changes.
 Actual child-process exits exercise before-prepare, after-prepare and
