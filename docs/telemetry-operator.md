@@ -50,6 +50,28 @@ successful ARM deployment or partial checklist is not a qualified queue receipt.
 The failed intent remains immutable, and neither creation replay nor subsequent
 queue permissions/image deployment is authorized by that result.
 
+Later read-only preparation observed another inherited change: Defender for
+Storage added one `StorageDataScanner` resource-instance rule and a generated
+Event Grid system topic with its managed Blob event subscription. The original
+empty-rule postcondition therefore no longer matches. This is not a harmless
+response default or permission to remove the protection. The exact integration
+requires a separately reviewed preservation record, provenance and fresh
+settings/destination/diagnostic checks; old empty-ACL evidence remains unchanged.
+Until that contract is qualified, neither the new rule nor the topic is accepted
+as arbitrary known inventory.
+
+Preserving the Defender configuration is not proof of uninterrupted scanning
+under enforced NSP. Firewall resource-instance rules do not establish NSP
+access, and empty-rule or deny phases may affect the managed scanner path.
+Its BlobCreated/BlobRenamed subscription does not imply that Queue messages are
+scanned or exported. The user selected queue-only NSP qualification with explicit
+acceptance of the disclosed scanner uncertainty and possible interruption.
+Functional Blob scanning and Sensitive Data Discovery remain unqualified;
+that decision does not authorize Blob uploads, a canary, extra Blob permissions
+or a new executor. Its acknowledgment must be source-, topology- and
+current-state-bound, not an implicit compatibility waiver. No scanner
+disablement, general bypass or extra perimeter rule is implicit.
+
 The existing receiver environment has no VNet integration. Enforced Network
 Security Perimeter (NSP) has been selected and its local implementation is
 available; deployment and runtime qualification remain separate gates. No
@@ -258,6 +280,43 @@ child-generation attestation. Assignment inventories do not prove role-definitio
 or transitive-group access. Only originally observed system creation fields are
 pinned; schema-validated modification metadata may change without pretending a
 new generation was created.
+
+An inherited Defender delta uses adoption **version 3**, with
+proposal/observation/review version 2. Supply private
+`queue-defender-evidence.json` only for the exact separately reviewed scanner
+integration. Omitting it retains the original version-2 empty-rule behavior,
+not a silent scanner exception. The new observation records a versioned current
+postcondition delta and the hash of the eight unchanged historical requirements.
+Its `review.defender` binds the full evidence, exact destination/AAD identifiers,
+three independently identified actors, prior scanner adoption and explicit
+preservation instruction. A name, standalone hash or truthy qualification flag
+is not an alternate admission route.
+
+The evidence retains complete bounded resource/time-window Activity Log pages,
+canonical parsed-response hashes and independently checked attribution
+projections; it is not raw-wire attestation. Only exact historical account,
+service, queue, Defender-setting, managed-subscription and legacy
+`advancedThreatProtectionSettings/current` event scopes are retained. Legacy
+events confer no current-state or actor trust.
+
+The current collector adds ten fixed GETs to the fourteen storage-adoption reads:
+Defender settings, exact topic/subscription, complete scoped topic/subscription
+inventories, scanner operator, exact role/assignment, and topic/settings
+diagnostics. No cloud mutation, Graph client or new runtime permission is
+introduced. These exact current objects are rechecked in NSP observations,
+transitions, reconciliation and downstream role/image/window admission.
+Only the verified topic/subscription inventory is recognized, including before
+the first NSP receipt. Earlier adoption/NSP versions retain their closed schemas.
+
+For this branch, NSP topology/observation/review version 2 binds an explicit
+`queueOnlyRisk` acknowledgment to the current observation state, source,
+configuration, topology and expiry. It requires
+`functionalBlobProtectionQualified: false`, `blobUploadsAuthorized: false` and
+`explicitInterruptionRiskAccepted: true`. Changing phase state requires a new
+matching review. This permits the specifically approved queue-only qualification;
+it neither certifies malware scanning/Sensitive Data Discovery nor authorizes
+Blob tests, extra rules or disabled Defender. Paired false-only disable and
+read-only image capture remain independent of these backend reads.
 
 NSP uses the existing receiver and queue account, one dedicated perimeter, one
 profile, one explicitly `Enforced` account association and one inbound rule for

@@ -4,6 +4,8 @@ import { canonicalInstant, verifyApproval, verifyDeploymentIdentity, verifyFresh
 import { buildQueuePhase, durableQueueCost, queuePostCreateRequirements,
   verifyQueuePreflight, verifyQueuePrivacy, verifyQueueProviderOperations, verifyQueueResource,
   verifyQueueReview, verifyQueueTopology, verifyQueueWhatIf } from './durable-queue.mjs';
+import { collectQueueDefender, queueDefenderRule, verifyCurrentQueueDefender,
+  verifyQueueDefenderEvidence, verifyQueueDefenderReview } from './queue-defender.mjs';
 
 export const QUEUE_ADOPTION_AUTHORITY = Object.freeze({
   deployment: false, publication: false, ingestion: false, clientActivation: false, productionClearance: false,
@@ -74,6 +76,7 @@ function bounded(value) {
   visit(value, 0);
   if (Buffer.byteLength(JSON.stringify(value)) > QUEUE_ADOPTION_LIMITS.bytes) fail('QUEUE_ADOPTION_INPUT_LIMIT');
 }
+export { bounded as boundedQueueAdoptionInput };
 function only(value, fields, code) {
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
       Object.keys(value).some(key => !fields.includes(key))) fail(code);
@@ -332,12 +335,15 @@ function systemDataCreation(value, start, end) {
   }
   return Object.fromEntries(['createdAt', 'createdBy', 'createdByType'].filter(key => Object.hasOwn(data, key)).map(key => [key, data[key]]));
 }
-function storageResources(c, origin, resources, expectedAccess) {
+function storageResources(c, origin, resources, expectedAccess, defender = null) {
   if (!['Disabled', 'SecuredByPerimeter'].includes(expectedAccess)) fail('QUEUE_ADOPTION_EXPECTED_NETWORK_MODE_REQUIRED');
   closed(resources, origin.phase.resources.map(value => value.id));
   for (const original of origin.phase.resources) {
     const descriptor = structuredClone(original);
-    if (descriptor.id === origin.topology.ids.account) descriptor.expected.properties.publicNetworkAccess = expectedAccess;
+    if (descriptor.id === origin.topology.ids.account) {
+      descriptor.expected.properties.publicNetworkAccess = expectedAccess;
+      if (defender !== null) descriptor.expected.properties.networkAcls.resourceAccessRules = [queueDefenderRule(c)];
+    }
     verifyQueueResource(c, origin.topology, descriptor, resources[descriptor.id]);
   }
   if (!Object.hasOwn(resources[origin.topology.ids.service].properties, 'logging') ||
@@ -354,9 +360,14 @@ function storageResources(c, origin, resources, expectedAccess) {
   }
   return resources;
 }
-function postconditions(c, origin, resources) {
-  return { version: 1, kind: 'observed-queue-storage-postconditions',
+function postconditions(c, origin, resources, defender = null) {
+  return { version: defender === null ? 1 : 2, kind: 'observed-queue-storage-postconditions',
+    ...(defender === null ? {} : { historicalRequirementsSha256: digest(json(queuePostCreateRequirements(c, origin.topology))),
+      defenderEvidenceSha256: digest(json(defender)) }),
     observations: queuePostCreateRequirements(c, origin.topology).map(requirement => {
+      if (defender !== null && requirement.path === 'properties.networkAcls.resourceAccessRules') {
+        requirement = { ...requirement, expected: [queueDefenderRule(c)] };
+      }
       const actual = requirement.path.split('.').reduce((parent, key) => parent?.[key], resources[requirement.resourceId]);
       if (!isDeepStrictEqual(actual, requirement.expected)) fail('QUEUE_ADOPTION_POSTCONDITION_MISSING');
       return { ...requirement, actual: structuredClone(actual) };
@@ -431,12 +442,13 @@ export function verifyQueueAdoptionOrigin(c, origin) {
   return values;
 }
 
-function verifyObservation(c, origin, values, observation, source) {
+function verifyObservation(c, origin, values, observation, source, defender = null) {
   bounded(observation);
   closed(observation, ['version', 'kind', 'startedAt', 'completedAt', 'sourceSha256', 'originSha256',
-    'deployment', 'operations', 'resources', 'queues', 'privacy', 'access', 'postconditions', 'qualified', 'operationallyQualified']);
+    'deployment', 'operations', 'resources', 'queues', 'privacy', 'access', 'postconditions', 'qualified', 'operationallyQualified',
+    ...(defender === null ? [] : ['defender'])]);
   const start = canonicalInstant(observation.startedAt), end = canonicalInstant(observation.completedAt);
-  if (observation.version !== 1 || observation.kind !== 'observed-disabled-queue-storage' ||
+  if (observation.version !== (defender === null ? 1 : 2) || observation.kind !== 'observed-disabled-queue-storage' ||
       !sha(source) || observation.sourceSha256 !== source || source === values.publication.sourceSha256 ||
       observation.originSha256 !== digest(json(origin)) || start < canonicalInstant(origin.firstReadback.checkedAt) ||
       end < start || end - start >= QUEUE_ADOPTION_LIMITS.collectionMs ||
@@ -444,18 +456,29 @@ function verifyObservation(c, origin, values, observation, source) {
   verifyDeployment(origin, values, observation.deployment);
   if (!isDeepStrictEqual(operationPins(origin, values, observation.operations),
     operationPins(origin, values, origin.firstReadback.operations))) fail('QUEUE_ADOPTION_OPERATION_IDENTITY_CHANGED');
-  storageResources(c, origin, observation.resources, 'Disabled');
+  if (defender !== null) {
+    verifyQueueDefenderEvidence(c, origin, defender);
+    for (const value of Object.values(defender.activity)) {
+      if (canonicalInstant(value.receipt.completedAt) > start) fail('QUEUE_DEFENDER_PROVENANCE_AFTER_OBSERVATION');
+    }
+    verifyCurrentQueueDefender(c, origin, defender, observation.defender);
+  }
+  storageResources(c, origin, observation.resources, 'Disabled', defender);
   verifyQueues(c, origin, observation.queues); verifyQueuePrivacy(origin.topology, observation.privacy);
   for (const value of Object.values(observation.privacy.diagnostics)) emptyList(value, 'QUEUE_ADOPTION_DIAGNOSTICS_INCOMPLETE');
   verifyAccess(c, origin, observation.access);
-  if (!isDeepStrictEqual(observation.postconditions, postconditions(c, origin, observation.resources))) fail('QUEUE_ADOPTION_POSTCONDITION_MISSING');
+  if (!isDeepStrictEqual(observation.postconditions, postconditions(c, origin, observation.resources, defender))) fail('QUEUE_ADOPTION_POSTCONDITION_MISSING');
 }
 
 /** The port performs one bounded GET per descriptor; it never receives a method or body. */
-export async function collectQueueAdoption(c, origin, io) {
+export async function collectQueueAdoption(c, origin, io, defender = null) {
   closed(io, ['now', 'sourceDigest', 'read']);
   if (['now', 'sourceDigest', 'read'].some(key => typeof io[key] !== 'function')) fail('QUEUE_ADOPTION_READ_PORT_REQUIRED');
   const values = verifyQueueAdoptionOrigin(c, origin);
+  if (defender !== null) {
+    verifyQueueDefenderEvidence(c, origin, defender);
+    defender = structuredClone(defender);
+  }
   const started = milliseconds(io.now()), deadline = started + QUEUE_ADOPTION_LIMITS.collectionMs;
   const source = await io.sourceDigest();
   const guard = async () => {
@@ -482,19 +505,26 @@ export async function collectQueueAdoption(c, origin, io) {
   for (const scope of [q.account, q.service, q.queue]) {
     assignments[scope] = await read(`${scope}/providers/Microsoft.Authorization/roleAssignments`, '2022-04-01', '$filter=atScope()');
   }
+  const currentDefender = defender === null ? null : await collectQueueDefender(c, origin, defender,
+    { now: io.now, read: (request, limit) => {
+      if (limit !== deadline) fail('QUEUE_DEFENDER_READ_DEADLINE');
+      return read(request.id, request.apiVersion, request.filter);
+    } }, deadline);
   await guard();
-  const observation = { version: 1, kind: 'observed-disabled-queue-storage',
+  const observation = { version: defender === null ? 1 : 2, kind: 'observed-disabled-queue-storage',
     startedAt: new Date(started).toISOString(), completedAt: new Date(milliseconds(io.now())).toISOString(),
     sourceSha256: source, originSha256: digest(json(origin)), deployment, operations, resources, queues,
     privacy: { diagnostics }, access: { identity, role, assignment, assignments },
-    postconditions: postconditions(c, origin, resources), qualified: false, operationallyQualified: false };
-  verifyObservation(c, origin, values, observation, source);
-  return { version: 1, kind: 'queue-storage-adoption-proposal', configSha256: digest(json(c)),
-    originSha256: digest(json(origin)), sourceSha256: source, observation };
+    ...(defender === null ? {} : { defender: currentDefender }),
+    postconditions: postconditions(c, origin, resources, defender), qualified: false, operationallyQualified: false };
+  verifyObservation(c, origin, values, observation, source, defender);
+  return { version: defender === null ? 1 : 2, kind: 'queue-storage-adoption-proposal', configSha256: digest(json(c)),
+    originSha256: digest(json(origin)), sourceSha256: source, observation,
+    ...(defender === null ? {} : { defender }) };
 }
 
 export function adoptQueueStorage(c, proposal, origin, review, policyPublication, at) {
-  const record = { version: 2, kind: 'reviewed-queue-storage-adoption', topology: origin.topology,
+  const record = { version: proposal?.version === 2 ? 3 : 2, kind: 'reviewed-queue-storage-adoption', topology: origin.topology,
     identity: origin.identity, origin, proposal, review, publication: policyPublication,
     observation: proposal.observation, adoptedAt: new Date(milliseconds(at)).toISOString(), authority: QUEUE_ADOPTION_AUTHORITY };
   verifyQueueAdoptionRecord(c, record);
@@ -503,35 +533,39 @@ export function adoptQueueStorage(c, proposal, origin, review, policyPublication
 
 export function verifyQueueAdoptionRecord(c, record) {
   bounded(record);
+  const withDefender = record?.version === 3;
   closed(record, ['version', 'kind', 'topology', 'identity', 'origin', 'proposal', 'review', 'publication',
     'observation', 'adoptedAt', 'authority']);
-  if (record.version !== 2 || record.kind !== 'reviewed-queue-storage-adoption' ||
+  if (![2, 3].includes(record.version) || record.kind !== 'reviewed-queue-storage-adoption' ||
       !isDeepStrictEqual(record.authority, QUEUE_ADOPTION_AUTHORITY)) fail('QUEUE_ADOPTION_RECORD_INVALID');
   const values = verifyQueueAdoptionOrigin(c, record.origin), proposal = record.proposal, review = record.review;
   publication(record.publication);
-  closed(proposal, ['version', 'kind', 'configSha256', 'originSha256', 'sourceSha256', 'observation']);
-  closed(review, ['version', 'action', 'configSha256', 'originSha256', 'proposalSha256', 'sourceSha256', 'reviewedAt', 'expiresAt', 'authority']);
+  closed(proposal, ['version', 'kind', 'configSha256', 'originSha256', 'sourceSha256', 'observation', ...(withDefender ? ['defender'] : [])]);
+  closed(review, ['version', 'action', 'configSha256', 'originSha256', 'proposalSha256', 'sourceSha256', 'reviewedAt', 'expiresAt', 'authority',
+    ...(withDefender ? ['defender'] : [])]);
   const source = record.publication.sourceSha256, originHash = digest(json(record.origin));
   const reviewed = canonicalInstant(review.reviewedAt), expires = canonicalInstant(review.expiresAt);
   const adopted = canonicalInstant(record.adoptedAt);
   if (!isDeepStrictEqual(record.topology, record.origin.topology) || !isDeepStrictEqual(record.identity, record.origin.identity) ||
-      proposal.version !== 1 || proposal.kind !== 'queue-storage-adoption-proposal' ||
+      proposal.version !== (withDefender ? 2 : 1) || proposal.kind !== 'queue-storage-adoption-proposal' ||
       proposal.configSha256 !== digest(json(c)) || proposal.originSha256 !== originHash || proposal.sourceSha256 !== source ||
-      !isDeepStrictEqual(record.observation, proposal.observation) || review.version !== 1 ||
-      review.action !== 'adopt-exact-observed-queue-storage' || review.configSha256 !== digest(json(c)) ||
+      !isDeepStrictEqual(record.observation, proposal.observation) || review.version !== (withDefender ? 2 : 1) ||
+      review.action !== (withDefender ? 'adopt-exact-observed-queue-storage-with-inherited-defender' : 'adopt-exact-observed-queue-storage') ||
+      review.configSha256 !== digest(json(c)) ||
       review.originSha256 !== originHash || review.proposalSha256 !== digest(json(proposal)) || review.sourceSha256 !== source ||
       !isDeepStrictEqual(review.authority, QUEUE_ADOPTION_AUTHORITY) ||
       reviewed < canonicalInstant(proposal.observation.completedAt) || reviewed > adopted || adopted >= expires ||
       expires - reviewed > 3600000 || adopted - canonicalInstant(proposal.observation.startedAt) > QUEUE_ADOPTION_LIMITS.freshnessMs ||
       record.publication.commitSha === values.publication.commitSha) fail('QUEUE_ADOPTION_EXACT_REVIEW_REQUIRED');
-  verifyObservation(c, record.origin, values, record.observation, source);
+  if (withDefender) verifyQueueDefenderReview(c, record.origin, proposal.defender, review.defender);
+  verifyObservation(c, record.origin, values, record.observation, source, withDefender ? proposal.defender : null);
   return record.observation;
 }
 
 export function verifyAdoptedQueueStorage(c, record, resources, expectedAccess) {
   verifyQueueAdoptionRecord(c, record);
   bounded(resources);
-  return storageResources(c, record.origin, resources, expectedAccess);
+  return storageResources(c, record.origin, resources, expectedAccess, record.version === 3 ? record.proposal.defender : null);
 }
 
 export async function verifyQueueAdoptionSources(c, record, lookup) {

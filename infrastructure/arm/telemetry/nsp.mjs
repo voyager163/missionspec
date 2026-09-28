@@ -5,6 +5,7 @@ import { durableQueueCost, queueResources, verifyQueueTopology } from './durable
 import { verifyAdoptedQueueStorage, verifyQueueAdoptionRecord, queueArmInstant } from './queue-adoption.mjs';
 import { verifyEffectivePolicyEvidence } from './effective-policy.mjs';
 import { verifyNspReconciledRecord } from './nsp-reconciliation.mjs';
+import { queueDefenderInventory, queueDefenderRule, verifyCurrentQueueDefender } from './queue-defender.mjs';
 
 export const NSP_API = '2025-09-01';
 export const NSP_STORAGE_API = '2025-01-01';
@@ -137,7 +138,8 @@ export function nspTopology(c, topology, adoption) {
   const r = ids(c), name = `${c.namePrefix}-queue-${topology.namespace}`;
   const perimeter = `${r.group}/providers/Microsoft.Network/networkSecurityPerimeters/${name}`;
   const profile = `${perimeter}/profiles/queue-storage-v1`;
-  return { version: 1, kind: 'enforced-queue-network-perimeter', configSha256: hash(c),
+  return { version: adoption.version === 3 ? 2 : 1, kind: 'enforced-queue-network-perimeter', configSha256: hash(c),
+    ...(adoption.version === 3 ? { defenderEvidenceSha256: hash(adoption.proposal.defender) } : {}),
     queueTopologySha256: hash(topology), adoptionSha256: hash(adoption), location: c.location,
     tenantId: c.tenantId, admittedSubscription: r.sub, host: r.app, identity: r.ingestIdentity,
     ids: { perimeter, profile, association: `${perimeter}/resourceAssociations/queue-storage-v1`,
@@ -221,7 +223,10 @@ export function buildNspPhase(c, name, topology, adoption, evidence, instance = 
   const resources = name === 'nsp-empty-boundary' ? [d.perimeter, d.profile]
     : name === 'nsp-enforced-association' ? [d.association]
       : name === 'nsp-storage-lock' ? [structuredClone(queueResources(c, topology)['queue-storage'][0])] : [d.rule];
-  if (name === 'nsp-storage-lock') resources[0].expected.properties.publicNetworkAccess = 'SecuredByPerimeter';
+  if (name === 'nsp-storage-lock') {
+    resources[0].expected.properties.publicNetworkAccess = 'SecuredByPerimeter';
+    if (adoption.version === 3) resources[0].expected.properties.networkAcls.resourceAccessRules = [queueDefenderRule(c)];
+  }
   const method = name === 'nsp-storage-lock' ? 'PATCH' : name === 'nsp-network-deny' ? 'DELETE' : 'PUT';
   const deploymentId = method === 'PUT' ? `${r.group}/providers/Microsoft.Resources/deployments/${deploymentName(c, name, instance ?? undefined)}` : null;
   const template = method === 'PUT' ? { $schema: 'https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#',
@@ -246,11 +251,15 @@ function verifyRuleProperties(properties, network, networkProvider) {
         .some(key => Object.hasOwn(properties, key) && !isDeepStrictEqual(properties[key], []))) fail('NSP_RULE_DRIFT');
 }
 export function verifyNspObservation(c, network, adoption, observation, stage) {
+  const defender = adoption.version === 3;
+  if (defender) verifyNspTopology(c, network, adoption.topology, adoption);
   closed(observation, ['version', 'kind', 'startedAt', 'completedAt', 'resources', 'profiles', 'associations',
-    'rules', 'links', 'linkReferences', 'configurations', 'configuration', 'privateEndpoints', 'queues', 'diagnostics']);
-  if (observation.version !== 1 || observation.kind !== 'observed-nsp-control-plane' ||
+    'rules', 'links', 'linkReferences', 'configurations', 'configuration', 'privateEndpoints', 'queues', 'diagnostics',
+    ...(defender ? ['defender'] : [])]);
+  if (observation.version !== (defender ? 2 : 1) || observation.kind !== 'observed-nsp-control-plane' ||
       !['adopted-disabled', ...Object.values(stages)].includes(stage)) fail('NSP_OBSERVATION_INVALID');
   fresh(observation, observation.completedAt);
+  if (defender) verifyCurrentQueueDefender(c, adoption.origin, adoption.proposal.defender, observation.defender);
   const n = network.ids, exists = stage !== 'adopted-disabled';
   const associated = !['adopted-disabled', 'empty-boundary', 'locked-unassociated'].includes(stage);
   const admitted = nspAdmissionStage(stage), values = observation.resources;
@@ -349,7 +358,7 @@ function resourceState(value) {
   return result;
 }
 export function nspState(observation) {
-  if (observation?.kind !== 'observed-nsp-control-plane' || observation.version !== 1) return resourceState(observation);
+  if (observation?.kind !== 'observed-nsp-control-plane' || ![1, 2].includes(observation.version)) return resourceState(observation);
   const result = structuredClone(observation);
   if (!Number.isSafeInteger(result.startedAt) || !Number.isSafeInteger(result.completedAt) ||
       !object(result.resources)) fail('NSP_OBSERVATION_INVALID');
@@ -426,12 +435,25 @@ export function verifyNspBilling(c, network, review, evidence, source, at) {
   }
   return review.cost;
 }
-export function verifyNspReview(c, network, review, source, at) {
-  closed(review, ['version', 'action', 'configSha256', 'topologySha256', 'sourceSha256', 'approvedAt', 'expiresAt', 'authority']);
-  if (review.version !== 1 || review.action !== 'accept-exact-enforced-nsp-topology' ||
+export function verifyNspReview(c, network, review, source, at, observation = null) {
+  const queueOnly = network.version === 2;
+  closed(review, ['version', 'action', 'configSha256', 'topologySha256', 'sourceSha256', 'approvedAt', 'expiresAt', 'authority',
+    ...(queueOnly ? ['queueOnlyRisk'] : [])]);
+  if (review.version !== (queueOnly ? 2 : 1) || review.action !== 'accept-exact-enforced-nsp-topology' ||
       review.configSha256 !== hash(c) || review.topologySha256 !== hash(network) || review.sourceSha256 !== source || !sha(source)) fail('NSP_TOPOLOGY_REVIEW_REQUIRED');
   equal(review.authority, NSP_AUTHORITY, 'NSP_AUTHORITY_CHANGED');
   timed(review, at);
+  if (queueOnly) {
+    const risk = review.queueOnlyRisk;
+    closed(risk, ['action', 'currentStateSha256', 'userInstruction', 'userInstructionSha256',
+      'functionalBlobProtectionQualified', 'blobUploadsAuthorized', 'explicitInterruptionRiskAccepted']);
+    if (risk.action !== 'accept-queue-only-nsp-with-unverified-blob-protection' ||
+        observation?.version !== 2 || risk.currentStateSha256 !== hash(nspState(observation)) ||
+        typeof risk.userInstruction !== 'string' || !risk.userInstruction.trim() || risk.userInstruction.length > 4096 ||
+        risk.userInstructionSha256 !== digest(risk.userInstruction) ||
+        risk.functionalBlobProtectionQualified !== false || risk.blobUploadsAuthorized !== false ||
+        risk.explicitInterruptionRiskAccepted !== true) fail('NSP_EXACT_QUEUE_ONLY_RISK_ACKNOWLEDGMENT_REQUIRED');
+  }
 }
 export function nspPreflightBaseline(proof) {
   return hash({ foundationBaselineSha256: proof.foundationBaselineSha256,
@@ -457,7 +479,7 @@ export function verifyNspPreflight(c, phase, topology, adoption, evidence, proof
   if (!['executionOriginsSha256', 'reconciliationSha256', 'receiverRecordSha256'].every(key => sha(proof.foundationBinding[key])) ||
       !['receiverManifestDigest', 'receiverConfigDigest'].every(key => /^sha256:[0-9a-f]{64}$/u.test(proof.foundationBinding[key] ?? ''))) fail('NSP_RECEIVER_BINDING_REQUIRED');
   verifyNspTopology(c, evidence.topology, topology, adoption);
-  verifyNspReview(c, evidence.topology, proof.topologyReview, proof.sourceSha256, at);
+  verifyNspReview(c, evidence.topology, proof.topologyReview, proof.sourceSha256, at, proof.observation);
   verifyNspBilling(c, evidence.topology, proof.networkBillingReview, proof.networkBillingEvidence, proof.sourceSha256, at);
   verifyNspObservation(c, evidence.topology, adoption, proof.observation, phase.beforeStage);
   fresh(proof.observation, at);
@@ -627,7 +649,9 @@ export function verifyNspAdmission(c, evidence, topology, adoption) {
 }
 export function nspResourceInventory(c, evidence, adoption) {
   const receipt = verifyNspEvidence(c, evidence, adoption.topology, adoption);
-  return receipt ? Object.fromEntries(Object.entries(receipt.observation.resources).filter(([, value]) => value !== null)) : {};
+  return { ...(receipt ? Object.fromEntries(Object.entries(receipt.observation.resources).filter(([, value]) => value !== null)) : {}),
+    ...(adoption.version === 3 ? queueDefenderInventory(c, adoption.origin, adoption.proposal.defender,
+      receipt?.observation.defender ?? adoption.observation.defender) : {}) };
 }
 export function verifyNspReconciliation(c, evidence, adoption, observation, head, at) {
   const receipt = verifyNspEvidence(c, evidence, adoption.topology, adoption);
