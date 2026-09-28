@@ -237,6 +237,35 @@ test('NSP previews reject every mutation outside the exact fixed phase', async (
   }
 });
 
+test('empty NSP boundary preview permits only omitted empty properties and the exact child leaf name', async () => {
+  const { q } = await initial();
+  const preview = structuredClone(q.preview);
+  for (const change of preview.changes) delete change.after.properties;
+  preview.changes[1].after.name = q.phase.resources[1].id.split('/').at(-1);
+  const before = structuredClone(preview);
+  assert.equal(verifyNspPreview(q.phase, preview), hash(preview));
+  assert.deepEqual(preview, before);
+  for (const mutate of [
+    p => { p.changes[0].after.properties = null; },
+    p => { p.changes[1].after.properties = { accessRulesVersion: '0' }; },
+    p => { p.changes[1].after.name = 'unreviewed-profile'; },
+    p => { delete p.changes[0].after.location; },
+    p => { delete p.changes[0].after.tags; },
+  ]) {
+    const changed = structuredClone(preview); mutate(changed);
+    assert.throws(() => verifyNspPreview(q.phase, changed), /NSP_WHATIF_RESOURCE_CHANGED/);
+  }
+  const changedPhase = structuredClone(q.phase);
+  changedPhase.resources[1].expected.properties = { unreviewed: true };
+  assert.throws(() => verifyNspPreview(changedPhase, preview), /NSP_WHATIF_RESOURCE_CHANGED/);
+  const { evidence } = await admission();
+  for (const record of evidence.records.slice(2, 4)) {
+    const omitted = structuredClone(record.preview);
+    for (const change of omitted.changes) delete change.after.properties;
+    assert.throws(() => verifyNspPreview(record.phase, omitted), /NSP_WHATIF_RESOURCE_CHANGED/);
+  }
+});
+
 test('NSP preview version and dependency omissions never excuse contradictory returned values', async t => {
   const { q } = await initial(), raw = structuredClone(q.preview);
   verifyNspPreview(q.phase, q.preview);

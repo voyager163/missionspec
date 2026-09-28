@@ -519,6 +519,12 @@ export function verifyNspPreview(phase, preview, known = []) {
       if (Object.hasOwn(after, key) && (!Object.hasOwn(expected, key) ||
           !isDeepStrictEqual(after[key], expected[key]))) fail('NSP_WHATIF_RESOURCE_CHANGED');
     }
+    if (phase.phase === 'nsp-empty-boundary' && [
+      'Microsoft.Network/networkSecurityPerimeters', 'Microsoft.Network/networkSecurityPerimeters/profiles',
+    ].includes(d.type) && isDeepStrictEqual(expected.properties, {}) && !Object.hasOwn(after, 'properties')) {
+      delete expected.properties;
+    }
+    if (after.name === d.id.split('/').at(-1)) expected.name = after.name;
     delete expected.apiVersion; delete after.apiVersion; delete expected.dependsOn; delete after.dependsOn;
     equal(after, expected, 'NSP_WHATIF_RESOURCE_CHANGED');
   }

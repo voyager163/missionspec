@@ -354,6 +354,14 @@ preimage; they are not falsely labeled native ARM what-if. PUT phases require
 full native template validation and what-if. Explicit contradictory returned
 API versions/dependencies fail rather than being stripped away.
 
+For `nsp-empty-boundary` only, ARM may omit the requested empty `properties`
+objects on the new perimeter and profile. The preview may also use the exact
+child leaf name already bound by its resource ID. These specific representations
+do not establish computed state: the raw preview is retained and actual
+perimeter/profile/rule inventories and versions still require readback.
+Null, nonempty or unknown properties are not treated as an empty omission;
+nonempty association or access-rule settings are never omittable.
+
 The pinned APIs are Network `2025-09-01` and Storage `2025-01-01`.
 The provider catalog can omit only the three documented NSP child types;
 the registered root API/region and any advertised child versions are checked.
