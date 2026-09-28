@@ -36,8 +36,8 @@ only queue is `telemetry-events-v1`, in the existing telemetry group in
 Australia East. This is a **new** StorageV2 / Standard_LRS account, not reuse
 of private runtime-state storage. HTTPS/TLS1_2, `allowSharedKeyAccess: false`,
 `allowBlobPublicAccess: false` and OAuth defaults are explicit. Its public
-endpoint was intended to accommodate the existing no-VNet Container App using Entra; it
-does not introduce a VM, VNet, private endpoint, firewall/security exception,
+endpoint was intended to accommodate the existing no-VNet Container App using
+Entra; the original topology does not introduce a VM, VNet, private endpoint, firewall/security exception,
 SAS, key, connection string or anonymous queue access. Inherited Defender
 and subscription policy stay unchanged. CORS, diagnostics and exports stay
 empty; the worker cannot create/delete a queue or manage service properties.
@@ -50,10 +50,11 @@ successful ARM deployment or partial checklist is not a qualified queue receipt.
 The failed intent remains immutable, and neither creation replay nor subsequent
 queue permissions/image deployment is authorized by that result.
 
-The existing receiver environment has no VNet integration. A policy-compliant
-networking revision is under design review; neither NSP nor Private Link has
-been selected or deployed. Do not add an exemption, exclusion tag or policy
-change to make the original topology pass. If NSP is selected later, an account
+The existing receiver environment has no VNet integration. Enforced Network
+Security Perimeter (NSP) has been selected and its local implementation is
+available; deployment and runtime qualification remain separate gates. No
+Private Link migration is selected. Do not add an exemption, exclusion tag or
+policy change to make the original topology pass. An account
 flag of `Disabled` alone must not be described as denying all traffic: active
 perimeter associations and rules can still allow access. Receiver admission
 shutdown, queue network revocation and their propagation evidence are distinct.
@@ -208,7 +209,7 @@ changes, independent reads are limited to four in flight, each request to
 15 seconds and preflight to 120 seconds. A durable intent permits one PUT and
 a bounded 120-second rollout; uncertainty requires reconciliation, never retry.
 
-**Effective-policy binding in the local revision.** The preflight hardening
+**Effective-policy binding.** The preflight hardening
 adds version-1 effective-policy evidence for new queue execution, rather than
 relying only on assignment hashes and what-if. Its proof binds
 `effectivePolicyVersion`, `effectivePolicySha256` and the retained
@@ -224,8 +225,8 @@ incomplete listings and unverified exemptions stop execution. An unknown
 tag/exemption condition is not permission to ignore a policy. Exact policy
 evidence must also be refreshed before dispatch. Evaluating a supported
 `SecuredByPerimeter` condition does not establish NSP association, reachability,
-propagation or data authorization. This update remains a local integration
-candidate until its published source and actual required checks are reviewed.
+propagation or data authorization. Each further policy-source change still
+requires its own published-source and required-check qualification.
 
 Each successful queue phase writes a new immutable `<phase>-record.json`.
 For the next private revision, retain those full records under their exact
@@ -235,6 +236,115 @@ approval, source, what-if, deployment identity and readback records. Any other
 account/queue/resource remains an error. Role definitions and assignments,
 diagnostics, account encryption/network settings and queue inventory are read
 again at dispatch, including after request-body preparation.
+
+#### Read-only storage adoption and enforced NSP
+
+The created-but-unqualified storage follows a distinct, closed version-2
+`reviewed-queue-storage-adoption` record. It has no legacy successful `phase` or
+`receipt`; its observation explicitly remains `qualified: false` and
+`operationallyQualified: false`. The old phase, source, approvals, stopped
+journals and raw artifact hashes remain under its immutable origin.
+
+`observe-queue-adoption queue-storage <private-revision>` performs only bounded
+GETs and writes an immutable proposal. A separately supplied exact review and
+current source publication are required by `adopt-queue-storage queue-storage`
+to write the local adoption record. Adoption establishes reviewed inventory,
+not queue grants, image publication, network admission or runtime success.
+Its evidence pins the original validated/deployed template hash, deployment and
+successful Create operations, account creation time and fresh resource settings.
+ARM instants retain 100ns precision. Missing original wire bytes and service/queue
+generation markers are not invented; there is no full-wire or uninterrupted
+child-generation attestation. Assignment inventories do not prove role-definition
+or transitive-group access. Only originally observed system creation fields are
+pinned; schema-validated modification metadata may change without pretending a
+new generation was created.
+
+NSP uses the existing receiver and queue account, one dedicated perimeter, one
+profile, one explicitly `Enforced` account association and one inbound rule for
+the specified subscription. Network admission is account-wide from that
+subscription, not app-, identity- or queue-specific. Host and ingest identity
+remain bound to the same intended subscription/tenant. Runtime queue RBAC stays
+separate and narrow. No VM, VNet, private endpoint, new identity, policy exception,
+extra member/link/outbound rule or diagnostic export is implicit.
+
+| Fixed phase | Only permitted mutation |
+| --- | --- |
+| `nsp-empty-boundary` | One deployment PUT creating the perimeter and empty profile |
+| `nsp-storage-lock` | One account PATCH changing only `publicNetworkAccess` to `SecuredByPerimeter` |
+| `nsp-enforced-association` | One deployment PUT creating the exact `Enforced` association, with empty rules |
+| `nsp-subscription-admission` | One deployment PUT creating the sole subscription rule last |
+| `nsp-network-deny` | One DELETE of that exact rule, retaining the locked account and association |
+| `nsp-subscription-readmit` | One independently approved fresh-instance PUT restoring the unchanged rule after verified terminal deny |
+
+`preview-nsp` and `prepare-nsp` are local-only. `check-nsp` obtains bounded
+read-only evidence; `execute-nsp` requires published source and the exact
+phase's external approval. PATCH/DELETE previews bind their exact request and
+preimage; they are not falsely labeled native ARM what-if. PUT phases require
+full native template validation and what-if. Explicit contradictory returned
+API versions/dependencies fail rather than being stripped away.
+
+The pinned APIs are Network `2025-09-01` and Storage `2025-01-01`.
+The provider catalog can omit only the three documented NSP child types;
+the registered root API/region and any advertised child versions are checked.
+Raw catalog evidence and explicit unverified omissions are approval-bound.
+Missing catalog entries do not establish API support or waive actual readbacks.
+The association wire value is `Enforced`, never prose-only `Transition`,
+`Learning`, `Audit` or an omitted default.
+
+Readback independently checks Network resources and Storage's effective NSP
+configuration: exact membership/rules, association mode, propagation status/issues,
+copied rule and diagnostic versions, and empty enabled log categories. Network
+version strings and Storage safe-integer versions are compared without rounding;
+the association issue indicator is a string, not Boolean. Missing optional
+fields remain unverified. ARM IDs use case-insensitive identity comparison with
+strict object/path shapes; settings and URLs are not broadly normalized.
+Comparison ignores only documented metadata at known paths, not arbitrary nested
+fields named `etag` or `completedAt`. Failed reads retain bounded partial evidence,
+never success-shaped incomplete lists.
+
+Canonical lineage and unresolved-intent fences are keyed to physical target
+identities, not a replaceable adoption/review hash. A fresh directory, wrapper,
+source or nonce cannot reset a pending effect, including after a failed head
+write. A later deny fences previous admission evidence. Current head and both
+provider views are rechecked before new grants, publication/deployment and
+enabled synthetic dispatch. Historical valid receipts alone are not current
+authority. Version-2 operational queue records retain the entire network proof;
+reconciliation v6 binds the new inventory without weakening versions 3-5.
+
+The explicit NSP price-uncertainty review records the user's **USD 375/month
+planning limit** and accepted uncertainty: prior USD 349.37 estimate plus a
+USD 10 discretionary allowance gives USD 359.37 provisional total. The
+contract price-sheet request returned 401; no matching public retail rows is
+not proof of a zero fee. The exact disclosure, acknowledgment, evidence hashes,
+source/topology and expiry are bound. Unacknowledged uncertainty is not a
+fallback. Existing budget alerts remain USD 350/50/300; this review changes
+neither budget resources nor prices, and provides no hard spending cap.
+
+`reconcile-nsp` only captures uncertain state. A separate
+`prepare-nsp-reconciliation` proposal and externally reviewed
+`qualify-nsp-reconciliation` operation can append a version-2
+`reviewed-nsp-reconciliation` after fresh complete evidence and pending-head
+comparison. Its receipt qualifies current control-plane state only:
+`originalExecutionQualified: false` and `originalHistoryModified: false`.
+Original failed journals, reservations and the 120-second execution bound stay
+unchanged. Missing dispatch/provenance, incomplete state, stale review/head or
+changed generation remain blocked; there is no retry or fabricated original
+success.
+
+Control-plane rule removal is not proof of data-plane revocation. `Disabled`
+alone can still permit NSP-allowed traffic when an association/rule exists.
+The same otherwise-authorized identity needs separately bounded denial and
+delivery qualification. Neither a different unauthorized principal's 403 nor
+receiver 503 proves NSP denial. Optional diagnostics stay off; Azure's default
+control-plane Activity Log is not claimed absent.
+
+The paired false-only receiver-disable path deliberately does not require live
+Storage/NSP or foundation availability. It still verifies frozen published
+history, exact current app/UAMI/image/config, paired approvals and native
+app validation/what-if. It cannot enable ingestion or alter another setting.
+Publication observation is similarly separate from admission: an unpublished
+candidate's first-copy readback remains available after network denial/expiry,
+but is unqualified and grants neither retry nor deployment authority.
 
 The new receiver candidate is **version 2**, with
 `kind: reviewed-durable-queue-receiver`, the complete `priorCandidate`, original

@@ -431,14 +431,19 @@ test('source publication hashes include the new imported module but preserve pre
   const historical = Object.fromEntries(names.map(name => [prefix + name, `unit historical ${name}`]));
   const schemas = { 'assets/schemas/telemetry-event.schema.json': json(contract.schema),
     'services/telemetry-ingest/schema/storage-columns.json': json(contract.columns) };
-  for (const modern of [false, true]) {
+  const nspNames = ['queue-adoption.mjs', 'nsp.mjs', 'nsp-controller.mjs', 'nsp-reconciliation.mjs'];
+  for (const modern of [false, true, 'nsp']) {
     const files = { ...historical, ...schemas };
     if (modern) {
       files[prefix + 'controller.mjs'] = "import { collectEffectivePolicies } from './effective-policy.mjs';";
       files[prefix + 'effective-policy.mjs'] = 'unit new policy';
     }
+    if (modern === 'nsp') for (const name of nspNames) {
+      files[prefix + 'controller.mjs'] += `\nimport {} from './${name}';`;
+      files[prefix + name] = `unit ${name}`;
+    }
     const expected = createHash('sha256');
-    for (const name of [...names, ...(modern ? ['effective-policy.mjs'] : [])]) expected.update(name).update(files[prefix + name]);
+    for (const name of [...names, ...(modern ? ['effective-policy.mjs'] : []), ...(modern === 'nsp' ? nspNames : [])]) expected.update(name).update(files[prefix + name]);
     expected.update(json(contract));
     const run = async (_command, args) => {
       if (args[0] === 'merge-base') return { stdout: Buffer.alloc(0) };
@@ -450,7 +455,7 @@ test('source publication hashes include the new imported module but preserve pre
     assert.equal(await publishedSourceDigest(commit, run), expected.digest('hex'));
   }
   const current = createHash('sha256');
-  for (const name of [...names, 'effective-policy.mjs']) current.update(name).update(await readFile(prefix + name));
+  for (const name of [...names, 'effective-policy.mjs', ...nspNames]) current.update(name).update(await readFile(prefix + name));
   current.update(json(contract));
   assert.equal(await sourceDigest(), current.digest('hex'));
 });

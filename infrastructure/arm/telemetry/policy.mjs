@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { IMAGE_PHASES, verifyDisabledImageWhatIf, verifyDisabledImageRecord, verifyImageRuntimePublication,
   verifyReceiverCandidate, verifyReceiverInventory } from './receiver-upgrade.mjs';
 import { QUEUE_PHASES, verifyQueueWhatIf, verifyQueueResource, verifyQueueDrain, qualifiedQueueRecords, QUEUE_PROFILE_KIND } from './durable-queue.mjs';
+import { verifyNspReconciliation } from './nsp.mjs';
 import { assertOwned, assertBudget, BUDGET, buildPhase, budgetConfiguration, closed, digest, fail, ids, json, LIMITS, RECEIVER_COMMAND, requireAccess, sameId, projectBudgetFilter, uploadRoleProperties, assignmentRoleTargets, TOGGLE_PHASES, SYNTHETIC_LIMITS, SYNTHETIC_FIXTURES, validateWindowInstance, deploymentName } from './definition.mjs';
 export { assertBudget, notificationKeys } from './definition.mjs';
 
@@ -303,13 +304,14 @@ export function verifyReconciliation(c, foundation, origins, proposal, sourceSha
   closed(origins, ['version', 'records', 'imagePublication']);
   closed(proposal, ['version', 'kind', 'sourceSha256', 'configSha256', 'executionOriginsSha256', 'baselineSha256', 'checkedAt', 'results',
     'stateBudget', 'workspace', 'identities', 'imagePublication', 'roleDefinitions', 'inventory', 'managedGroup',
-    ...([4, 5].includes(proposal.version) ? ['receiverCandidateSha256'] : []),
-    ...(proposal.version === 5 ? ['receiverUpgradeSha256', 'queueRecordsSha256'] : [])]);
+    ...([4, 5, 6].includes(proposal.version) ? ['receiverCandidateSha256'] : []),
+    ...([5, 6].includes(proposal.version) ? ['receiverUpgradeSha256', 'queueRecordsSha256'] : []),
+    ...(proposal.version === 6 ? ['queueAdoptionSha256', 'nspNetworkSha256', 'nspObservation', 'nspLineageHead'] : [])]);
   verifyExecutionOrigins(c, foundation, origins, contract);
-  if (![3, 4, 5].includes(proposal.version) || proposal.kind !== 'read-only-completed-phases' ||
+  if (![3, 4, 5, 6].includes(proposal.version) || proposal.kind !== 'read-only-completed-phases' ||
       !/^[0-9a-f]{64}$/u.test(sourceSha256) || proposal.sourceSha256 !== sourceSha256 || proposal.configSha256 !== digest(json(c)) ||
       proposal.executionOriginsSha256 !== digest(json(origins)) || canonicalInstant(proposal.checkedAt) > Date.now()) fail('RECONCILIATION_INVALID');
-  if ([4, 5].includes(proposal.version)) {
+  if ([4, 5, 6].includes(proposal.version)) {
     if (!receiverCandidate || proposal.receiverCandidateSha256 !== digest(json(receiverCandidate)) ||
         !isDeepStrictEqual(receiverCandidate.legacyPublication, origins.imagePublication)) fail('RECONCILIATION_RECEIVER_PUBLICATION_REQUIRED');
     verifyReceiverCandidate(c, receiverCandidate);
@@ -317,17 +319,25 @@ export function verifyReconciliation(c, foundation, origins, proposal, sourceSha
     if (canonicalInstant(receiverCandidate.publication.completedAt) > canonicalInstant(proposal.checkedAt)) fail('RECONCILIATION_RECEIVER_PUBLICATION_REQUIRED');
   } else if (receiverCandidate !== null) fail('VERSIONED_RECEIVER_RECONCILIATION_REQUIRED');
   let queueResources = {};
-  if (proposal.version === 5) {
-    closed(overlay, ['receiverUpgrade', 'queueRecords']);
+  if ([5, 6].includes(proposal.version)) {
+    closed(overlay, ['receiverUpgrade', 'queueRecords', ...(proposal.version === 6 ? ['nspNetwork'] : [])]);
     verifyDisabledImageRecord(c, overlay.receiverUpgrade);
     if (proposal.receiverUpgradeSha256 !== digest(json(overlay.receiverUpgrade)) ||
         proposal.queueRecordsSha256 !== digest(json(overlay.queueRecords)) ||
         !isDeepStrictEqual(overlay.receiverUpgrade.candidate,
           receiverCandidate.version === 2 && overlay.receiverUpgrade.candidate.version === 1 ? receiverCandidate.priorCandidate : receiverCandidate)) fail('RECONCILIATION_OVERLAY_CHANGED');
     const names = Object.keys(overlay.queueRecords);
+    if (proposal.version === 5 && overlay.queueRecords['queue-storage']?.version === 2) fail('VERSIONED_NSP_RECONCILIATION_REQUIRED');
     if (names.length) {
       const last = QUEUE_PHASES.filter(name => names.includes(name)).at(-1);
       queueResources = qualifiedQueueRecords(c, overlay.queueRecords, overlay.queueRecords[last]?.topology, last);
+    }
+    if (proposal.version === 6) {
+      const adoption = overlay.queueRecords['queue-storage'];
+      if (adoption?.kind !== 'reviewed-queue-storage-adoption' || proposal.queueAdoptionSha256 !== digest(json(adoption)) ||
+          proposal.nspNetworkSha256 !== digest(json(overlay.nspNetwork))) fail('NSP_RECONCILIATION_BINDING_CHANGED');
+      queueResources = { ...queueResources, ...verifyNspReconciliation(c, overlay.nspNetwork, adoption,
+        proposal.nspObservation, proposal.nspLineageHead, canonicalInstant(proposal.checkedAt)) };
     }
   } else if (overlay !== null) fail('VERSIONED_RECEIVER_RECONCILIATION_REQUIRED');
   const r = ids(c), expectedResults = origins.records.map(v => v.phase.phase);
@@ -367,10 +377,10 @@ export function verifyReconciliation(c, foundation, origins, proposal, sourceSha
     verifyDeploymentIdentity(record.firstReadback.deployment, result.deployment);
     for (const descriptor of p.resources) {
       const value = result.resources[descriptor.id], pin = executionIdentity(value, descriptor.type);
-      const expected = proposal.version === 5 && descriptor.type === 'Microsoft.App/containerApps'
+      const expected = [5, 6].includes(proposal.version) && descriptor.type === 'Microsoft.App/containerApps'
         ? overlay.receiverUpgrade.phase.resources[0] : descriptor;
       verifyResource(c, p, expected, value, { workspace: proposal.workspace, identities: proposal.identities,
-        publication: origins.imagePublication?.receipt, ...(proposal.version === 5 ? { receiverCandidate } : {}) });
+        publication: origins.imagePublication?.receipt, ...([5, 6].includes(proposal.version) ? { receiverCandidate } : {}) });
       if (!isDeepStrictEqual(pin, executionIdentity(record.firstReadback.resources[descriptor.id], descriptor.type)) ||
           !isDeepStrictEqual(pin, result.identityPins[descriptor.id])) fail('RESOURCE_IDENTITY_CHANGED');
       if (descriptor.type !== 'Microsoft.Consumption/budgets') {
@@ -414,7 +424,7 @@ function budgetWhatIfConfiguration(value) {
 }
 export function verifyWhatIf(phase, result, preservedIds = [], context) {
   if (QUEUE_PHASES.includes(phase.phase)) return verifyQueueWhatIf(context?.config, phase, context?.queueTopology, result, preservedIds,
-    context?.identities?.[ids(context.config).ingestIdentity]).whatIfSha256;
+    context?.identities?.[ids(context.config).ingestIdentity], context?.networkContext ?? null).whatIfSha256;
   if (result?.status !== 'Succeeded' || !Array.isArray(result.changes)) fail('WHAT_IF_INCOMPLETE');
   const target = new Map(phase.resources.map(v => [v.id.toLowerCase(), v]));
   const preserved = new Set(preservedIds.map(v => v.toLowerCase()));

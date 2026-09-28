@@ -7,6 +7,7 @@ import { admissionFlag, canonicalAppWrite, canonicalInstant, executionIdentity, 
   verifyResource, verifyWhatIf, verifyWindowPredecessor } from './policy.mjs';
 import { durableQueueCost, QUEUE_PROFILE_KIND, QUEUE_RUNTIME, queueEnvironment, qualifiedQueueRecords,
   verifyQueueTopology } from './durable-queue.mjs';
+import { nspResourceInventory } from './nsp.mjs';
 
 export const IMAGE_PHASES = Object.freeze(['disabled-image-upgrade', 'disabled-image-rollback', 'disabled-queue-upgrade']);
 export const PREPARED_IDENTITY_RUNTIME = Object.freeze({
@@ -448,6 +449,8 @@ export function verifyDisabledImageRecord(c, record) {
   const context = { ...resourceContext(c, record.prerequisiteReceipts), receiverCandidate: candidate, config: c, app: anchor };
   const preserved = Object.values(record.prerequisiteReceipts).flatMap(v => Object.keys(v.resources ?? {}));
   if (candidate.version === 2) preserved.push(...Object.keys(qualifiedQueueRecords(c, record.prerequisiteReceipts.queueRecords, candidate.topology)));
+  if (record.prerequisiteReceipts.nspNetwork) preserved.push(...Object.keys(nspResourceInventory(c,
+    record.prerequisiteReceipts.nspNetwork, record.prerequisiteReceipts.queueRecords?.['queue-storage'])));
   verifyWhatIf(phase, record.whatIf, preserved, context);
   closed(receipt.resources, [ids(c).app]);
   const app = receipt.resources[ids(c).app];

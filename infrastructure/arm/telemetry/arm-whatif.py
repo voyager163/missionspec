@@ -19,7 +19,9 @@ PHASE_CODES = {"core": "co", "workspace-access": "wa", "data": "da", "upload-rol
                "assignments": "ra", "disabled-app": "di", "synthetic-admission": "sy",
                "synthetic-disable": "sd", "project-budget": "pb",
                "disabled-image-upgrade": "iu", "disabled-image-rollback": "ir",
-               "disabled-queue-upgrade": "qu", "queue-storage": "qs", "queue-role": "qr", "queue-assignment": "qa"}
+               "disabled-queue-upgrade": "qu", "queue-storage": "qs", "queue-role": "qr", "queue-assignment": "qa",
+               "nsp-empty-boundary": "ne", "nsp-enforced-association": "na",
+               "nsp-subscription-admission": "ns", "nsp-subscription-readmit": "nr"}
 GUID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
 
 
@@ -71,7 +73,7 @@ def fixed_deployment_name(request):
     require(request.get("phase") in PHASE_CODES and isinstance(request.get("namePrefix"), str)
             and re.fullmatch(r"missionspec-[a-z0-9]{2,10}", request["namePrefix"])
             and isinstance(request.get("runId"), str) and GUID.fullmatch(request["runId"]), "FIXED_WHATIF_NAME_REQUIRED")
-    if request["phase"] in ("synthetic-admission", "synthetic-disable", "disabled-image-upgrade", "disabled-image-rollback", "disabled-queue-upgrade"):
+    if request["phase"] in ("synthetic-admission", "synthetic-disable", "disabled-image-upgrade", "disabled-image-rollback", "disabled-queue-upgrade", "nsp-subscription-readmit"):
         instance = request.get("windowInstanceId")
         require(isinstance(instance, str)
                 and re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", instance)
