@@ -217,6 +217,32 @@ test('nested AND/OR/not unknown tags and resourceGroup expressions cannot create
   });
 });
 
+test('stored logical-key casing preserves type guards without normalizing literals or unknown operators', async () => {
+  const x = effectivePolicyFixture();
+  x.definition.properties.policyRule.if = {
+    AllOf: [
+      { AnyOf: [{ field: 'type', Equals: 'Microsoft.Compute/virtualMachines' }] },
+      { unknownOperator: 'unresolved' },
+    ],
+  };
+  const before = structuredClone(x.definition);
+  assert.equal((await x.analyze()).qualified, true);
+  assert.deepEqual(x.definition, before);
+  x.definition.properties.policyRule.if.AllOf[0].AnyOf[0].Equals = 'Microsoft.Storage/storageAccounts';
+  assert.equal((await x.analyze()).qualified, false);
+  x.definition.properties.policyRule.if = {
+    allof: [{ field: 'type', equals: 'Microsoft.Storage/storageAccounts' }, { field: network, notEquals: 'Disabled' }],
+  };
+  assert.equal((await x.analyze()).qualified, false);
+  x.definition.properties.policyRule.if = {
+    allOf: [{ field: 'type', equals: 'Microsoft.Compute/virtualMachines' }],
+    AllOf: [{ field: 'type', equals: 'Microsoft.Storage/storageAccounts' }],
+  };
+  assert.equal((await x.analyze()).qualified, false, 'Conflicting case-folded keys must remain unresolved');
+  x.definition.properties.policyRule.if = { unknownAllOf: [{ field: 'type', equals: 'Microsoft.Compute/virtualMachines' }] };
+  assert.equal((await x.analyze()).qualified, false);
+});
+
 test('assignment to initiative to definition forwarding and defaults are exact evidence, not ignored overrides', async () => {
   const x = effectivePolicyFixture();
   x.initiative.properties.parameters = { behavior: { type: 'String', defaultValue: 'audit' } };
@@ -232,6 +258,48 @@ test('assignment to initiative to definition forwarding and defaults are exact e
   delete x.assignment.properties.parameters.behavior;
   delete x.initiative.properties.parameters.behavior.defaultValue;
   await assert.rejects(x.analyze(), /EFFECTIVE_POLICY_PARAMETERS_UNRESOLVED/);
+});
+
+test('array allowedValues validates each selected item through defaults and initiative forwarding', async () => {
+  const x = effectivePolicyFixture();
+  x.initiative.properties.parameters = {
+    selectedTypes: { type: 'Array', defaultValue: ['Microsoft.Storage/storageAccounts'],
+      allowedValues: ['Microsoft.Storage/storageAccounts', 'Microsoft.Compute/virtualMachines'] },
+  };
+  x.definition.properties.parameters.selectedTypes = {
+    type: 'Array', defaultValue: [], allowedValues: ['Microsoft.Storage/storageAccounts', 'Microsoft.Compute/virtualMachines'],
+  };
+  x.initiative.properties.policyDefinitions[0].parameters = { selectedTypes: { value: "[parameters('selectedTypes')]" } };
+  x.definition.properties.policyRule.if = { field: 'type', in: "[parameters('selectedTypes')]" };
+  assert.equal((await x.analyze()).qualified, false, 'Valid array must not hide the matching network rewrite');
+  x.assignment.properties.parameters = { selectedTypes: { value: ['Microsoft.Compute/virtualMachines'] } };
+  assert.equal((await x.analyze()).qualified, true);
+  x.assignment.properties.parameters.selectedTypes.value = [
+    'Microsoft.Compute/virtualMachines', 'Microsoft.Storage/storageAccounts',
+  ];
+  assert.equal((await x.analyze()).qualified, false);
+  x.assignment.properties.parameters.selectedTypes.value = [];
+  assert.equal((await x.analyze()).qualified, true);
+  for (const value of [
+    ['Microsoft.Storage/storageAccounts', 'unlisted'], ['microsoft.storage/storageaccounts'],
+    [['Microsoft.Storage/storageAccounts']], [null], 'Microsoft.Storage/storageAccounts',
+  ]) {
+    x.assignment.properties.parameters.selectedTypes.value = value;
+    await assert.rejects(x.analyze(), /EFFECTIVE_POLICY_PARAMETERS_UNRESOLVED/);
+  }
+});
+
+test('allowedValues assignment validation remains case-sensitive and rejects malformed lists', async () => {
+  const x = effectivePolicyFixture();
+  x.definition.properties.parameters.effect.allowedValues = ['modify', 'audit', 'disabled', 'deny'];
+  x.initiative.properties.policyDefinitions[0].parameters = { effect: { value: 'AUDIT' } };
+  await assert.rejects(x.analyze(), /EFFECTIVE_POLICY_PARAMETERS_UNRESOLVED/);
+  x.initiative.properties.policyDefinitions[0].parameters.effect.value = 'audit';
+  assert.equal((await x.analyze()).qualified, true);
+  for (const allowedValues of [null, false, {}, 'audit', [], undefined]) {
+    x.definition.properties.parameters.effect.allowedValues = allowedValues;
+    await assert.rejects(x.analyze(), /EFFECTIVE_POLICY_PARAMETERS_UNRESOLVED/);
+  }
 });
 
 test('all matching unpinned versions are checked; no optimistic latest-version selection', async () => {
@@ -251,6 +319,66 @@ test('all matching unpinned versions are checked; no optimistic latest-version s
   assert(exact.analysis.observations.every(v => v.versionResolution === 'exact-version'));
   x.initiative.properties.policyDefinitions[0].effectiveDefinitionVersion = '2.0.0';
   await assert.rejects(x.analyze(), /EFFECTIVE_POLICY_VERSION_INVALID/);
+});
+
+test('preview annotations retain all numeric version matches and exact effective pins', async () => {
+  const x = effectivePolicyFixture(), reference = x.initiative.properties.policyDefinitions[0];
+  reference.definitionVersion = '1.*.*-preview';
+  x.catalog.value = [];
+  for (const [version, effect] of [['1.0.0-preview', 'audit'], ['1.1.0-preview', 'modify'], ['1.2.0', 'audit']]) {
+    const definition = structuredClone(x.definition);
+    definition.id = `${x.definitionId}/versions/${version}`;
+    definition.properties.version = version;
+    definition.properties.policyRule.then.effect = effect;
+    x.catalog.value.push({ id: definition.id, name: version, properties: { version } });
+    x.responses.set(definition.id, definition);
+  }
+  const ambiguous = await x.analyze();
+  assert.equal(ambiguous.qualified, false);
+  assert.deepEqual([...new Set(ambiguous.analysis.observations.map(value => value.definitionVersion))].sort(),
+    ['1.0.0-preview', '1.1.0-preview', '1.2.0']);
+  assert(ambiguous.analysis.blockers.some(value => value.definitionVersion === '1.1.0-preview'));
+  reference.effectiveDefinitionVersion = '1.0.0-preview';
+  assert.equal((await x.analyze()).qualified, true);
+  reference.effectiveDefinitionVersion = '1.2.0';
+  assert.equal((await x.analyze()).qualified, true, 'GA promotion must not hide a still-assigned policy');
+  reference.effectiveDefinitionVersion = '2.0.0';
+  await assert.rejects(x.analyze(), /EFFECTIVE_POLICY_VERSION_INVALID/);
+  delete reference.effectiveDefinitionVersion;
+  reference.definitionVersion = '1.0.0-preview';
+  assert.equal((await x.analyze()).qualified, true);
+  reference.policyDefinitionId = `${x.definitionId}/versions/1.0.0-preview`;
+  assert.equal((await x.analyze()).qualified, true);
+  reference.policyDefinitionId = x.definitionId;
+  reference.definitionVersion = '2.*.*-preview';
+  await assert.rejects(x.analyze(), /EFFECTIVE_POLICY_VERSION_UNRESOLVED/);
+  for (const selector of ['1.*.*-other', '1.*.*-preview.1', '1.*.*-Preview', '1.*.0-preview']) {
+    reference.definitionVersion = selector;
+    await assert.rejects(x.analyze(), /EFFECTIVE_POLICY_VERSION_INVALID/);
+  }
+});
+
+test('complete version-list documents avoid redundant reads while summary lists still require exact GETs', async () => {
+  const x = effectivePolicyFixture();
+  x.catalog.value = [structuredClone(x.definition)];
+  const proof = await x.analyze();
+  assert.equal(proof.qualified, false);
+  assert.equal(x.calls.length, 4);
+  assert(!x.calls.some(call => call.id === x.definition.id));
+  const oldStyle = structuredClone(proof);
+  oldStyle.snapshot.reads.push({ id: x.definition.id, apiVersion: POLICY_API, filter: null,
+    response: structuredClone(x.definition) });
+  assert.deepEqual(analyzeEffectivePolicies(x.phase, oldStyle.snapshot).analysis, proof.analysis);
+  oldStyle.snapshot.reads.at(-1).response.properties.policyRule.then.effect = 'audit';
+  assert.throws(() => analyzeEffectivePolicies(x.phase, oldStyle.snapshot), /EFFECTIVE_POLICY_DEFINITION_DRIFT/);
+  x.calls.length = 0;
+  x.catalog.value = [{ id: x.definition.id, properties: { version: '1.0.0' } }];
+  assert.equal((await x.analyze()).qualified, false);
+  assert.equal(x.calls.length, 5);
+  assert(x.calls.some(call => call.id === x.definition.id));
+  x.catalog.value = [structuredClone(x.definition)];
+  x.catalog.value[0].properties.policyRule = null;
+  await assert.rejects(x.analyze(), /EFFECTIVE_POLICY_RULE_INVALID/);
 });
 
 test('potential network/auth/logging mutations outside the subset fail closed with sanitized reasons', async t => {

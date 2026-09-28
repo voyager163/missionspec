@@ -250,6 +250,18 @@ evidence must also be refreshed before dispatch. Evaluating a supported
 propagation or data authorization. Each further policy-source change still
 requires its own published-source and required-check qualification.
 
+Array parameter `allowedValues` applies to each selected element; assignment
+validation is case-sensitive even when subsequent policy string comparisons
+are not. Existing preview-version annotations remain recorded while every
+matching numeric version is examined, including promotion to GA; the evaluator
+never chooses an optimistic latest version. Complete rule documents already
+returned by a bounded version catalog are evaluated directly. Summary-only
+catalog entries still require exact version GETs; retained GETs must agree with
+the catalog's rule-bearing properties. Known logical/condition key casing
+returned by ARM is interpreted without rewriting retained bytes. Conflicting
+case variants and unknown operators remain unresolved, not a reason to skip
+policy enforcement.
+
 Each successful queue phase writes a new immutable `<phase>-record.json`.
 For the next private revision, retain those full records under their exact
 phase names in `queue-records.json`; do not replace old receipts. The new

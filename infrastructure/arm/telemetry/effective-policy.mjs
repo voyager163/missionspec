@@ -6,8 +6,8 @@ export const EXEMPTION_API = '2022-07-01-preview';
 export const POLICY_ASSIGNMENT_QUERY = '$expand=EffectiveDefinitionVersion';
 export const POLICY_LIMITS = Object.freeze({ reads: 512, items: 512, observations: 4096, bytes: 8 * 1024 * 1024, depth: 24, waves: 8 });
 const unknown = Symbol('unresolved-policy-expression');
-const versionPattern = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
-const definitionPattern = /^(?:(\/subscriptions\/[0-9a-f-]{36})|(\/providers\/Microsoft\.Management\/managementGroups\/[A-Za-z0-9_-]{1,90}))?\/providers\/Microsoft\.Authorization\/(policyDefinitions|policySetDefinitions)\/([A-Za-z0-9_.-]{1,128})(?:\/versions\/(\d+\.\d+\.\d+))?$/iu;
+const versionPattern = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-preview)?$/u;
+const definitionPattern = /^(?:(\/subscriptions\/[0-9a-f-]{36})|(\/providers\/Microsoft\.Management\/managementGroups\/[A-Za-z0-9_-]{1,90}))?\/providers\/Microsoft\.Authorization\/(policyDefinitions|policySetDefinitions)\/([A-Za-z0-9_.-]{1,128})(?:\/versions\/(\d+\.\d+\.\d+(?:-preview)?))?$/iu;
 const authorizationScope = /^(.*)\/providers\/Microsoft\.Authorization\/(?:policyAssignments|policyExemptions)\/[A-Za-z0-9_.-]{1,128}$/iu;
 const managementScope = /^\/providers\/Microsoft\.Management\/managementGroups\/[A-Za-z0-9_-]{1,90}$/iu;
 const validScope = value => typeof value === 'string' && !/[?#\\%]|\.\./u.test(value) &&
@@ -69,8 +69,16 @@ function parameters(definitions, supplied, parent = {}) {
     const types = { string: v => typeof v === 'string', boolean: v => typeof v === 'boolean',
       integer: v => Number.isSafeInteger(v), float: v => typeof v === 'number' && Number.isFinite(v),
       array: Array.isArray, object };
-    if (value === undefined || value === unknown || !types[schema.type?.toLowerCase()]?.(value) ||
-        (schema.allowedValues && (!Array.isArray(schema.allowedValues) || !schema.allowedValues.some(v => equal(v, value))))) fail('EFFECTIVE_POLICY_PARAMETERS_UNRESOLVED');
+    const type = schema.type?.toLowerCase();
+    if (value === undefined || value === unknown || !types[type]?.(value)) fail('EFFECTIVE_POLICY_PARAMETERS_UNRESOLVED');
+    if (Object.hasOwn(schema, 'allowedValues')) {
+      // Assignment values are case-sensitive; array parameters select allowed elements.
+      const selected = type === 'array' ? value : [value];
+      if (!Array.isArray(schema.allowedValues) ||
+          !selected.every(item => schema.allowedValues.some(allowed => isDeepStrictEqual(allowed, item)))) {
+        fail('EFFECTIVE_POLICY_PARAMETERS_UNRESOLVED');
+      }
+    }
     resolved[key] = value;
   }
   return resolved;
@@ -106,8 +114,13 @@ function normalizedLocation(value) {
   if (typeof value !== 'string' || !/^[A-Za-z0-9]+(?: +[A-Za-z0-9]+)*$/u.test(value)) return unknown;
   return value.replaceAll(' ', '').toLowerCase();
 }
+const conditionNames = new Map(['allOf', 'anyOf', 'not', 'field', 'value', 'equals', 'notEquals', 'in', 'notIn']
+  .map(name => [name.toLowerCase(), name]));
 function condition(rule, params, resource, depth = 0) {
   if (depth > POLICY_LIMITS.depth || !object(rule)) return unknown;
+  const entries = Object.entries(rule).map(([key, value]) => [conditionNames.get(key.toLowerCase()) ?? key, value]);
+  if (new Set(entries.map(([key]) => key)).size !== entries.length) return unknown;
+  rule = Object.fromEntries(entries);
   const keys = Object.keys(rule);
   if (keys.length === 1 && ['allOf', 'anyOf'].includes(keys[0])) {
     const values = rule[keys[0]];
@@ -183,12 +196,17 @@ function evaluate(phase, snapshot) {
     const parsed = policyId(reference.policyDefinitionId, scopes);
     const selector = reference.definitionVersion;
     const effective = reference.effectiveDefinitionVersion;
-    if (selector !== undefined && !/^(?:\*\.\*\.\*|\d+\.\*\.\*|\d+\.\d+\.\*|\d+\.\d+\.\d+)$/u.test(selector)) fail('EFFECTIVE_POLICY_VERSION_INVALID');
-    const matches = version => !selector || selector.split('.').every((part, i) => part === '*' || part === version.split('.')[i]);
+    if (selector !== undefined && !/^(?:\*\.\*\.\*|\d+\.\*\.\*|\d+\.\d+\.\*|\d+\.\d+\.\d+)(?:-preview)?$/u.test(selector)) fail('EFFECTIVE_POLICY_VERSION_INVALID');
+    // Preview is a status annotation; existing assignments survive promotion to GA.
+    // Inspect every numeric match, rather than selecting an optimistic latest version.
+    const matches = version => !selector || selector.replace(/-preview$/u, '').split('.').every((part, i) =>
+        part === '*' || part === version.replace(/-preview$/u, '').split('.')[i]);
     const pin = parsed.version ?? effective ?? (versionPattern.test(selector ?? '') ? selector : null);
-    if (effective !== undefined && (!versionPattern.test(effective) || (parsed.version && parsed.version !== effective))) fail('EFFECTIVE_POLICY_VERSION_INVALID');
+    if ((parsed.version && !versionPattern.test(parsed.version)) ||
+        effective !== undefined && (!versionPattern.test(effective) || (parsed.version && parsed.version !== effective))) fail('EFFECTIVE_POLICY_VERSION_INVALID');
     if (pin && !matches(pin)) fail('EFFECTIVE_POLICY_VERSION_INVALID');
     let versions;
+    const listedDocuments = new Map();
     if (pin) versions = [pin];
     else {
       const catalog = get(`${parsed.base}/versions`);
@@ -196,15 +214,24 @@ function evaluate(phase, snapshot) {
       versions = list(catalog).map(value => {
         const version = value?.properties?.version ?? value?.name;
         if (!versionPattern.test(version ?? '') || !sameId(value.id, `${parsed.base}/versions/${version}`)) fail('EFFECTIVE_POLICY_VERSION_INVALID');
+        const content = parsed.kind.toLowerCase() === 'policydefinitions' ? 'policyRule' : 'policyDefinitions';
+        if (object(value.properties) && Object.hasOwn(value.properties, content)) listedDocuments.set(version, value);
         return version;
       }).filter(matches);
       if (!versions.length || new Set(versions).size !== versions.length) fail('EFFECTIVE_POLICY_VERSION_UNRESOLVED');
     }
     return versions.sort().flatMap(version => {
-      const id = `${parsed.base}/versions/${version}`, raw = get(id);
+      const id = `${parsed.base}/versions/${version}`, listed = listedDocuments.get(version);
+      const retainedGet = entries.has(requestKey({ id, apiVersion: POLICY_API, filter: null }));
+      const raw = retainedGet || listed === undefined ? get(id) : listed;
       if (raw === undefined) return [];
       const value = document(raw, id);
       if (value.properties.version !== version) fail('EFFECTIVE_POLICY_VERSION_INVALID');
+      if (retainedGet && listed !== undefined) {
+        for (const key of ['parameters', 'mode', 'policyRule', 'policyDefinitions']) {
+          if (!isDeepStrictEqual(value.properties[key], listed.properties[key])) fail('EFFECTIVE_POLICY_DEFINITION_DRIFT');
+        }
+      }
       return [{ value, kind: parsed.kind, resolution: pin ? 'exact-version' : 'all-matching-versions' }];
     });
   };
