@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdir, rm } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { digest, json } from '../definition.mjs';
+import path from 'node:path';
+import os from 'node:os';
+import { digest, json, storageContract } from '../definition.mjs';
 import { NSP_API, NSP_STORAGE_API, NSP_SETUP_PHASES, NSP_LIMITS, NSP_CHILD_TYPES, nspTopology, emptyNspEvidence, buildNspPhase,
   verifyNspObservation, verifyNspEvidence, verifyNspAdmission, verifyNspBilling, verifyNspPreview,
   verifyNspQueuePreflight, nspReadinessBinding, nspLineageHead, nspResourceInventory,
@@ -572,9 +574,47 @@ test('dedicated transport requires exact bound phase and guards after body prepa
   }
 });
 
-test('published ff99 source digest remains immutable after NSP modules are introduced', async () => {
-  assert.equal(await publishedSourceDigest('ff99c34904519df4a9617f103fbe2bde2866a8fb'),
-    'eb32237f356b9d05566a7aa779d07cf8c5ba122a3d2f6147a3a87676cb4cf2cb');
+test('historical source digest survives NSP additions without requiring checkout history', async t => {
+  const directory = path.resolve(`infrastructure/arm/telemetry/tests/.nsp-history-${randomUUID()}`);
+  await mkdir(directory, { mode: 0o700 });
+  t.after(() => rm(directory, { recursive: true }));
+  const execute = promisify(execFile);
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
+  Object.assign(env, { GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: os.devNull });
+  const git = (...args) => execute('git', ['-c', `core.hooksPath=${os.devNull}`, '-c', 'commit.gpgsign=false',
+    '-c', 'user.name=MissionSpec fixture', '-c', 'user.email=fixture@example.invalid', ...args],
+  { cwd: directory, env, timeout: 10000, maxBuffer: 1_048_576 });
+  const prefix = 'infrastructure/arm/telemetry/';
+  const names = ['definition.mjs', 'policy.mjs', 'controller.mjs', 'arm-whatif.py',
+    'receiver-upgrade.mjs', 'durable-queue.mjs', 'effective-policy.mjs'];
+  const contract = await storageContract();
+  const files = Object.fromEntries(names.map(name => [prefix + name, name === 'controller.mjs'
+    ? "import {} from './effective-policy.mjs';\n" : `// Synthetic historical ${name}\n`]));
+  files['assets/schemas/telemetry-event.schema.json'] = json(contract.schema);
+  files['services/telemetry-ingest/schema/storage-columns.json'] = json(contract.columns);
+  for (const [name, content] of Object.entries(files)) {
+    await mkdir(path.dirname(path.join(directory, name)), { recursive: true });
+    await writeFile(path.join(directory, name), content);
+  }
+  await git('init', '--quiet');
+  await git('add', '.');
+  await git('commit', '--quiet', '-m', 'Synthetic pre-NSP history');
+  const historicalCommit = (await git('rev-parse', 'HEAD')).stdout.trim();
+  const expected = createHash('sha256');
+  for (const name of names) expected.update(name).update(files[prefix + name]);
+  expected.update(json(contract));
+  for (const name of ['queue-adoption.mjs', 'nsp.mjs', 'nsp-controller.mjs', 'nsp-reconciliation.mjs']) {
+    await writeFile(path.join(directory, prefix + name), `// Synthetic new ${name}\n`);
+    files[prefix + 'controller.mjs'] += `import {} from './${name}';\n`;
+  }
+  await writeFile(path.join(directory, prefix + 'controller.mjs'), files[prefix + 'controller.mjs']);
+  await git('add', '.');
+  await git('commit', '--quiet', '-m', 'Synthetic NSP additions');
+  const run = (command, args, options) => {
+    assert.equal(command, 'git');
+    return execute(command, args, { ...options, cwd: directory, env, timeout: 10000 });
+  };
+  assert.equal(await publishedSourceDigest(historicalCommit, run), expected.digest('hex'));
   assert.match(await sourceDigest(), /^[0-9a-f]{64}$/u);
 });
 
