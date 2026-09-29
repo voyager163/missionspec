@@ -1,15 +1,17 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import fsPromises, { chmod, link, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import test from 'node:test';
 import {
-  createInstallFixture, createInstallWorkspace, executePackageCommand, installSmokeEnvironment, installSmokeGuard,
+  assertInstallHomeUnchanged, createInstallFixture, createInstallWorkspace, executePackageCommand, installSmokeEnvironment, installSmokeGuard,
   packageLinkProblems, packageManifestProblems, packageProblems, packageProcessFailure,
-  parsePackPreview, requiredPackageFiles, windowsShimInvocation,
+  parsePackPreview, requiredPackageFiles, snapshotInstallHome, windowsInterpreterBaseline, windowsShimInvocation,
 } from '../scripts/check-package.mjs';
 
 const name = '@msn-control/missionspec';
@@ -210,6 +212,111 @@ test('install fixture uses private owned checkout directories even with a permis
   assert.match(fixture.consumer, /consumer with spaces$/);
   assert.match(fixture.home, /home with spaces$/);
   await assert.rejects(readdir(fixture.temporary), { code: 'ENOENT' });
+});
+
+test('owned home snapshots compare exact names, types and bytes without exposing contents or accepting AppData writes', async (context) => {
+  const fixture = await createInstallWorkspace();
+  context.after(() => rm(fixture.temporary, { recursive: true, force: true }));
+  await assert.rejects(snapshotInstallHome({ ...fixture }), /checker-owned/);
+  assert.deepEqual(await snapshotInstallHome(fixture), []);
+  await mkdir(path.join(fixture.home, 'AppData'), { mode: 0o700 });
+  const filename = path.join(fixture.home, 'AppData', 'cache.fixture');
+  const content = 'private-fixture-content';
+  await writeFile(filename, content);
+  const baseline = await snapshotInstallHome(fixture);
+  assert.deepEqual(baseline, [
+    { path: 'AppData', type: 'directory' },
+    { path: 'AppData/cache.fixture', type: 'file', bytes: Buffer.byteLength(content),
+      digest: `sha256:${createHash('sha256').update(content).digest('hex')}` },
+  ]);
+  await assertInstallHomeUnchanged(fixture, baseline, 'powershell');
+  await writeFile(filename, 'changed-fixture-content');
+  await assert.rejects(assertInstallHomeUnchanged(fixture, baseline, 'powershell'), (error) => {
+    assert.match(error.message, /"phase":"powershell"/);
+    assert.match(error.message, /AppData\/cache\.fixture/);
+    assert(!error.message.includes('private-fixture-content'));
+    assert(!error.message.includes('changed-fixture-content'));
+    assert(!error.message.includes(fixture.home));
+    return true;
+  });
+  await writeFile(filename, content);
+  await mkdir(path.join(fixture.home, 'AppData', 'missionspec'));
+  await assert.rejects(assertInstallHomeUnchanged(fixture, baseline, 'api'), /AppData\/missionspec/);
+  await rm(path.join(fixture.home, 'AppData', 'missionspec'), { recursive: true });
+  await rm(filename);
+  await assert.rejects(assertInstallHomeUnchanged(fixture, baseline, 'final'), /Read-only smoke changed/);
+});
+
+test('home inventory rejects links, oversized files and unbounded entry counts inside the owned fixture', async (context) => {
+  const fixture = await createInstallWorkspace();
+  context.after(() => rm(fixture.temporary, { recursive: true, force: true }));
+  const sentinel = path.join(fixture.consumer, 'not-home.fixture');
+  await writeFile(sentinel, 'must-not-be-hashed-through-a-link');
+  const linked = path.join(fixture.home, 'linked');
+  await symlink(fixture.consumer, linked, 'junction');
+  await assert.rejects(snapshotInstallHome(fixture), /non-regular entry/);
+  await rm(linked);
+  await link(sentinel, linked);
+  await assert.rejects(snapshotInstallHome(fixture), /linked, non-regular or oversized/);
+  await rm(linked);
+  await writeFile(linked, Buffer.alloc(1_000_001));
+  await assert.rejects(snapshotInstallHome(fixture), /oversized/);
+  await rm(linked);
+  for (let index = 0; index < 65; index += 1) await writeFile(path.join(fixture.home, `file-${index}`), '');
+  await assert.rejects(snapshotInstallHome(fixture), /diagnostic bounds/);
+});
+
+test('guard completion does not exempt a successful child that writes product home state', async (context) => {
+  const fixture = await createInstallWorkspace();
+  context.after(() => rm(fixture.temporary, { recursive: true, force: true }));
+  const receipt = path.join(fixture.temporary, 'guard-receipt');
+  const guard = path.join(fixture.consumer, 'guard.mjs');
+  await writeFile(guard, `await (${installSmokeGuard.toString()})(${JSON.stringify(receipt)});\n`);
+  await executePackageCommand(process.execPath, ['--input-type=module', '--eval',
+    `await (await import('node:fs/promises')).writeFile(${JSON.stringify(path.join(fixture.home, 'product-write.fixture'))}, 'fixture');`],
+  { cwd: fixture.consumer, env: installSmokeEnvironment(fixture.home, guard), timeout: 5_000 });
+  assert.equal(await readFile(receipt, 'utf8'), '0');
+  await assert.rejects(assertInstallHomeUnchanged(fixture, [], 'api'), /product-write\.fixture/);
+});
+
+test('owned home inventory rejects a replaced filename before hashing any bytes', async (context) => {
+  const fixture = await createInstallWorkspace();
+  context.after(() => rm(fixture.temporary, { recursive: true, force: true }));
+  const filename = path.join(fixture.home, 'observed.fixture');
+  await writeFile(filename, 'original');
+  const originalOpen = fsPromises.open;
+  let reads = 0;
+  const mocked = context.mock.method(fsPromises, 'open', async (...args) => {
+    const handle = await originalOpen(...args);
+    if (args[0] === filename) {
+      const read = handle.read.bind(handle);
+      handle.read = (...input) => { reads += 1; return read(...input); };
+      await rename(filename, path.join(fixture.consumer, 'retained-original.fixture'));
+      await writeFile(filename, 'replacement');
+    }
+    return handle;
+  });
+  syncBuiltinESMExports();
+  context.after(() => { mocked.mock.restore(); syncBuiltinESMExports(); });
+  await assert.rejects(snapshotInstallHome(fixture), /changed before reading/);
+  assert.equal(reads, 0);
+});
+
+test('actual fixed Windows interpreter baseline is independently observed and must remain stable before product launch', {
+  skip: process.platform !== 'win32' ? 'Requires actual fixed Windows PowerShell; not qualified by POSIX fixtures' : false,
+}, async (context) => {
+  const fixture = await createInstallWorkspace();
+  context.after(() => rm(fixture.temporary, { recursive: true, force: true }));
+  const guard = path.join(fixture.consumer, 'guard.mjs');
+  const receipt = path.join(fixture.temporary, 'guard-receipt');
+  await writeFile(guard, `await (${installSmokeGuard.toString()})(${JSON.stringify(receipt)});\n`);
+  assert.deepEqual(await snapshotInstallHome(fixture), []);
+  const baseline = await windowsInterpreterBaseline(fixture, installSmokeEnvironment(fixture.home, guard));
+  context.diagnostic(`Independent Windows interpreter home baseline: ${JSON.stringify(baseline)}`);
+  await assert.rejects(readFile(receipt), { code: 'ENOENT' });
+  await assertInstallHomeUnchanged(fixture, baseline, 'final');
+  await writeFile(path.join(fixture.home, 'product-write.fixture'), 'fixture');
+  await assert.rejects(assertInstallHomeUnchanged(fixture, baseline, 'powershell'), /product-write\.fixture/);
 });
 
 test('read-only preferences reject a public ancestor even with a 0700 home, and accept the private install fixture', {

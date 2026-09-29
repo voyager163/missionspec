@@ -67,8 +67,9 @@ Within this disposable directory it:
    1 and 2, rather than becoming successful shell exits.
 5. Loads the installed `fs-native-extensions` prebuild on the actual machine and
    exercises descriptor lock/unlock on a disposable file on POSIX. It verifies
-   that the read-only commands leave no user or project state, then removes only
-   its own temporary directory, including the archive and consumer.
+   that read-only commands leave the independently established fixture-home
+   baseline unchanged and create no project state, then removes only its own
+   temporary directory, including the archive and consumer.
 
 The CLI smoke deliberately does not rely on `--no-telemetry`, inherited CI/test
 mode or telemetry opt-out environment variables: the normal read-only commands
@@ -120,6 +121,31 @@ shim directly. It retains the machine's execution policy: **no
 A host shell's process-scoped `PSExecutionPolicyPreference` is not inherited.
 A policy refusal is an explicit qualification failure, not a reason to
 silently fall back to the Node entry point.
+
+Before importing the installed API or running either Windows shim, the checker
+starts the fixed Windows PowerShell executable against a small owned script
+that only exercises `Split-Path` and `Test-Path`, the OS cmdlets used by the npm
+shim. This independent baseline starts with an empty disposable home and does
+not load Node, MissionSpec, profiles or model hosts. A second invocation must
+leave the **same exact home inventory**. A changing or unreadable interpreter
+baseline fails; there is no retry-until-stable or wildcard allowance.
+
+After that, every installed API/CLI process must complete its Node preload
+receipt and leave the same relative paths, entry types, file sizes and SHA-256
+digests in that home. This detects added, removed and modified state, including
+writes under interpreter-created directories. It does not simply permit
+`AppData` or known-looking cache names. POSIX retains an empty baseline.
+Successful Windows output includes `interpreterHomeBaseline` so the observed
+OS startup effects remain separate from product read-only evidence.
+
+Home inventory diagnostics are restricted to fixtures created by this checker:
+at most 64 entries, 8 directory levels, 256 characters per relative path and
+1,000,000 total file bytes for hashing. Symlinks, hard-linked files, other
+nonregular entries, unstable reads and exceeded limits fail. Files are read
+through held descriptors; diagnostics include names/types/sizes/digests, never
+file contents, link targets or real-user home data. An unchanged baseline is a
+bounded before/after observation, not proof against transient writes or a
+hostile process and not a filesystem sandbox.
 
 Native-addon load is asserted on each actual runner. POSIX additionally
 exercises the descriptor-associated mutex. Windows reports that POSIX mutex
@@ -201,13 +227,33 @@ actual Windows pass. The original failures are retained, not reclassified as
 successful qualification. No timeout increase, execution-policy bypass, skip,
 Node-entry fallback or production privacy change is made.
 
-**Corrected hosted Linux/Windows results remain pending.** Record each
+### Remaining Windows home-state attribution
+
+The parent published fixture corrections with the separate descriptor-first
+report-input fix as `4e06ac952657f7849d4b13d52db5958124446a57`. It reported actual
+Linux and macOS installed-smoke passes and a native CodeQL pass. The retained
+Windows job `109409264632` progressed through all actual `.cmd` and `.ps1`
+invocations and their receipt/output/exit checks, then failed the final
+empty-home assertion with **`AppData`**. That is still a failed qualification,
+not a passing Windows installation.
+
+The log does not contain `AppData`'s descendants, hashes or creator. It is
+therefore insufficient to call that directory a PowerShell analysis cache or
+to excuse its contents. The new product-free interpreter baseline and native
+regression above establish whether the fixed OS interpreter creates that state
+on the actual runner. Only independently observed, repeatably unchanged entries
+can precede the product smoke. Any further state from a shim or product command
+fails at that command's `api`, `cmd` or `powershell` phase with bounded baseline
+and actual inventories. No cache deletion, execution-policy change, preload
+relaxation, deadline extension or Node-entry fallback is used.
+
+**The corrected Windows attribution/regression run remains pending.** Local
+snapshot and injected-write tests are not native Windows evidence. Record the
 successful rerun's exact candidate, runner platform/architecture, archive
-integrity and `cliSurfaces` output before qualifying that platform. A local
-macOS regression pass is not a Windows execution result, and an earlier macOS
-pass does not automatically qualify a changed candidate. Other architectures
-remain untested. Existing hosted source-checkout qualification is separate
-evidence.
+integrity, `cliSurfaces` and `interpreterHomeBaseline` output before qualifying
+it. Earlier Linux/macOS passes do not automatically qualify a changed candidate.
+Other architectures remain untested. Existing hosted source-checkout
+qualification is separate evidence.
 
 ## Remaining maintainer gates
 

@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { lstat, mkdir, mkdtemp, open, opendir, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isDeepStrictEqual, promisify } from 'node:util';
@@ -13,6 +14,7 @@ const packageName = '@msn-control/missionspec';
 const root = fileURLToPath(new URL('../', import.meta.url));
 const execute = promisify(execFile);
 const installHooks = ['preinstall', 'install', 'postinstall'];
+const installWorkspaces = new WeakSet();
 const windowsInterpreters = {
   cmd: 'C:\\Windows\\System32\\cmd.exe',
   powershell: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
@@ -225,7 +227,9 @@ export async function createInstallWorkspace() {
   const home = path.join(temporary, 'home with spaces');
   try {
     await Promise.all([mkdir(consumer, { mode: 0o700 }), mkdir(home, { mode: 0o700 })]);
-    return { temporary, consumer, home };
+    const fixture = Object.freeze({ temporary, consumer, home });
+    installWorkspaces.add(fixture);
+    return fixture;
   } catch (error) {
     await rm(temporary, { recursive: true, force: true });
     throw error;
@@ -269,6 +273,77 @@ export function packageProcessFailure(error) {
   };
 }
 
+export async function snapshotInstallHome(fixture) {
+  assert(installWorkspaces.has(fixture), 'Home snapshots require a checker-owned install fixture');
+  const entries = [];
+  let totalBytes = 0;
+  const maximumBytes = 1_000_000;
+  async function visit(directory, prefix = '', depth = 0) {
+    const named = await lstat(directory);
+    assert(named.isDirectory() && !named.isSymbolicLink() && await realpath(directory) === directory,
+      'Owned home inventory encountered a noncanonical directory');
+    for await (const entry of await opendir(directory)) {
+      const relative = `${prefix}${entry.name}`;
+      assert(entries.length < 64 && relative.length <= 256 && depth < 8, 'Owned home inventory exceeds diagnostic bounds');
+      if (entry.isDirectory()) {
+        entries.push({ path: relative, type: 'directory' });
+        await visit(path.join(directory, entry.name), `${relative}/`, depth + 1);
+      } else {
+        const filename = path.join(directory, entry.name);
+        let handle;
+        try {
+          handle = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+        } catch (error) {
+          if (error.code === 'ELOOP' || !entry.isFile()) throw new Error('Owned home inventory refuses non-regular entry');
+          throw error;
+        }
+        try {
+          const before = await handle.stat({ bigint: true });
+          const namedFile = await lstat(filename, { bigint: true });
+          assert(namedFile.isFile() && !namedFile.isSymbolicLink() && entry.isFile(),
+            'Owned home inventory refuses non-regular entry');
+          assert(before.isFile() && before.nlink === 1n && before.size <= BigInt(maximumBytes),
+            'Owned home inventory refuses a linked, non-regular or oversized file');
+          assert(namedFile.dev === before.dev && namedFile.ino === before.ino,
+            'Owned home inventory changed before reading');
+          const hash = createHash('sha256');
+          const buffer = Buffer.alloc(64 * 1024);
+          let bytes = 0;
+          while (true) {
+            const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+            if (bytesRead === 0) break;
+            bytes += bytesRead;
+            totalBytes += bytesRead;
+            assert(totalBytes <= maximumBytes, 'Owned home inventory exceeds diagnostic byte bounds');
+            hash.update(buffer.subarray(0, bytesRead));
+          }
+          const after = await handle.stat({ bigint: true });
+          const current = await lstat(filename, { bigint: true });
+          assert(current.isFile() && !current.isSymbolicLink() && current.dev === before.dev && current.ino === before.ino &&
+            after.nlink === 1n && current.nlink === 1n && before.size === BigInt(bytes) && before.size === after.size &&
+            before.mtimeNs === after.mtimeNs && before.ctimeNs === after.ctimeNs &&
+            current.size === after.size && current.mtimeNs === after.mtimeNs && current.ctimeNs === after.ctimeNs,
+          'Owned home inventory changed while reading');
+          entries.push({ path: relative, type: 'file', bytes, digest: `sha256:${hash.digest('hex')}` });
+        } finally {
+          await handle.close();
+        }
+      }
+    }
+  }
+  await visit(fixture.home);
+  return entries.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+}
+
+export async function assertInstallHomeUnchanged(fixture, baseline, phase) {
+  assert(['powershell-baseline-repeat', 'api', 'posix', 'cmd', 'powershell', 'final'].includes(phase),
+    'Unknown home observation phase');
+  const actual = await snapshotInstallHome(fixture);
+  if (!isDeepStrictEqual(actual, baseline)) {
+    throw new Error(`Read-only smoke changed owned home: ${JSON.stringify({ phase, baseline, actual })}`);
+  }
+}
+
 async function checkWindowsInterpreters() {
   for (const filename of Object.values(windowsInterpreters)) {
     let current = path.parse(filename).root;
@@ -279,6 +354,40 @@ async function checkWindowsInterpreters() {
         (await realpath(current)).toLowerCase() === current.toLowerCase(),
       'Windows shim smoke requires canonical fixed system executables');
     }
+  }
+}
+
+export async function windowsInterpreterBaseline(fixture, env) {
+  assert.equal(process.platform, 'win32', 'The interpreter baseline requires actual Windows');
+  assert.equal(env.SystemRoot?.toLowerCase(), 'c:\\windows', 'The interpreter baseline requires the fixed Windows host');
+  assert.deepEqual(await snapshotInstallHome(fixture), [], 'The independent interpreter baseline requires an empty home');
+  await checkWindowsInterpreters();
+  const script = path.join(fixture.temporary, 'interpreter baseline.ps1');
+  // Exercise the shim's OS cmdlets without loading Node, MissionSpec, profiles or user code.
+  await writeFile(script, "$ErrorActionPreference = 'Stop'\n" +
+    '$parent = Split-Path -Path $MyInvocation.MyCommand.Definition -Parent\n' +
+    "if (-not (Test-Path -LiteralPath $parent -PathType Container)) { exit 3 }\nexit 0\n",
+  { flag: 'wx', mode: 0o600 });
+  try {
+    const invoke = async () => {
+      try {
+        const output = await executePackageCommand(windowsInterpreters.powershell,
+          ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', script], {
+            cwd: fixture.consumer, env, timeout: 30_000, maxBuffer: 64 * 1024, shell: false, windowsHide: true,
+          });
+        assert(output.stdout.length === 0 && output.stderr.length === 0, 'The independent interpreter baseline emitted unexpected output');
+      } catch (error) {
+        if (error.packageExecution) throw new Error(`Interpreter baseline failed: ${JSON.stringify(packageProcessFailure(error))}`);
+        throw error;
+      }
+    };
+    await invoke();
+    const baseline = await snapshotInstallHome(fixture);
+    await invoke();
+    await assertInstallHomeUnchanged(fixture, baseline, 'powershell-baseline-repeat');
+    return baseline;
+  } finally {
+    await rm(script);
   }
 }
 
@@ -332,7 +441,8 @@ async function installedFiles(directory, prefix = '') {
 }
 
 export async function checkInstalledPackage(npmPath) {
-  const { temporary, consumer, home } = await createInstallWorkspace();
+  const workspace = await createInstallWorkspace();
+  const { temporary, consumer, home } = workspace;
   try {
     const npm = (args, cwd) => executePackageCommand(process.execPath, [npmPath, ...args], {
       cwd, maxBuffer: 4 * 1024 * 1024, timeout: 120_000,
@@ -393,7 +503,9 @@ export async function checkInstalledPackage(npmPath) {
     ]);
     const options = { cwd: consumer, env: installSmokeEnvironment(home, guard), timeout: 30_000,
       maxBuffer: 4 * 1024 * 1024, shell: false, windowsHide: true };
-    const run = async ({ command, args, options: launchOptions = {} }, expectedCode = 0) => {
+    const homeBaseline = process.platform === 'win32' ? await windowsInterpreterBaseline(workspace, options.env) : [];
+    await assertInstallHomeUnchanged(workspace, homeBaseline, 'api');
+    const run = async ({ command, args, options: launchOptions = {} }, expectedCode = 0, phase = 'api') => {
       let output;
       let code = 0;
       try {
@@ -409,13 +521,13 @@ export async function checkInstalledPackage(npmPath) {
         `Installed smoke process failed: ${JSON.stringify(packageProcessFailure({ ...output, code }))}`);
       assert.equal(await readFile(receipt, 'utf8'), '0', 'Installed process did not complete with its inert smoke guard');
       await rm(receipt);
+      await assertInstallHomeUnchanged(workspace, homeBaseline, phase);
       return JSON.parse(output.stdout);
     };
     const { drafts, ...api } = await run({ command: process.execPath, args: [smoke] });
     const bin = path.join(consumer, 'node_modules/.bin/missionspec');
     const surfaces = process.platform === 'win32' ? ['cmd', 'powershell'] : ['posix'];
     if (process.platform === 'win32') {
-      await checkWindowsInterpreters();
       for (const extension of ['cmd', 'ps1']) {
         const shim = await lstat(`${bin}.${extension}`);
         assert(shim.isFile() && !shim.isSymbolicLink(), `Missing regular npm ${extension} shim`);
@@ -426,7 +538,7 @@ export async function checkInstalledPackage(npmPath) {
     }
     for (const surface of surfaces) {
       const invoke = (args, code = 0) => run(surface === 'posix' ? { command: bin, args: [...args, '--json'] } :
-        windowsShimInvocation(surface, bin, [...args, '--json']), code);
+        windowsShimInvocation(surface, bin, [...args, '--json']), code, surface);
       const cli = async (args) => {
         const result = await invoke(args);
         assert.equal(result.status, 'ok');
@@ -457,13 +569,14 @@ export async function checkInstalledPackage(npmPath) {
       assert.equal(blocked.status, 'blocked');
       assert.equal(blocked.error.code, 'host-unqualified');
     }
-    assert.deepEqual(await readdir(home), [], 'Read-only smoke created user state');
+    await assertInstallHomeUnchanged(workspace, homeBaseline, 'final');
     const expected = ['guard.mjs', 'node_modules', 'package-lock.json', 'package.json', 'smoke.mjs', proposal,
       ...(process.platform === 'win32' ? [] : ['native-lock.fixture'])].sort();
     assert.deepEqual((await readdir(consumer)).sort(), expected, 'Read-only smoke created project state');
     return { ...api, runtimeDependencies: fixture.locations.length, archiveFiles: preview.files.length,
       integrity: preview.integrity, bin: process.platform === 'win32' ? 'npm .cmd and PowerShell .ps1 shims' : 'npm executable link',
-      cliSurfaces: surfaces };
+      cliSurfaces: surfaces, interpreterHomeBaseline: process.platform === 'win32' ?
+        { kind: 'fixed-windows-powershell-no-product', entries: homeBaseline } : null };
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
