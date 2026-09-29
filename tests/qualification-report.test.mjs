@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import fsPromises, { mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -313,6 +314,26 @@ test('explicit input failures are sanitized, and directories, links, invalid UTF
     assert(!stderr.includes('private-fixture-marker'));
     assert(!stderr.includes(directory));
   }
+});
+
+test('a pathname replaced during open is rejected before reading the held descriptor', async (context) => {
+  const { file } = await fixture(context, JSON.stringify(syntheticInput()));
+  const originalOpen = fsPromises.open;
+  let reads = 0;
+  const mocked = context.mock.method(fsPromises, 'open', async (...args) => {
+    const handle = await originalOpen(...args);
+    if (args[0] === file) {
+      const read = handle.read.bind(handle);
+      handle.read = (...input) => { reads += 1; return read(...input); };
+      await rename(file, `${file}.original`);
+      await writeFile(file, JSON.stringify(syntheticInput()));
+    }
+    return handle;
+  });
+  syncBuiltinESMExports();
+  context.after(() => { mocked.mock.restore(); syncBuiltinESMExports(); });
+  await assert.rejects(readQualificationReport(file), /input-changed/);
+  assert.equal(reads, 0);
 });
 
 test('helper imports only inert Node file/format primitives and has no runner, network or session discovery surface', async () => {

@@ -37,7 +37,13 @@ offline qualification. The install checker itself never retries online, runs
 an unmet prerequisite, not a successful install or evidence of a package defect.
 
 The explicit `--install` mode reuses `scripts/check-package.mjs` and the
-license checker's runtime dependency graph. In an owned temporary directory it:
+license checker's runtime dependency graph. Its owned `.package-install-*`
+temporary directory is created beneath the checkout, outside the declared
+package surfaces, with explicitly private `0700` consumer/home directories on
+POSIX. A general Linux `/tmp` parent is unsuitable: the unchanged preference
+reader refuses world-writable ancestors even when the temporary leaf is private.
+The checker neither changes ancestor permissions nor relaxes that policy.
+Within this disposable directory it:
 
 1. Runs `npm pack --offline --ignore-scripts --json --pack-destination <temporary>`,
    checks the real archive inventory and SHA-512 integrity, and prepares a
@@ -73,6 +79,11 @@ starts and optional model-SDK imports, even if application code catches the
 failure. Every process must leave a guard-completion receipt, including expected
 nonzero exits, so a shim cannot silently drop the preload. Only the harness
 launches the OS shim interpreter and Node; the CLI itself cannot spawn a host.
+The harness explicitly ends each noninteractive child's stdin. A PowerShell
+shim forwarding redirected `$input` must receive EOF rather than wait for
+interactive input. Smoke deadlines remain 30 seconds (pack/install: 120 seconds).
+Process failures report bounded exit/signal/killed/timeout metadata and output
+byte counts, not commands, environment values or captured child output.
 This is a regression check for the exercised paths, **not an OS network
 sandbox, native-host qualification or proof about every possible API call**.
 It does not install skills into a real host, launch a coding host, obtain
@@ -170,14 +181,33 @@ API/CLI render comparisons, argument preservation, guard receipts and exit codes
 `ff86bc3c90dcacf5d897afc5aa70345a9d6ba0b2`; the isolated worktree's product code
 remained based on `b5772fb415cface3b5e7b1b786a30832b28d8e43`.
 
-**Hosted results for this extended checker are pending.** This workstream has
-not run the installed-tarball smoke on Linux, Windows, macOS x64 or other
-architectures. Windows shim construction tests on macOS and the new workflow
-steps are implementation evidence, not actual Windows execution evidence.
-Publish the reviewed candidate through the separately authorized parent
-workflow and record its runner platform/architecture, candidate revision,
-archive integrity and `cliSurfaces` output before claiming those platforms.
-Existing hosted source-checkout qualification remains separate evidence.
+### Initial hosted failures and fixture correction
+
+The parent published candidate
+`ee973e1ec09d9ec22afa2149a8bdf1ae3bc4684c`; the supplied hosted logs identify tested
+merge revision `ce4eda893e85d82774f1be30ef24c3a33477eff4`. The parent reported the
+full macOS job and actual installed smoke passing. Original Linux and Windows
+source/portable checks passed, but their added installed smoke **failed**:
+
+| Job | Retained failure | Follow-up boundary |
+| --- | --- | --- |
+| Linux `109266015335` | `telemetry status` returned `capability-unavailable` / `preference-read-failed` beneath `/tmp`. | The reader rejects `/tmp`'s writable ancestor mode before reaching the private leaf. A local regression reproduces this with an owned `1777` ancestor and a `0700` home. Move only the fixture beneath the checkout and create private directories; do not weaken the production checks or add telemetry opt-outs. |
+| Windows read-only `109266015143` | The actual npm PowerShell shim's first `--version --json` invocation failed with no captured diagnostics. The old runner did not record whether the child was killed or timed out. | Node `execFile` leaves piped stdin open; the inspected npm PowerShell shim generator supports forwarding `$input`. An EOF-waiting child reproduces the hang locally and completes when stdin is ended. Close the pipe and retain the original deadline; native Windows confirmation still requires a hosted rerun. |
+
+The inspected local npm version was `12.0.2` (`cmd-shim` `9.0.2`); supplied
+hosted logs report npm `11.19.0`. Local shim source inspection and the portable
+EOF regression do not authenticate the exact hosted shim bytes or establish an
+actual Windows pass. The original failures are retained, not reclassified as
+successful qualification. No timeout increase, execution-policy bypass, skip,
+Node-entry fallback or production privacy change is made.
+
+**Corrected hosted Linux/Windows results remain pending.** Record each
+successful rerun's exact candidate, runner platform/architecture, archive
+integrity and `cliSurfaces` output before qualifying that platform. A local
+macOS regression pass is not a Windows execution result, and an earlier macOS
+pass does not automatically qualify a changed candidate. Other architectures
+remain untested. Existing hosted source-checkout qualification is separate
+evidence.
 
 ## Remaining maintainer gates
 

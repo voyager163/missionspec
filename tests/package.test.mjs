@@ -1,13 +1,15 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import test from 'node:test';
 import {
-  createInstallFixture, installSmokeEnvironment, installSmokeGuard, packageLinkProblems, packageManifestProblems,
-  packageProblems, parsePackPreview, requiredPackageFiles, windowsShimInvocation,
+  createInstallFixture, createInstallWorkspace, executePackageCommand, installSmokeEnvironment, installSmokeGuard,
+  packageLinkProblems, packageManifestProblems, packageProblems, packageProcessFailure,
+  parsePackPreview, requiredPackageFiles, windowsShimInvocation,
 } from '../scripts/check-package.mjs';
 
 const name = '@msn-control/missionspec';
@@ -178,6 +180,105 @@ test('installed smoke replaces case-insensitive PATH/preloads and does not hide 
     assert(!Object.hasOwn(env, key));
   }
   assert(!Object.values(env).some((value) => value.includes('untrusted')));
+});
+
+test('install fixture uses private owned checkout directories even with a permissive child umask', async () => {
+  const checker = new URL('../scripts/check-package.mjs', import.meta.url).href;
+  const source = `
+    import assert from 'node:assert/strict';
+    import { stat, rm } from 'node:fs/promises';
+    import path from 'node:path';
+    import { createInstallWorkspace } from ${JSON.stringify(checker)};
+    if (process.platform !== 'win32') process.umask(0);
+    const fixture = await createInstallWorkspace();
+    try {
+      assert.equal(path.dirname(fixture.consumer), fixture.temporary);
+      assert.equal(path.dirname(fixture.home), fixture.temporary);
+      for (const directory of Object.values(fixture)) {
+        const info = await stat(directory);
+        assert(info.isDirectory());
+        if (process.platform !== 'win32') assert.equal(info.mode & 0o777, 0o700);
+      }
+      process.stdout.write(JSON.stringify(fixture));
+    } finally { await rm(fixture.temporary, { recursive: true, force: true }); }
+  `;
+  const { stdout } = await executePackageCommand(process.execPath, ['--input-type=module', '--eval', source], { timeout: 10_000 });
+  const fixture = JSON.parse(stdout);
+  const root = await realpath(fileURLToPath(new URL('../', import.meta.url)));
+  assert.equal(path.dirname(fixture.temporary), root);
+  assert.match(path.basename(fixture.temporary), /^\.package-install-/);
+  assert.match(fixture.consumer, /consumer with spaces$/);
+  assert.match(fixture.home, /home with spaces$/);
+  await assert.rejects(readdir(fixture.temporary), { code: 'ENOENT' });
+});
+
+test('read-only preferences reject a public ancestor even with a 0700 home, and accept the private install fixture', {
+  skip: process.platform === 'win32' ? 'POSIX mode/ancestor regression; Windows keeps its native ACL gate' : false,
+}, async (context) => {
+  const fixture = await createInstallWorkspace();
+  context.after(() => rm(fixture.temporary, { recursive: true, force: true }));
+  const publicAncestor = path.join(fixture.temporary, 'public ancestor');
+  const privateHome = path.join(publicAncestor, 'private home');
+  await mkdir(publicAncestor, { mode: 0o700 });
+  await mkdir(privateHome, { mode: 0o700 });
+  await chmod(publicAncestor, 0o1777);
+  const guard = path.join(fixture.consumer, 'guard.mjs');
+  await writeFile(guard, `await (${installSmokeGuard.toString()})();\n`);
+  const entry = fileURLToPath(new URL('../dist/cli/main.js', import.meta.url));
+  const call = (home) => executePackageCommand(process.execPath, [entry, 'telemetry', 'status', '--json'], {
+    cwd: fixture.consumer, env: installSmokeEnvironment(home, guard), timeout: 10_000,
+  });
+  await assert.rejects(call(privateHome), (error) =>
+    error.code === 2 && JSON.parse(error.stdout).value.reason === 'preference-read-failed');
+  const output = JSON.parse((await call(fixture.home)).stdout);
+  assert.equal(output.status, 'ok');
+  assert.equal(output.value.configured, false);
+  assert.equal(output.value.preference, 'default');
+  assert.deepEqual(await readdir(fixture.home), []);
+  assert.deepEqual(await readdir(privateHome), []);
+});
+
+test('bounded package commands close redirected stdin instead of waiting indefinitely for input', async () => {
+  const { stdout } = await executePackageCommand(process.execPath, ['--input-type=module', '--eval', `
+    let bytes = 0;
+    for await (const chunk of process.stdin) bytes += chunk.length;
+    process.stdout.write(JSON.stringify({ eof: true, bytes }));
+  `], { timeout: 5_000 });
+  assert.deepEqual(JSON.parse(stdout), { eof: true, bytes: 0 });
+  await assert.rejects(executePackageCommand(process.execPath, ['--eval', 'process.exitCode = 2;'], { timeout: 5_000 }),
+    (error) => error.code === 2 && !error.packageExecution.timedOut);
+});
+
+test('package process diagnostics distinguish deadline, output limit, launch, exit and signal without child output', async () => {
+  await assert.rejects(executePackageCommand(process.execPath, ['--eval', 'setInterval(() => {}, 1000);'], { timeout: 100 }),
+    (error) => {
+      const details = packageProcessFailure(error);
+      assert.equal(details.kind, 'timeout');
+      assert.equal(details.timedOut, true);
+      assert.equal(details.timeoutMs, 100);
+      assert.equal(details.killed, true);
+      return true;
+    });
+  await assert.rejects(executePackageCommand(`${process.execPath}.missing`, [], { timeout: 5_000 }),
+    (error) => packageProcessFailure(error).kind === 'launch-or-io' && packageProcessFailure(error).code === 'ENOENT');
+  await assert.rejects(executePackageCommand(process.execPath, ['--eval', 'process.stdout.write("x".repeat(10000));'],
+    { timeout: 5_000, maxBuffer: 64 }), (error) => packageProcessFailure(error).kind === 'output-limit' &&
+      !packageProcessFailure(error).timedOut);
+  for (const [error, kind] of [
+    [{ code: 2 }, 'exit'],
+    [{ signal: 'SIGTERM', killed: true }, 'signal'],
+    [{ code: 'secret-fixture-marker', signal: 'secret-fixture-marker' }, 'signal'],
+  ]) {
+    const details = packageProcessFailure({ ...error, stdout: 'secret-fixture-marker', stderr: 'secret-fixture-marker',
+      message: 'secret-fixture-marker', cmd: 'secret-fixture-marker', env: { TOKEN: 'secret-fixture-marker' } });
+    assert.equal(details.kind, kind);
+    assert.equal(details.stdoutBytes, 21);
+    assert.equal(details.stderrBytes, 21);
+    assert(!JSON.stringify(details).includes('secret-fixture-marker'));
+  }
+  for (const timeout of [0, -1, Infinity, 120_001]) {
+    await assert.rejects(executePackageCommand(process.execPath, [], { timeout }), /bounded package command deadline/);
+  }
 });
 
 test('smoke guard writes completion evidence even for expected nonzero CLI exits', async (context) => {

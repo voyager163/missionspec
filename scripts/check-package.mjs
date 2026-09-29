@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isDeepStrictEqual, promisify } from 'node:util';
@@ -219,6 +218,57 @@ export function installSmokeEnvironment(home, guard, inherited = process.env) {
   };
 }
 
+export async function createInstallWorkspace() {
+  // Linux /tmp is world-writable, which the unchanged preference ancestor policy rejects.
+  const temporary = await realpath(await mkdtemp(path.join(root, '.package-install-')));
+  const consumer = path.join(temporary, 'consumer with spaces');
+  const home = path.join(temporary, 'home with spaces');
+  try {
+    await Promise.all([mkdir(consumer, { mode: 0o700 }), mkdir(home, { mode: 0o700 })]);
+    return { temporary, consumer, home };
+  } catch (error) {
+    await rm(temporary, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+export async function executePackageCommand(command, args, { timeout, ...options }) {
+  assert(Number.isSafeInteger(timeout) && timeout > 0 && timeout <= 120_000, 'A bounded package command deadline is required');
+  const execution = execute(command, args, { ...options, timeout: 0 });
+  let timedOut = false;
+  const deadline = setTimeout(() => {
+    timedOut = true;
+    execution.child.kill();
+  }, timeout);
+  // npm PowerShell shims can enumerate redirected $input; noninteractive commands need EOF.
+  execution.child.stdin?.end();
+  try {
+    return await execution;
+  } catch (error) {
+    error.packageExecution = { timedOut, timeoutMs: timeout };
+    throw error;
+  } finally {
+    clearTimeout(deadline);
+  }
+}
+
+export function packageProcessFailure(error) {
+  const timeoutMs = error.packageExecution?.timeoutMs;
+  const timedOut = error.packageExecution?.timedOut === true;
+  const signal = ['SIGTERM', 'SIGKILL', 'SIGINT'].includes(error.signal) ? error.signal : error.signal ? 'other' : null;
+  const code = Number.isInteger(error.code) || [
+    'ENOENT', 'EACCES', 'EPERM', 'ENOBUFS', 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER', 'ABORT_ERR',
+  ].includes(error.code) ? error.code : null;
+  return {
+    kind: timedOut ? 'timeout' : error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' ? 'output-limit' :
+      signal ? 'signal' : Number.isInteger(code) ? 'exit' : 'launch-or-io',
+    code, signal, killed: error.killed === true, timedOut,
+    timeoutMs: Number.isSafeInteger(timeoutMs) && timeoutMs > 0 && timeoutMs <= 120_000 ? timeoutMs : null,
+    stdoutBytes: typeof error.stdout === 'string' ? Buffer.byteLength(error.stdout) : 0,
+    stderrBytes: typeof error.stderr === 'string' ? Buffer.byteLength(error.stderr) : 0,
+  };
+}
+
 async function checkWindowsInterpreters() {
   for (const filename of Object.values(windowsInterpreters)) {
     let current = path.parse(filename).root;
@@ -282,12 +332,9 @@ async function installedFiles(directory, prefix = '') {
 }
 
 export async function checkInstalledPackage(npmPath) {
-  const temporary = await realpath(await mkdtemp(path.join(os.tmpdir(), 'missionspec-package-')));
+  const { temporary, consumer, home } = await createInstallWorkspace();
   try {
-    const consumer = path.join(temporary, 'consumer with spaces');
-    const home = path.join(temporary, 'home with spaces');
-    await Promise.all([mkdir(consumer), mkdir(home)]);
-    const npm = (args, cwd) => execute(process.execPath, [npmPath, ...args], {
+    const npm = (args, cwd) => executePackageCommand(process.execPath, [npmPath, ...args], {
       cwd, maxBuffer: 4 * 1024 * 1024, timeout: 120_000,
     });
     const { stdout } = await npm(['pack', '--offline', '--ignore-scripts', '--json', '--pack-destination', temporary], root);
@@ -350,14 +397,16 @@ export async function checkInstalledPackage(npmPath) {
       let output;
       let code = 0;
       try {
-        output = await execute(command, args, { ...options, ...launchOptions });
+        output = await executePackageCommand(command, args, { ...options, ...launchOptions });
       } catch (error) {
-        if (!Number.isInteger(error.code) || error.killed || error.signal) throw error;
+        if (!Number.isInteger(error.code) || error.killed || error.signal || error.packageExecution?.timedOut) {
+          throw new Error(`Installed smoke process failed: ${JSON.stringify(packageProcessFailure(error))}`);
+        }
         output = error;
         code = error.code;
       }
       assert.equal(code, expectedCode,
-        `Installed smoke failed (${command}): ${output.stdout ?? ''}${output.stderr ?? ''}`);
+        `Installed smoke process failed: ${JSON.stringify(packageProcessFailure({ ...output, code }))}`);
       assert.equal(await readFile(receipt, 'utf8'), '0', 'Installed process did not complete with its inert smoke guard');
       await rm(receipt);
       return JSON.parse(output.stdout);
@@ -450,7 +499,8 @@ if (import.meta.main) {
       }
     }
   } catch (error) {
-    process.stderr.write(`Package check could not complete: ${error.message}\n`);
+    process.stderr.write(`Package check could not complete: ${
+      error.packageExecution ? JSON.stringify(packageProcessFailure(error)) : error.message}\n`);
     process.exitCode = 1;
   }
 }

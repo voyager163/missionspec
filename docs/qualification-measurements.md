@@ -25,7 +25,10 @@ stderr, without echoing its path, contents or rejected values. There is no
 auto-discovery, remote input, repair, partial-success or best-effort fallback.
 
 The input must be a regular file, not a final-component symlink, and must remain
-unchanged while read. The helper bounds the read to 1,000,000 bytes, JSON depth
+unchanged while read. The helper opens a read-only, nonblocking descriptor
+before checking its type and size, then checks the named path against that
+held descriptor before consuming bytes. It does not reopen a checked pathname.
+The helper bounds the read to 1,000,000 bytes, JSON depth
 to 12, tasks to 100, segments to 100 per task and 1,000 per file. Duplicate JSON
 keys, including escaped spellings, are rejected before they can hide data.
 All record objects are closed: unknown fields are errors, not ignored metadata.

@@ -233,13 +233,20 @@ export function parseQualificationRecords(content) {
 }
 
 export async function readQualificationReport(filename) {
-  const before = await lstat(filename, { bigint: true });
-  requireInput(before.isFile() && !before.isSymbolicLink(), 'input-not-regular-file');
-  requireInput(before.size <= BigInt(LIMITS.bytes), 'input-byte-limit');
-  const handle = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  let handle;
   try {
-    const opened = await handle.stat({ bigint: true });
-    requireInput(opened.isFile() && opened.dev === before.dev && opened.ino === before.ino, 'input-changed');
+    handle = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch (error) {
+    if (error?.code === 'ELOOP') throw new QualificationInputError('input-not-regular-file');
+    throw error;
+  }
+  try {
+    const before = await handle.stat({ bigint: true });
+    requireInput(before.isFile(), 'input-not-regular-file');
+    requireInput(before.size <= BigInt(LIMITS.bytes), 'input-byte-limit');
+    const named = await lstat(filename, { bigint: true });
+    requireInput(named.isFile() && !named.isSymbolicLink(), 'input-not-regular-file');
+    requireInput(named.dev === before.dev && named.ino === before.ino, 'input-changed');
     const bytes = Buffer.alloc(LIMITS.bytes + 1);
     let length = 0;
     while (length < bytes.length) {
