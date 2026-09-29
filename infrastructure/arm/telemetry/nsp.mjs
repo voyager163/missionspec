@@ -308,11 +308,13 @@ export function verifyNspObservation(c, network, adoption, observation, stage) {
     nspConfigurationId(network, effective.id); nspConfigurationId(network, configurations[0].id);
     equal(comparisonIds(configurations[0]), comparisonIds(effective), 'NSP_LIST_GET_DRIFT');
     resource(effective, effective.id, 'Microsoft.Storage/storageAccounts/networkSecurityPerimeterConfigurations');
-    closed(p, ['provisioningState', 'provisioningIssues', 'networkSecurityPerimeter', 'resourceAssociation', 'profile']);
+    const issuesPresent = Object.hasOwn(p, 'provisioningIssues');
+    closed(p, ['provisioningState', 'networkSecurityPerimeter', 'resourceAssociation', 'profile',
+      ...(issuesPresent ? ['provisioningIssues'] : [])]);
     closed(p.networkSecurityPerimeter, ['id', 'perimeterGuid', 'location']);
     closed(p.profile, ['name', 'accessRulesVersion', 'accessRules', 'diagnosticSettingsVersion', 'enabledLogCategories']);
     equal(p.resourceAssociation, { name: n.association.split('/').at(-1), accessMode: 'Enforced' }, 'NSP_EFFECTIVE_ASSOCIATION_DRIFT');
-    if (p.provisioningState !== 'Succeeded' || !isDeepStrictEqual(p.provisioningIssues, []) ||
+    if (p.provisioningState !== 'Succeeded' || (issuesPresent && !isDeepStrictEqual(p.provisioningIssues, [])) ||
         !sameId(p.networkSecurityPerimeter.id, n.perimeter) || !regional(p.networkSecurityPerimeter.location) ||
         p.networkSecurityPerimeter.perimeterGuid !== values[n.perimeter].properties.perimeterGuid ||
         p.profile.name !== n.profile.split('/').at(-1) ||

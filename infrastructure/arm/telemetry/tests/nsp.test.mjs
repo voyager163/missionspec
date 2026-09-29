@@ -187,7 +187,7 @@ test('readback requires documented types, complete versions, both provider copie
     ['stale diagnostic version', o => { o.configuration.properties.profile.diagnosticSettingsVersion = 1; }],
     ['missing effective diagnostic categories', o => { delete o.configuration.properties.profile.enabledLogCategories; }],
     ['diagnostic export', o => { o.diagnostics[n.perimeter].value.push({ id: 'UNIT unwanted diagnostic' }); }],
-    ['missing issues', o => { delete o.configuration.properties.provisioningIssues; }],
+    ['list/get issue shape mismatch', o => { delete o.configuration.properties.provisioningIssues; }],
     ['propagation issue', o => { o.configuration.properties.provisioningIssues.push({ name: 'ConfigurationPropagationFailure' }); }],
     ['wrong subscription', o => { o.configuration.properties.profile.accessRules[0].properties.subscriptions[0].id += '0'; }],
     ['outbound rule', o => { o.configuration.properties.profile.accessRules[0].properties.direction = 'Outbound'; }],
@@ -198,6 +198,38 @@ test('readback requires documented types, complete versions, both provider copie
     const o = structuredClone(receipt.observation); mutate(o);
     assert.throws(() => verifyNspObservation(f.c, evidence.topology, f.adoption, o, receipt.stage));
   });
+});
+
+test('Storage may omit provisioningIssues only with fully converged state and explicit issue-free Network evidence', async t => {
+  const { f, evidence } = await admission(), n = evidence.topology.ids;
+  for (const record of evidence.records.filter(record => record.receipt.observation.configuration !== null)) {
+    const observation = structuredClone(record.receipt.observation);
+    delete observation.configuration.properties.provisioningIssues;
+    delete observation.configurations.value[0].properties.provisioningIssues;
+    const original = json(observation);
+    verifyNspObservation(f.c, evidence.topology, f.adoption, observation, record.receipt.stage);
+    assert.equal(json(observation), original, 'Omitted fields must not be filled into raw observations');
+    assert(!Object.hasOwn(nspState(observation).configuration.properties, 'provisioningIssues'));
+    for (const [name, change] of [
+      ['null issues', o => { o.configuration.properties.provisioningIssues = null; }],
+      ['undefined issues', o => { o.configuration.properties.provisioningIssues = undefined; }],
+      ['non-array issues', o => { o.configuration.properties.provisioningIssues = {}; }],
+      ['reported issue', o => { o.configuration.properties.provisioningIssues = [{ name: 'ConfigurationPropagationFailure' }]; }],
+      ['not converged', o => { o.configuration.properties.provisioningState = 'Accepted'; }],
+      ['missing state', o => { delete o.configuration.properties.provisioningState; }],
+      ['unknown property', o => { o.configuration.properties.unknown = []; }],
+      ['Network reports issues', o => { o.resources[n.association].properties.hasProvisioningIssues = 'yes'; }],
+      ['Network indicator missing', o => { delete o.resources[n.association].properties.hasProvisioningIssues; }],
+      ['wrong copied rule version', o => { o.configuration.properties.profile.accessRulesVersion += 1; }],
+      ['missing diagnostic categories', o => { delete o.configuration.properties.profile.enabledLogCategories; }],
+    ]) await t.test(`${record.receipt.stage}: ${name}`, () => {
+      const changed = structuredClone(observation);
+      change(changed);
+      changed.configurations.value[0] = structuredClone(changed.configuration);
+      changed.associations.value[0] = structuredClone(changed.resources[n.association]);
+      assert.throws(() => verifyNspObservation(f.c, evidence.topology, f.adoption, changed, record.receipt.stage));
+    });
+  }
 });
 
 test('explicit disclosed billing uncertainty is not zero-price proof or a budget mutation', async () => {

@@ -247,13 +247,37 @@ fails at that command's `api`, `cmd` or `powershell` phase with bounded baseline
 and actual inventories. No cache deletion, execution-policy change, preload
 relaxation, deadline extension or Node-entry fallback is used.
 
-**The corrected Windows attribution/regression run remains pending.** Local
-snapshot and injected-write tests are not native Windows evidence. Record the
-successful rerun's exact candidate, runner platform/architecture, archive
-integrity, `cliSurfaces` and `interpreterHomeBaseline` output before qualifying
-it. Earlier Linux/macOS passes do not automatically qualify a changed candidate.
-Other architectures remain untested. Existing hosted source-checkout
-qualification is separate evidence.
+### Actual hosted installed-package qualification
+
+On 2026-09-29, candidate `ea2344d9b1a50825906bebcffae4524b852165b1`
+passed the three installed-package surfaces in repository run `36570852865`.
+The Windows checkout recorded merge revision
+`30dd3af`, based on that exact candidate. All three installed 133 runtime
+dependencies and 379 archive files, imported six engines and rendered 36 skills.
+
+| Job | Actual platform | Executable surfaces and native result |
+| --- | --- | --- |
+| `109414186170` | Linux x64 | POSIX npm executable; `linux-x64` addon and descriptor lock/unlock |
+| `109414186251` | macOS arm64 | POSIX npm executable; `darwin-arm64` addon and descriptor lock/unlock |
+| `109414186326` | Windows x64 | Both npm `.cmd` and `.ps1`; `win32-x64` addon loaded, POSIX mutex not exercised |
+
+The independent Windows PowerShell regression observed exactly two empty
+directories, `AppData` and `AppData/Roaming`, before any product launch.
+Both baseline invocations agreed, and every guarded installed API/shim
+invocation preserved that inventory. No file or cache-content exception was
+needed. The original failed candidates remain failures.
+
+The retained archive integrities were:
+
+```text
+Linux/macOS: sha512-4iroQPlEbYKAFEmi/ovV6pLmQMWxihi6uTBmPy7NcYKVFBnNUzkDm1x0x19irj6YvcJ7Ua/qQemw0yUDanL51Q==
+Windows:     sha512-KlrRuz9cqyFylRvhwwFZQzX8R5oULMNdn7agY+3R5Wq12AMcd2S5/EqH3+rjkZMKOFoZIEkEOCtMJagLPQ2Myg==
+```
+
+These are platform-specific candidate artifacts, not a published release or
+proof of one byte-identical cross-platform archive. Future candidates must run
+the same checks again. Other architectures remain untested; installed package,
+source-checkout execution and native AI-host qualification remain distinct.
 
 ## Remaining maintainer gates
 

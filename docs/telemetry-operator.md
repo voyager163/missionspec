@@ -352,6 +352,16 @@ links and link references) may terminate with `nextLink: ""` at the pinned API
 version. Raw pages retain that value; other endpoints, malformed cursors and
 incomplete lists do not gain this allowance.
 
+Storage's pinned effective-configuration schema declares `provisioningIssues`
+as an optional list of issues, if any. Actual issue-free responses may omit it.
+That omission is accepted only alongside `Succeeded`, the independently verified
+Network association's explicit `hasProvisioningIssues: "no"`, matching list/GET
+responses and fully converged copied profile/rule/diagnostic versions. A present
+value must be exactly `[]`; null, malformed or reported issues still fail.
+Other missing fields do not gain an allowance. Raw observations and state hashes
+preserve the omission rather than inserting an empty array.
+See the [pinned Storage NSP schema](https://github.com/Azure/azure-rest-api-specs/blob/260ed6a52537921f53a18ffaf4020e3b4d510367/specification/storage/resource-manager/Microsoft.Storage/stable/2025-01-01/networkSecurityPerimeter.json).
+
 NSP uses the existing receiver and queue account, one dedicated perimeter, one
 profile, one explicitly `Enforced` account association and one inbound rule for
 the specified subscription. Network admission is account-wide from that
