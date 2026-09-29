@@ -751,10 +751,15 @@ test('real NSP preflight assembles exact GET evidence, permissions and effective
     values.set(`${scope}/providers/Microsoft.Authorization/denyAssignments`, value.denies);
   }
   const policy = effectivePolicyFixture(), retained = [], calls = [];
+  const foundationEntered = Promise.withResolvers(), releaseFoundation = Promise.withResolvers();
   let deny = false, saved = null, previewCalls = 0;
   const io = { now: () => q.proof.startedAt, sourceDigest: async () => f.source, batch: readBatch,
-    foundation: async () => ({ known: [], baselineSha256: q.proof.foundationBaselineSha256, binding: q.proof.foundationBinding,
-      providerCatalog: q.proof.providerCatalog }),
+    foundation: async () => {
+      foundationEntered.resolve();
+      await releaseFoundation.promise;
+      return { known: [], baselineSha256: q.proof.foundationBaselineSha256, binding: q.proof.foundationBinding,
+        providerCatalog: q.proof.providerCatalog };
+    },
     readHead: async () => nspLineageHead(evidence), allowPolicyRead: () => {},
     retainPolicy: async snapshot => { retained.push(snapshot); },
     read: async (request, deadline) => {
@@ -768,7 +773,19 @@ test('real NSP preflight assembles exact GET evidence, permissions and effective
     topologyReview: q.proof.topologyReview, billingReview: q.proof.networkBillingReview, billingEvidence: q.proof.networkBillingEvidence,
     preview: async () => { previewCalls++; return { validation: q.validation, preview: q.preview }; },
     saveCheck: async proof => { saved = proof; } };
-  const proof = await checkNspReadOnly(f.c, q.phase, f.topology, f.adoption, evidence, io);
+  const checking = checkNspReadOnly(f.c, q.phase, f.topology, f.adoption, evidence, io);
+  try {
+    await foundationEntered.promise;
+    await new Promise(resolve => setImmediate(resolve));
+    assert(calls.some(request => request.id.endsWith('/policyAssignments')),
+      'Independent effective-policy reads must not wait for foundation collection');
+    assert.equal(previewCalls, 0, 'Preview still requires all prerequisite evidence');
+    assert.equal(saved, null);
+  } finally {
+    releaseFoundation.resolve();
+    await checking;
+  }
+  const proof = await checking;
   assert.equal(proof, saved);
   assert.equal(proof.effectivePolicyVersion, 1); assert.equal(proof.qualified, true);
   assert(calls.length > 10); assert.equal(previewCalls, 1); assert(retained.length);

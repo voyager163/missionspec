@@ -12,7 +12,7 @@ From the source checkout, use Node.js `>=24.21.0 <25`:
 ```sh
 npm run check:package
 npm run check:package -- --install
-node --test tests/package.test.mjs tests/skill-rendering.test.mjs tests/cli.test.mjs
+node --test tests/package.test.mjs tests/repository-checks.test.mjs tests/skill-rendering.test.mjs tests/cli.test.mjs
 npm run check:licenses
 npm run check:repository
 ```
@@ -51,21 +51,69 @@ license checker's runtime dependency graph. In an owned temporary directory it:
 4. Imports the public ESM API and package metadata from the consumer, checks the
    private-subpath export boundary, loads twelve packaged skill bodies and
    renders all 36 host projections. It exercises the installed POSIX npm
-   executable link with `--version`, `capabilities`, `skills list`, one
-   `skills render` per host, and `telemetry status`, using JSON output.
+   executable link, or **both actual npm `.cmd` and PowerShell `.ps1` shims**
+   on Windows. Every executable surface runs `--version`, `capabilities`,
+   `skills list`, one `skills render` per host, `telemetry status`, and
+   `validate "proposal with spaces.md"`, using JSON output. Rendered skill
+   paths and content digests must match the installed API exactly. Both the
+   install and home paths contain spaces. A rejected option and blocked
+   native-host operation must retain their exact JSON errors and exit codes
+   1 and 2, rather than becoming successful shell exits.
 5. Loads the installed `fs-native-extensions` prebuild on the actual machine and
    exercises descriptor lock/unlock on a disposable file on POSIX. It verifies
    that the read-only commands leave no user or project state, then removes only
    its own temporary directory, including the archive and consumer.
 
-The CLI smoke deliberately does not rely on `--no-telemetry`: the normal
-read-only commands must remain inert and report no configured endpoint. A
+The CLI smoke deliberately does not rely on `--no-telemetry`, inherited CI/test
+mode or telemetry opt-out environment variables: the normal read-only commands
+must remain inert and report no configured endpoint. These overrides are removed
+only from the disposable guarded child environment; no user setting is changed. A
 preloaded guard fails on exercised Node HTTP/socket/fetch requests, subprocess
 starts and optional model-SDK imports, even if application code catches the
-failure. This is a regression check for the exercised paths, **not an OS network
+failure. Every process must leave a guard-completion receipt, including expected
+nonzero exits, so a shim cannot silently drop the preload. Only the harness
+launches the OS shim interpreter and Node; the CLI itself cannot spawn a host.
+This is a regression check for the exercised paths, **not an OS network
 sandbox, native-host qualification or proof about every possible API call**.
 It does not install skills into a real host, launch a coding host, obtain
 authority, call a model or exercise a production telemetry endpoint.
+
+### Hosted install coverage
+
+The existing repository workflow now runs the explicit install command after
+its locked, lifecycle-script-disabled restore and normal checks:
+
+| Existing required context | Runner | Installed executable surface |
+| --- | --- | --- |
+| `Repository checks (ubuntu-latest)` | `ubuntu-latest` | POSIX npm executable link |
+| `Repository checks (macos-latest)` | `macos-latest` | POSIX npm executable link |
+| `Windows read-only compatibility` | `windows-latest` | npm `.cmd` and PowerShell `.ps1` shims |
+
+This adds no job or required context, does not rename any of the 22 required
+contexts, and does not repeat installs across the independent Windows
+private-state/console/execution jobs. It uses the existing restore's npm cache;
+no new dependency, lifecycle script, registry/authentication probe or online
+fallback is enabled. Missing-cache, missing-shim, guard, exit-code or content
+failures fail the existing job. Workflow regression checks require the ordered
+restore/check/install steps and all three runners without skipped or masked
+install steps.
+
+On Windows the checker uses only the fixed, canonical
+`C:\Windows\System32\cmd.exe` and
+`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, not a `PATH` or
+`ComSpec` override. Cmd AutoRun and delayed expansion are disabled for that
+invocation; controlled paths and arguments are validated and quoted.
+PowerShell uses `-NoLogo -NoProfile -NonInteractive -File` to run the installed
+shim directly. It retains the machine's execution policy: **no
+`ExecutionPolicy` override, bypass, profile edit or global setting change**.
+A host shell's process-scoped `PSExecutionPolicyPreference` is not inherited.
+A policy refusal is an explicit qualification failure, not a reason to
+silently fall back to the Node entry point.
+
+Native-addon load is asserted on each actual runner. POSIX additionally
+exercises the descriptor-associated mutex. Windows reports that POSIX mutex
+check as **not exercised**; npm shim/addon-load qualification does not substitute
+for the separate Windows private-state, terminal or native-host guarantees.
 
 ## What is distributed
 
@@ -115,11 +163,21 @@ attestation: documentation and code edits change the archive. Preserve that
 output alongside the exact final revision when preparing a real candidate.
 No archive is retained or published by the checker.
 
-This workstream did **not** run the installed-tarball smoke on Linux, Windows,
-macOS x64 or other architectures. Existing hosted source-checkout qualification
-is separate evidence. On Windows this helper invokes the installed Node entry
-point, not the npm `.cmd`/PowerShell shim, and does not exercise POSIX locks;
-Windows product-install/shim qualification remains an explicit gate.
+On **2026-09-29**, the extended checker was exercised locally on the same
+Node.js/npm/macOS arm64 baseline with spaced install and home paths, exact
+API/CLI render comparisons, argument preservation, guard receipts and exit codes
+0, 1 and 2. Its owned file baselines were compared with published parent revision
+`ff86bc3c90dcacf5d897afc5aa70345a9d6ba0b2`; the isolated worktree's product code
+remained based on `b5772fb415cface3b5e7b1b786a30832b28d8e43`.
+
+**Hosted results for this extended checker are pending.** This workstream has
+not run the installed-tarball smoke on Linux, Windows, macOS x64 or other
+architectures. Windows shim construction tests on macOS and the new workflow
+steps are implementation evidence, not actual Windows execution evidence.
+Publish the reviewed candidate through the separately authorized parent
+workflow and record its runner platform/architecture, candidate revision,
+archive integrity and `cliSurfaces` output before claiming those platforms.
+Existing hosted source-checkout qualification remains separate evidence.
 
 ## Remaining maintainer gates
 

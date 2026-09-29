@@ -25,6 +25,38 @@ function validWorkflow() {
   };
 }
 
+test('installed tarballs run once per OS within existing required contexts after the locked cache restore', async () => {
+  const file = '.github/workflows/repository.yml';
+  const workflow = parseYaml(await readFile(new URL(`../${file}`, import.meta.url), 'utf8'), file);
+  assert.deepEqual(checkWorkflow(workflow, file), []);
+  const install = 'npm run check:package -- --install';
+  const jobs = Object.entries(workflow.jobs).filter(([, job]) => job.steps.some((step) => step.run === install));
+  assert.deepEqual(jobs.map(([id]) => id), ['repository-checks', 'windows-read-only']);
+  const mutations = [
+    (value) => { value.jobs['repository-checks'].steps = value.jobs['repository-checks'].steps.filter((step) => step.run !== install); },
+    (value) => { value.jobs['windows-read-only'].steps.find((step) => step.run === install).run = 'npm run check:package'; },
+    (value) => { value.jobs['windows-read-only'].steps.unshift({ run: install }); },
+    (value) => { value.jobs['windows-read-only'].steps.find((step) => step.run?.startsWith('npm ci')).run = 'npm ci'; },
+    (value) => { value.jobs['windows-read-only'].steps.find((step) => step.run === 'npm run check:portable').run = 'npm run build'; },
+    (value) => { value.jobs['windows-read-only'].steps.find((step) => step.run === install).if = 'false'; },
+    (value) => { value.jobs['windows-read-only'].steps.find((step) => step.run === install)['continue-on-error'] = true; },
+    (value) => { value.jobs['windows-read-only'].steps.find((step) => step.run === install)['working-directory'] = 'different'; },
+    (value) => { value.jobs['windows-read-only'].name = 'Renamed check'; },
+    (value) => { value.jobs['windows-read-only']['runs-on'] = 'ubuntu-latest'; },
+    (value) => { value.jobs['repository-checks'].strategy.matrix.os = ['ubuntu-latest']; },
+    (value) => { value.jobs['repository-checks'].strategy.matrix.exclude = [{ os: 'macos-latest' }]; },
+    (value) => { value.jobs['windows-private-state'].steps.push({ run: install }); },
+    (value) => { value.jobs['windows-private-state'].steps = 'malformed'; },
+    (value) => { delete value.jobs['windows-read-only']; },
+    (value) => { value.defaults = { run: { 'working-directory': 'different' } }; },
+  ];
+  for (const mutate of mutations) {
+    const changed = structuredClone(workflow);
+    mutate(changed);
+    assert.notEqual(checkWorkflow(changed, file).length, 0, mutate.toString());
+  }
+});
+
 test('Windows workflow selectors cover every application scenario exactly once without matching the whole suite', async () => {
   const source = await readFile(new URL('./windows-local-runtime.test.mjs', import.meta.url), 'utf8');
   const tree = parse(source, { sourceType: 'module' });

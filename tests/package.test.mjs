@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
 import {
-  createInstallFixture, installSmokeGuard, packageLinkProblems, packageManifestProblems,
-  packageProblems, parsePackPreview, requiredPackageFiles,
+  createInstallFixture, installSmokeEnvironment, installSmokeGuard, packageLinkProblems, packageManifestProblems,
+  packageProblems, parsePackPreview, requiredPackageFiles, windowsShimInvocation,
 } from '../scripts/check-package.mjs';
 
 const name = '@msn-control/missionspec';
@@ -123,6 +126,73 @@ test('offline smoke guard fails even swallowed network, subprocess or optional m
       `${guard}try { ${attempt}; } catch { /* A swallowed activation must still fail the smoke. */ }`]),
     (error) => error.code === 1 && /forbidden activation attempt/.test(error.stderr));
   }
+});
+
+test('Windows shim invocations preserve spaced paths and arguments with fixed noninteractive OS executables', () => {
+  const bin = "C:\\Users\\O'Brien\\package with spaces\\node_modules\\.bin\\missionspec";
+  const args = ['validate', 'proposal with spaces.md', '--json'];
+  const cmd = windowsShimInvocation('cmd', bin, args, 'C:\\WINDOWS');
+  assert.equal(cmd.command, 'C:\\Windows\\System32\\cmd.exe');
+  assert.deepEqual(cmd.args, ['/d', '/v:off', '/s', '/c',
+    `""${bin}.cmd" "validate" "proposal with spaces.md" "--json""`]);
+  assert.deepEqual(cmd.options, { shell: false, windowsVerbatimArguments: true });
+  const powershell = windowsShimInvocation('powershell', bin, args, 'C:\\Windows');
+  assert.equal(powershell.command, 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
+  assert.deepEqual(powershell.args, ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', `${bin}.ps1`, ...args]);
+  assert.deepEqual(powershell.options, { shell: false });
+  assert(!powershell.args.some((arg) => /ExecutionPolicy|Bypass|EncodedCommand/i.test(arg)));
+});
+
+test('Windows shim launcher rejects shell expansion, noncanonical paths and redirected system hosts', () => {
+  const bin = 'C:\\temporary\\node_modules\\.bin\\missionspec';
+  for (const kind of ['cmd', 'powershell']) {
+    for (const arg of ['', '"quoted"', '%PATH%', '!name!', 'a&b', 'a|b', '^escape', '<input', '>output',
+      'a\nb', 'a\0b', '$(unexpected)', '`unexpected`']) {
+      assert.throws(() => windowsShimInvocation(kind, bin, [arg], 'C:\\Windows'), /Unsafe Windows shim argument/);
+    }
+    for (const invalid of ['missionspec', 'C:missionspec', '\\\\server\\share\\missionspec',
+      'C:\\temporary\\..\\missionspec', 'C:\\temporary.\\missionspec', 'C:\\AUX\\missionspec',
+      'C:\\%TEMP%\\missionspec', 'C:\\a!b\\missionspec', 'C:\\a&b\\missionspec', 'C:\\a"b\\missionspec',
+      'C:\\a?b\\missionspec', 'C:\\a:b\\missionspec', 'C:\\a\nb\\missionspec', 'C:\\other-command']) {
+      assert.throws(() => windowsShimInvocation(kind, invalid, ['--version'], 'C:\\Windows'), /Unsafe Windows shim path/);
+    }
+    assert.throws(() => windowsShimInvocation(kind, bin, ['--version'], 'D:\\redirected'), /fixed C:\\Windows/);
+  }
+  assert.throws(() => windowsShimInvocation('arbitrary-shell', bin, [], 'C:\\Windows'), /Unrecognized Windows shim/);
+});
+
+test('installed smoke replaces case-insensitive PATH/preloads and does not hide normal behavior behind CI opt-outs', () => {
+  const env = installSmokeEnvironment('/owned/home', '/owned/guard with spaces.mjs', {
+    PATH: '/untrusted-one', Path: '/untrusted-two', NODE_OPTIONS: '--require=untrusted', node_path: '/untrusted',
+    HOME: '/real-home', APPDATA: '/real-data', missionspec_config_home: '/real-config',
+    CI: 'true', NODE_ENV: 'test', NODE_TEST_CONTEXT: 'child', DO_NOT_TRACK: '1', MISSIONSPEC_TELEMETRY: '0',
+    ComSpec: 'untrusted.exe', PSModulePath: '/untrusted-modules', PSExecutionPolicyPreference: 'Bypass', SystemRoot: 'C:\\Windows',
+  });
+  assert.equal(env.PATH, path.dirname(process.execPath));
+  assert.equal(Object.keys(env).filter((key) => key.toLowerCase() === 'path').length, 1);
+  assert.equal(env.HOME, '/owned/home');
+  assert.equal(env.APPDATA, '/owned/home');
+  assert.equal(env.MISSIONSPEC_CONFIG_HOME, path.join('/owned/home', 'missionspec'));
+  assert.match(env.NODE_OPTIONS, /^--import=file:.*guard%20with%20spaces\.mjs$/);
+  for (const key of ['CI', 'NODE_ENV', 'NODE_TEST_CONTEXT', 'DO_NOT_TRACK', 'MISSIONSPEC_TELEMETRY', 'node_path', 'PSExecutionPolicyPreference']) {
+    assert(!Object.hasOwn(env, key));
+  }
+  assert(!Object.values(env).some((value) => value.includes('untrusted')));
+});
+
+test('smoke guard writes completion evidence even for expected nonzero CLI exits', async (context) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), 'missionspec-guard-'));
+  context.after(() => rm(temporary, { recursive: true, force: true }));
+  const receipt = path.join(temporary, 'receipt');
+  const execute = promisify(execFile);
+  const guard = `await (${installSmokeGuard.toString()})(${JSON.stringify(receipt)});\n`;
+  await assert.rejects(execute(process.execPath, ['--input-type=module', '--eval', `${guard}process.exitCode = 2;`]),
+    (error) => error.code === 2);
+  assert.equal(await readFile(receipt, 'utf8'), '0');
+  await rm(receipt);
+  await assert.rejects(execute(process.execPath, ['--input-type=module', '--eval',
+    `${guard}try { await fetch('https://example.invalid'); } catch {}`]), (error) => error.code === 1);
+  assert.equal(await readFile(receipt, 'utf8'), '1');
 });
 
 test('packaged documentation cannot link to excluded operator or source files', async () => {

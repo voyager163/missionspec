@@ -335,6 +335,10 @@ completion order, so unchanged response values retain the same state hash.
 This does not normalize resource values or reinterpret previously stored
 observations and reviews. A source change requires fresh review binding;
 earlier failed checks and their original hashes remain immutable.
+Independent foundation, current-state, permission, lineage and effective-policy
+collection share the existing four-read concurrency limit and 120-second
+preflight deadline. Preview and qualification still wait for all prerequisites;
+overlap does not reuse stale policy evidence or expand a timeout.
 
 Network's HTTP 404 `NotFound` is an absence result only for the fixed
 association and access-rule GET paths, pinned API version and explicitly

@@ -193,14 +193,14 @@ export async function checkNspReadOnly(c, phase, topology, adoption, evidence, i
   const startedAt = io.now(), deadline = startedAt + NSP_LIMITS.stageMs, source = await io.sourceDigest();
   verifyNspEvidence(c, evidence, topology, adoption);
   equal(phase, buildNspPhase(c, phase.phase, topology, adoption, evidence, phase.instance), 'NSP_PHASE_CHANGED');
-  const foundation = await io.foundation(deadline);
-  const [observation, permissions, networkLineageHead] = await io.batch([
+  const [foundation, observation, permissions, networkLineageHead, effectivePolicy] = await io.batch([
+    () => io.foundation(deadline),
     () => collectNspObservation(evidence.topology, io, deadline, { c, adoption }),
     () => collectNspPermissions(c, phase, evidence.topology, io, deadline),
     () => io.readHead(evidence),
+    () => collectNspEffectivePolicies(phase, io, deadline),
   ], read => read());
   verifyNspObservation(c, evidence.topology, adoption, observation, phase.beforeStage);
-  const effectivePolicy = await collectNspEffectivePolicies(phase, io, deadline);
   const preview = phase.request.method === 'PUT' ? await io.preview(deadline) : {
     validation: null, preview: { version: 1, kind: 'fixed-nsp-direct-request-preview',
       request: phase.request, preimageSha256: hash(observation.resources[phase.request.id]), nativeArmWhatIf: false },
