@@ -336,6 +336,18 @@ This does not normalize resource values or reinterpret previously stored
 observations and reviews. A source change requires fresh review binding;
 earlier failed checks and their original hashes remain immutable.
 
+Network's HTTP 404 `NotFound` is an absence result only for the fixed
+association and access-rule GET paths, pinned API version and explicitly
+selected subscription. Parent resources, list operations, other paths and
+authorization failures do not use that exception. Complete independent
+inventories must still agree with the phase's expected absence. A deployment
+stopped by the earlier response parser is not retried or rewritten as success;
+it requires separate reviewed current-state reconciliation.
+The five fixed Network inventories (profiles, associations, access rules,
+links and link references) may terminate with `nextLink: ""` at the pinned API
+version. Raw pages retain that value; other endpoints, malformed cursors and
+incomplete lists do not gain this allowance.
+
 NSP uses the existing receiver and queue account, one dedicated perimeter, one
 profile, one explicitly `Enforced` account association and one inbound rule for
 the specified subscription. Network admission is account-wide from that

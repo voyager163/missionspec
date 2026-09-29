@@ -48,6 +48,75 @@ function memoryNspStore() {
   return { store, files, writes };
 }
 
+test('NSP NotFound means absence only for the exact association or rule GET in the selected subscription', async () => {
+  const { f, evidence } = await initial(), n = evidence.topology.ids;
+  const absent = 'ERROR: Not Found({"error":{"code":"NotFound","message":"The requested NSP child does not exist."}})';
+  const error = stderr => async () => { throw Object.assign(new Error('unit response'), { stderr }); };
+  const args = (url, method = 'GET', subscription = f.c.subscriptionId) =>
+    ['rest', '--method', method, '--url', url, '--subscription', subscription];
+  for (const id of [n.association, n.rule]) {
+    const url = `https://management.azure.com${id}?api-version=${NSP_API}`;
+    assert.equal(await az(args(url), 10, error(absent)), null);
+    for (const method of ['PUT', 'PATCH', 'POST', 'DELETE']) {
+      await assert.rejects(az(args(url, method), 10, error(absent)), /ARM_OPERATION_FAILED/);
+    }
+    for (const badUrl of [
+      url.replace('https:', 'http:'), url.replace(NSP_API, '2024-07-01'), url + '&extra=true',
+      url.replace('queue-storage-v1', 'unreviewed-profile'),
+      url.replace(`/resourceGroups/${f.c.namePrefix}-telemetry/`, '/resourceGroups/missionspec-other-telemetry/'),
+      url.replace('/Microsoft.Network/', '/Microsoft.Storage/'),
+      `https://management.azure.com${id.slice(0, id.lastIndexOf('/'))}?api-version=${NSP_API}`,
+      `https://management.azure.com${n.perimeter}?api-version=${NSP_API}`,
+      `https://management.azure.com${n.profile}?api-version=${NSP_API}`,
+      `https://management.azure.com${n.account}?api-version=${NSP_API}`,
+    ]) await assert.rejects(az(args(badUrl), 10, error(absent)), /ARM_OPERATION_FAILED/);
+    await assert.rejects(az(args(url, 'GET', f.c.tenantId), 10, error(absent)), /ARM_OPERATION_FAILED/);
+    await assert.rejects(az(args(url).slice(0, 5), 10, error(absent)), /ARM_OPERATION_FAILED/);
+    for (const text of [
+      'ERROR: Forbidden({"error":{"code":"NotFound"}})', 'ERROR: Unauthorized({"error":{"code":"NotFound"}})',
+      'ERROR: Too Many Requests({"error":{"code":"NotFound"}})', 'ERROR: Not Found({"error":{"code":"AuthorizationFailed"}})',
+      'ERROR: {"error":{"code":"NotFound"}}', 'ERROR: NotFound', '',
+    ]) await assert.rejects(az(args(url), 10, error(text)), /ARM_OPERATION_FAILED/);
+  }
+});
+
+test('empty-boundary readback composes NSP child 404s with complete empty inventories', async () => {
+  const { f, evidence, q } = await initial(), n = evidence.topology.ids;
+  const requests = nspReadRequests(evidence.topology), values = new Map(Object.entries(q.after.resources));
+  for (const key of ['profiles', 'associations', 'rules', 'links', 'linkReferences', 'configurations', 'privateEndpoints', 'queues']) {
+    values.set(requests[key].id, q.after[key]);
+  }
+  for (const key of ['profiles', 'associations', 'rules', 'links', 'linkReferences']) {
+    values.set(requests[key].id, { ...values.get(requests[key].id), nextLink: '' });
+  }
+  for (const [id, request] of Object.entries(requests.diagnostics)) values.set(request.id, q.after.diagnostics[id]);
+  const retained = [], now = () => q.after.completedAt;
+  const port = nspTransport(f.c, null, { now, retainRead: async (...value) => { retained.push(value); },
+    invoke: (args, timeout) => az(args, timeout, async (_command, argv) => {
+      assert.equal(argv[argv.indexOf('--method') + 1], 'GET');
+      const id = new URL(argv[argv.indexOf('--url') + 1]).pathname;
+      assert(values.has(id));
+      if (values.get(id) === null) throw Object.assign(new Error('unit absent child'), {
+        stderr: 'ERROR: Not Found({"error":{"code":"NotFound"}})',
+      });
+      return { stdout: json(values.get(id)) };
+    }) });
+  const collect = () => collectNspObservation(evidence.topology, { ...port, now, batch: readBatch }, now() + 120000);
+  const observation = await collect();
+  verifyNspObservation(f.c, evidence.topology, f.adoption, observation, 'empty-boundary');
+  verifyNspTransition(f.c, evidence.topology, f.adoption, q.phase, q.proof.observation, observation);
+  assert(retained.every(([, , outcome]) => outcome.complete));
+  assert.equal(retained.find(([request]) => request.id === requests.profiles.id)[1][0].response.nextLink, '');
+  assert.equal(observation.resources[n.association], null);
+  assert.equal(observation.resources[n.rule], null);
+  values.set(requests.rules.id, { value: [{ id: n.rule }] });
+  assert.throws(() => verifyNspObservation(f.c, evidence.topology, f.adoption, {
+    ...observation, rules: values.get(requests.rules.id),
+  }, 'empty-boundary'), /NSP_INVENTORY_DRIFT/);
+  values.set(requests.rules.id, null);
+  await assert.rejects(collect(), /ARM_OPERATION_FAILED/);
+});
+
 test('four fixed setup phases lock existing storage and add one subscription rule last', async () => {
   const { f, evidence, receipt } = await admission();
   assert.deepEqual(evidence.records.map(v => v.phase.phase), NSP_SETUP_PHASES);
@@ -466,6 +535,29 @@ test('NSP pagination stays on exact list/API and rejects hostile cursors, loops 
   assert.equal(calls, 2);
   io.invoke = async () => ({ value: [{ id: request.id + '/same' }], nextLink: next });
   await assert.rejects(port.read(request, f.at + 120000, true), /DUPLICATE|LOOP/);
+});
+
+test('empty terminal nextLink is accepted only for the five fixed Network inventories with raw pages retained', async () => {
+  const { f, evidence } = await initial(), requests = nspReadRequests(evidence.topology), retained = [];
+  let nextLink = '';
+  const port = nspTransport(f.c, null, { now: () => f.at,
+    retainRead: async (...args) => { retained.push(args); }, invoke: async () => ({ value: [], nextLink }) });
+  for (const key of ['profiles', 'associations', 'rules', 'links', 'linkReferences']) {
+    assert.deepEqual(await port.read(requests[key], f.at + 120000, true), { value: [] });
+    assert.equal(retained.at(-1)[1][0].response.nextLink, '');
+    assert.equal(retained.at(-1)[2].complete, true);
+  }
+  for (const request of [
+    requests.queues, requests.configurations, requests.privateEndpoints, Object.values(requests.diagnostics)[0],
+    { ...requests.profiles, apiVersion: '2024-07-01' },
+    { ...requests.profiles, filter: '$filter=anything' },
+    { ...requests.profiles, id: requests.profiles.id + '/unknown' },
+    { ...requests.profiles, id: requests.profiles.id.replace(f.c.namePrefix + '-queue-', 'missionspec-other-queue-') },
+  ]) await assert.rejects(port.read(request, f.at + 120000, true), /NSP_LIST_INCOMPLETE/);
+  for (const value of [false, 0, {}, ' ', 'https://example.invalid/next']) {
+    nextLink = value;
+    await assert.rejects(port.read(requests.profiles, f.at + 120000, true));
+  }
 });
 
 test('canonical target and initial intent keys survive a second valid adoption or changed review context', async () => {

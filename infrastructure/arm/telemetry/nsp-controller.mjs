@@ -40,6 +40,11 @@ export function nspTransport(c, phase, io) {
   const subscription = ids(c).sub;
   const read = async (request, deadline, paginated = false) => {
     const initial = requestUrl(request);
+    const networkPrefix = `${ids(c).group}/providers/Microsoft.Network/networkSecurityPerimeters/${c.namePrefix}-queue-`;
+    const emptyTerminalLink = request.apiVersion === NSP_API && request.filter === null &&
+      request.id.startsWith(networkPrefix) &&
+      /^[a-z0-9]{8,16}\/(?:profiles|resourceAssociations|links|linkReferences|profiles\/queue-storage-v1\/accessRules)$/u
+        .test(request.id.slice(networkPrefix.length));
     if (!request.id.toLowerCase().startsWith(subscription.toLowerCase() + '/') && !sameId(request.id, subscription) &&
         !io.policyReadAllowed?.(request)) fail('NSP_READ_SCOPE_FORBIDDEN');
     if (/(?:listkeys|listsecrets|listaccountsas|listservicesas|regeneratekey|register)(?:\/|$)/iu.test(request.id)) fail('NSP_READ_SCOPE_FORBIDDEN');
@@ -68,7 +73,7 @@ export function nspTransport(c, phase, io) {
         }
         if (!response || response.error || !Array.isArray(response.value)) fail('NSP_LIST_INCOMPLETE');
         if (response.nextLink !== undefined && response.nextLink !== null &&
-            (typeof response.nextLink !== 'string' || !response.nextLink)) fail('NSP_LIST_INCOMPLETE');
+            (typeof response.nextLink !== 'string' || (!response.nextLink && !emptyTerminalLink))) fail('NSP_LIST_INCOMPLETE');
         for (const value of response.value) {
           const key = value?.id?.toLowerCase();
           if (key && seenIds.has(key)) fail('NSP_PAGINATION_DUPLICATE');
