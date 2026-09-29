@@ -141,14 +141,15 @@ export async function collectNspObservation(network, io, deadline, context = nul
     verifyNspTopology(context.c, network, context.adoption.topology, context.adoption);
     if (context.adoption.version !== 3) fail('QUEUE_DEFENDER_NSP_CONTEXT_REQUIRED');
   } else if (network.version !== 1 || context?.adoption.version === 3) fail('QUEUE_DEFENDER_NSP_CONTEXT_REQUIRED');
-  const startedAt = io.now(), requests = nspReadRequests(network), resources = {};
-  await io.batch(Object.entries(requests.resources), async ([id, request]) => { resources[id] = await io.read(request, deadline); });
+  const startedAt = io.now(), requests = nspReadRequests(network);
+  const resources = Object.fromEntries(await io.batch(Object.entries(requests.resources),
+    async ([id, request]) => [id, await io.read(request, deadline)]));
   const observation = { version: defender ? 2 : 1, kind: 'observed-nsp-control-plane', startedAt, completedAt: null, resources };
   const absentPerimeter = resources[network.ids.perimeter] === null, absentProfile = resources[network.ids.profile] === null;
   const absent = new Set(absentPerimeter ? ['profiles', 'associations', 'links', 'linkReferences', 'rules'] : absentProfile ? ['rules'] : []);
-  await io.batch(['profiles', 'associations', 'rules', 'links', 'linkReferences', 'configurations', 'privateEndpoints', 'queues'], async key => {
-    observation[key] = absent.has(key) ? { value: [] } : await io.read(requests[key], deadline, true);
-  });
+  Object.assign(observation, Object.fromEntries(await io.batch([
+    'profiles', 'associations', 'rules', 'links', 'linkReferences', 'configurations', 'privateEndpoints', 'queues',
+  ], async key => [key, absent.has(key) ? { value: [] } : await io.read(requests[key], deadline, true)])));
   observation.diagnostics = Object.fromEntries(await io.batch(Object.entries(requests.diagnostics), async ([id, request]) =>
     [id, absentPerimeter && id === network.ids.perimeter ? { value: [] } : await io.read(request, deadline, true)]));
   const configs = observation.configurations.value;

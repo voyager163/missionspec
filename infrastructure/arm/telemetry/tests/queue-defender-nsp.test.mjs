@@ -72,6 +72,31 @@ test('initial inventory and reconciliation require full exact integration before
   assert.throws(() => verifyNspReconciliation(f.c, initial, f.adoption, changed, nspLineageHead(initial), q.proof.completedAt), /QUEUE_/);
 });
 
+test('NSP observation hashes do not depend on resource or inventory read completion order', async () => {
+  const q = defenderNspPhaseFixture(f, initial, 'nsp-empty-boundary');
+  const forward = readIO(initial.topology, q.proof.observation);
+  const reverse = readIO(initial.topology, q.proof.observation);
+  reverse.io.batch = async (values, operation) => {
+    const results = Array(values.length);
+    for (let index = values.length - 1; index >= 0; index--) results[index] = await operation(values[index]);
+    return results;
+  };
+  const context = { c: f.c, adoption: f.adoption }, deadline = q.proof.completedAt + 120000;
+  const first = await collectNspObservation(initial.topology, forward.io, deadline, context);
+  const second = await collectNspObservation(initial.topology, reverse.io, deadline, context);
+  assert.deepEqual(first, second);
+  assert.equal(hash(first), hash(second), 'Serialization must not bind asynchronous completion order');
+  assert.equal(hash(nspState(first)), hash(nspState(second)));
+  const review = structuredClone(q.proof.topologyReview);
+  review.queueOnlyRisk.currentStateSha256 = hash(nspState(first));
+  verifyNspReview(f.c, initial.topology, review, f.source, q.proof.completedAt, second);
+  const changed = structuredClone(second);
+  changed.resources[f.topology.ids.account].properties.minimumTlsVersion = 'TLS1_0';
+  assert.notEqual(hash(nspState(changed)), review.queueOnlyRisk.currentStateSha256);
+  assert.throws(() => verifyNspReview(f.c, initial.topology, review, f.source, q.proof.completedAt, changed),
+    /NSP_EXACT_QUEUE_ONLY_RISK_ACKNOWLEDGMENT_REQUIRED/);
+});
+
 test('new NSP collector requires verified context and exact current reads without any Blob data operation', async t => {
   const q = defenderNspPhaseFixture(f, initial, 'nsp-empty-boundary'), x = readIO(initial.topology, q.proof.observation);
   const observation = await collectNspObservation(initial.topology, x.io, q.proof.completedAt + 120000, { c: f.c, adoption: f.adoption });

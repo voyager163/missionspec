@@ -330,6 +330,12 @@ it neither certifies malware scanning/Sensitive Data Discovery nor authorizes
 Blob tests, extra rules or disabled Defender. Paired false-only disable and
 read-only image capture remain independent of these backend reads.
 
+Parallel observation reads are assembled in the declared request order, not
+completion order, so unchanged response values retain the same state hash.
+This does not normalize resource values or reinterpret previously stored
+observations and reviews. A source change requires fresh review binding;
+earlier failed checks and their original hashes remain immutable.
+
 NSP uses the existing receiver and queue account, one dedicated perimeter, one
 profile, one explicitly `Enforced` account association and one inbound rule for
 the specified subscription. Network admission is account-wide from that
