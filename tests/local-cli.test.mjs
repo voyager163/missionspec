@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import test from 'node:test';
 import { LocalWorkspace } from '../dist/adapters/filesystem/local-workspace.js';
 import { openRuntimeStore } from '../dist/adapters/persistence/index.js';
+import { LocalWorkflow, openLocalAuthority } from '../dist/api/index.js';
 
 const executable = fileURLToPath(new URL('../dist/cli/main.js', import.meta.url));
 
@@ -54,6 +55,35 @@ test('local CLI fails closed on mutation attempts, untrusted approval flags and 
     assert.notEqual(result.parsed.status, 'ok');
   }
   assert.deepEqual(await readdir(root), []);
+});
+
+test('CLI profile conversion previews exact metadata and refuses noninteractive effects or unrelated options', async (t) => {
+  const { root, invoke } = await fixture(t);
+  const authority = await openLocalAuthority({ directory: root, transport: {
+    channel: 'trusted-callback', protocolIdentity: { id: 'test.cli-profile', version: '1' },
+    confirm: async () => 'accept',
+  } });
+  const workflow = await LocalWorkflow.open(root, { authority });
+  const commit = async (plan) => {
+    const confirmed = await authority.confirmPlan(plan);
+    assert.equal(confirmed.value.state, 'issued');
+    await workflow.apply(plan, confirmed.value.approval.reference);
+  };
+  await commit(await workflow.previewSetup());
+  await commit(await workflow.previewNewChange({ slug: 'profile-test', specs: ['feature'] }));
+  const before = await workflow.loadChange('profile-test');
+  const names = await readdir(root, { recursive: true });
+  const result = await invoke('change', 'profile', 'profile-test', '--profile', 'compact', '--preview');
+  assert.equal(result.code, 0, result.stdout);
+  assert.equal(result.parsed.value.from, 'standard');
+  assert.equal(result.parsed.value.to, 'compact');
+  assert.equal(result.parsed.value.documentsModified, false);
+  for (const extra of [[], ['--preview', '--yes'], ['--preview', '--spec', 'other'], ['--preview', '--auto']]) {
+    assert.notEqual((await invoke('change', 'profile', 'profile-test', '--profile', 'compact', ...extra)).code, 0);
+  }
+  assert.notEqual((await invoke('change', 'profile', 'profile-test', '--preview')).code, 0);
+  assert.deepEqual((await workflow.loadChange('profile-test')).metadata, before.metadata);
+  assert.deepEqual(await readdir(root, { recursive: true }), names);
 });
 
 test('state status reports current ledger capacity without creating or modifying state', async (t) => {

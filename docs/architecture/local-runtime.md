@@ -25,6 +25,7 @@ selected current directory; a change selector is its flat slug, not a guessed ID
 | `project status`, `change list` | Read explicit project identity/configuration and open-change inventory |
 | `init [--preview] [--profile standard\|compact]` | Review identity, configuration and additive ignore entry; bootstrap state only after terminal confirmation |
 | `change new <slug> --spec <name> [--source <path>] [--preview]` | Review change metadata, complete spec output set and baseline observations |
+| `change profile <slug> --profile standard\|compact [--preview]` | Review metadata-only conversion of an unpromoted version-1 change; preserve documents and invalidate prior revision-bound records |
 | `status <slug>`, `analyze <slug>` | Read live scoped files; report DAG readiness, stale captures, typed coverage and clarification blockers |
 | `instructions <slug> [--artifact <node>]` | Emit version-1 skeletons and next-node guidance without writing or generating claims |
 | `draft <slug> [--artifact <node>] [--preview]` | Review one missing skeleton; it remains incomplete and uncaptured |

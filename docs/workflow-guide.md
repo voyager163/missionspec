@@ -89,6 +89,38 @@ Standard is the default profile. Compact is explicit opt-in and can place a
 short design section in tasks after a reviewed not-applicable decision for the
 separate design artifact. Compact does not weaken authorization or evidence.
 
+An existing, unpromoted version-1 change can switch profiles explicitly:
+
+```sh
+missionspec change profile remember-filter --profile compact --preview
+missionspec change profile remember-filter --profile compact
+```
+
+Only `change.yaml` changes. Document bytes and IDs, the declared output sets,
+source scope, baseline observations and clarification history are preserved.
+The project default profile and other changes are unaffected. Compatible
+captures remain recorded, but readiness is reassessed under the target
+workflow. No design prose is generated, moved or deleted: Compact tasks still
+need a nonempty `Design` section, and Standard needs its separate design.
+Any previous Compact design-skip decision is removed from active metadata;
+returning to Compact requires a new explicit applicability review.
+
+Each conversion binds a new `profileRevision` to the previous metadata digest
+and target workflow. Converting back does not revive old run/check,
+acceptance, lesson or approval applicability. Historical records remain
+retained; obtain new revision-bound reviews and evidence where required.
+Unchanged registered check definitions remain reusable, but collecting them
+requires fresh approval bound to the converted change.
+Active or unreconciled runs block the transaction, as do stale previews.
+Same-profile requests, already promoted or archived changes, older document
+schemas and unknown workflow revisions are not converted.
+This is not a general legacy-format migration.
+
+Library callers use `LocalWorkflow.previewProfileConversion(slug, profile)`
+and `commitProfileConversion(slug, profile, preview.plan, approval)`;
+MCP callers use the `profile-conversion` preview action and the existing
+independent confirmation channel.
+
 Select `--verification-plan` when creating a change to split detailed check
 definitions into `verification.md`. It and `tasks.md` remain one task/check
 artifact, captured and revised together. The tasks frontmatter can explicitly

@@ -112,6 +112,13 @@ Narrative sections may contain ordinary Markdown, subsections,
 links, lists and code examples. Prose is retained exactly, including comments
 and formatting; the parser does not summarize or semantically verify it.
 
+Reviewed Standard/Compact conversion changes only version-1 `change.yaml`,
+not the Markdown envelope or document bytes. The optional metadata
+`profileRevision` is a content digest included in the workflow revision
+binding, so round-trip conversions cannot restore old evidence applicability.
+Metadata without it retains its original revision calculation. See
+[profile conversion](../workflow-guide.md) for the supported scope and limits.
+
 Only top-level document headings declare facts. Headings shown inside ordinary
 code fences or quoted examples are prose, not hidden declarations.
 

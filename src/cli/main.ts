@@ -38,6 +38,7 @@ Commands (mutations require local confirmation):
   missionspec state migrate <absolute-path/.missionspec/state> --file <private-backup.json> [--preview]
   missionspec init [--preview] [--profile standard|compact]
   missionspec change new <slug> --spec <name> [--source <path>] [--verification-plan] [--preview]
+  missionspec change profile <slug> --profile standard|compact [--preview]
   missionspec status|instructions|analyze|clarify|verify <slug> [--json]
   missionspec draft|capture|revise <slug> --artifact <node> [--preview]
   missionspec draft-all <slug> [--preview]

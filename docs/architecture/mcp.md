@@ -12,7 +12,10 @@ workflow changes without writing files. Supported previews cover setup,
 change creation, one-artifact drafting/capture/revision, draft-all, discovery
 capture, principles, clarification, Compact design applicability, acceptance,
 sync, archive, selected-host skill installation/update/removal, and explicit
-new-change adoption of supplied upstream documents.
+new-change adoption of supplied upstream documents. `profile-conversion`
+accepts an explicit `change` and target `profile` (`standard` or `compact`).
+It shares the CLI's metadata-only conversion, live guards and independent
+approval route. No input may supply a revision stamp or assert approval.
 
 `source-patch` previews accept only inert proposals for one declared task.
 MissionSpec reobserves source preimages, resolves predecessor evidence where

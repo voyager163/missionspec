@@ -31,6 +31,7 @@ export interface LocalCliOptions {
 export async function runLocalCommand(positionals: readonly string[], values: LocalCliOptions): Promise<unknown> {
   const [command, subject] = positionals;
   const special = ['applicability', 'approval', 'check', 'collect', 'accept', 'discover', 'principles', 'patch'].includes(command ?? '') ||
+    command === 'change' && subject === 'profile' ||
     command === 'clarify' && values.file !== undefined;
   const mutation = ['init', 'draft', 'draft-all', 'capture', 'revise', 'sync', 'archive'].includes(command ?? '') ||
     command === 'change' && subject === 'new' || command === 'recover' && subject !== undefined;
@@ -105,7 +106,8 @@ async function runLocalPreview(positionals: readonly string[], values: LocalCliO
   if (command === 'status' || command === 'analyze') {
     const change = await workflow.loadChange(slug);
     return {
-      id: change.metadata.id, slug: change.metadata.slug, revisions: change.revisions, sourceScope: change.sourceScope,
+      id: change.metadata.id, slug: change.metadata.slug, profile: change.metadata.profile,
+      revisions: change.revisions, sourceScope: change.sourceScope,
       readiness: change.readiness, analysis: change.analysis, uncaptured: change.uncaptured,
       implementationReady: change.implementationReady,
       diagnostics: change.validation.state === 'invalid' ? change.validation.diagnostics : [],

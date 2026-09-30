@@ -114,7 +114,7 @@ export async function createMissionSpecMcpServer(options: MissionSpecMcpOptions)
       async ({ change }) => {
         const loaded = await workflow.loadChange(change);
         return {
-          changeId: loaded.metadata.id, readiness: loaded.readiness, analysis: loaded.analysis,
+          changeId: loaded.metadata.id, profile: loaded.metadata.profile, readiness: loaded.readiness, analysis: loaded.analysis,
           uncaptured: loaded.uncaptured, implementationReady: loaded.implementationReady,
           authorityIssued: false, sourceScope: loaded.sourceScope,
         };

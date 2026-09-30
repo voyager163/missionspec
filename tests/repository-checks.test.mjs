@@ -78,6 +78,10 @@ test('Windows workflow selectors cover every application scenario exactly once w
   const races = workflow.jobs['windows-file-races'];
   assert.equal(races['runs-on'], 'windows-latest');
   assert(races.steps.some((step) => step.run === 'node --test --test-concurrency=1 tests/windows-file-races.test.mjs'));
+  const raceIndex = races.steps.findIndex((step) => step.run === 'node --test --test-concurrency=1 tests/windows-file-races.test.mjs');
+  const profileIndex = races.steps.findIndex((step) => step.run === 'node --test --test-concurrency=1 tests/windows-profile-conversion.test.mjs');
+  assert(profileIndex > raceIndex, 'Native profile conversion runs only after held-handle race qualification');
+  assert.deepEqual(Object.keys(races.steps[profileIndex]).sort(), ['name', 'run']);
   const matrix = workflow.jobs['windows-workflow'].strategy.matrix.include;
   assert.equal(matrix.length, names.length);
   assert(names.length > 0);

@@ -144,6 +144,34 @@ test('one-use preview routes full plan to independent authority and commits thro
   assert(inspected.structuredContent.value.files.every((file) => file.state === 'current'));
 });
 
+test('MCP profile conversion uses a one-use exact preview and independent authority without editing documents', async (context) => {
+  const reviewer = testReviewer();
+  const f = await fixture(context, reviewer);
+  for (const action of [{ kind: 'setup' }, { kind: 'new-change', change: 'profile-test', specs: ['feature'] }]) {
+    const prepared = await preview(f.client, action);
+    assert.notEqual((await apply(f.client, prepared.structuredContent.value.preview)).isError, true);
+  }
+  const workflow = await LocalWorkflow.open(f.root);
+  const original = await workflow.loadChange('profile-test');
+  const value = await preview(f.client, { kind: 'profile-conversion', change: 'profile-test', profile: 'compact' });
+  assert.notEqual(value.isError, true, JSON.stringify(value));
+  assert.equal(value.structuredContent.value.review.documentsModified, false);
+  assert.equal((await workflow.loadChange('profile-test')).metadata.profile, 'standard');
+  const token = value.structuredContent.value.preview;
+  assert.notEqual((await apply(f.client, token)).isError, true);
+  const current = await workflow.loadChange('profile-test');
+  assert.equal(current.metadata.profile, 'compact');
+  assert.equal(current.metadata.id, original.metadata.id);
+  assert.notEqual(current.revisions.workflow, original.revisions.workflow);
+  assert.equal((await apply(f.client, token)).isError, true);
+  const forged = await preview(f.client, { kind: 'profile-conversion', change: 'profile-test', profile: 'standard', approved: true });
+  assert.equal(forged.isError, true);
+  const returning = await preview(f.client, { kind: 'profile-conversion', change: 'profile-test', profile: 'standard' });
+  reviewer.decline = true;
+  assert.equal((await apply(f.client, returning.structuredContent.value.preview)).structuredContent.error.code, 'authority-required');
+  assert.equal((await workflow.loadChange('profile-test')).metadata.profile, 'compact');
+});
+
 test('declined, forged and stale previews never acquire broader effects', async (context) => {
   const reviewer = testReviewer();
   reviewer.decline = true;

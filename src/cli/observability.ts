@@ -231,7 +231,8 @@ export async function runObservabilityCommand(
 function selectedOperation(positionals: readonly string[], values: ObservabilityCliValues): ObservedOperation | undefined {
   if (values.preview || values.help || values.version) return undefined;
   const command = positionals[0];
-  const operation = command === 'capture' ? 'draft' : command === 'patch' ? 'implement' :
+  const operation = command === 'change' && positionals[1] === 'profile' ? 'revise' :
+    command === 'capture' ? 'draft' : command === 'patch' ? 'implement' :
     command === 'collect' || command === 'convergence' && values.file !== undefined ? 'verify' :
       command === 'draft' || command === 'draft-all' || command === 'revise' ||
       command === 'principles' || command === 'sync' || command === 'archive' || command === 'implement' ? command : undefined;

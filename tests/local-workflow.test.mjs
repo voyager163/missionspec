@@ -3,8 +3,9 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, rm, writeFile, symlink, chmod, stat, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
+import { stringify } from 'yaml';
 import { LocalChecks, LocalWorkflow, ExecutionController, executionApprovalRequest, digestApprovalRequest, digestContent, digestEffectScope, openRuntimeStore, parseApprovalRequest } from '../dist/api/index.js';
-import { parseMarkdownDocument, parseMarkdownSet, promoteBaseline } from '../dist/engines/specification/contracts.js';
+import { parseChangeMetadata, parseMarkdownDocument, parseMarkdownSet, promoteBaseline } from '../dist/engines/specification/contracts.js';
 import { requireApproval } from '../dist/application/authority.js';
 
 const now = '2026-09-20T12:00:00.000Z';
@@ -93,6 +94,103 @@ async function inventory(root) {
   return result.sort();
 }
 
+test('reviewed profile conversion preserves documents and captures, reassesses readiness and never revives a round-trip grant', async (t) => {
+  const f = await prepared(t);
+  const before = await f.app.loadChange('filters');
+  const config = await readFile(path.join(f.root, 'missionspec/config.yaml'), 'utf8');
+  const unchanged = await inventory(f.root);
+  const preview = await f.app.previewProfileConversion('filters', 'compact');
+  assert.deepEqual(await inventory(f.root), unchanged);
+  assert.equal(preview.documentsModified, false);
+  assert.equal(preview.projectDefaultChanged, false);
+  assert.equal(preview.priorRevisionBoundRecords, 'stale-not-deleted');
+  assert.equal(preview.implementationReady, false);
+  assert(preview.readiness.assessments.find((entry) => entry.node === 'tasks').diagnostics
+    .some((entry) => entry.code === 'additional-section-missing'));
+  assert.deepEqual(preview.plan.mutations.map((entry) => entry.effect.path), [before.metadataFile.path]);
+  const approval = f.authority.issue(preview.plan.request);
+  await f.app.commitProfileConversion('filters', 'compact', preview.plan, approval);
+  const compact = await f.app.loadChange('filters');
+  assert.equal(compact.metadata.profile, 'compact');
+  assert.deepEqual(compact.documents, before.documents);
+  assert.deepEqual(compact.metadata.nodes, before.metadata.nodes);
+  assert.equal(compact.revisions.source, before.revisions.source);
+  assert.equal(compact.revisions.tasks, before.revisions.tasks);
+  assert.notEqual(compact.revisions.workflow, before.revisions.workflow);
+  const returning = await f.app.previewProfileConversion('filters', 'standard');
+  await f.app.commitProfileConversion('filters', 'standard', returning.plan, f.authority.issue(returning.plan.request));
+  const standard = await f.app.loadChange('filters');
+  assert.equal(standard.implementationReady, true);
+  assert.deepEqual(standard.documents, before.documents);
+  assert.deepEqual(standard.metadata.nodes, before.metadata.nodes);
+  assert.notEqual(standard.revisions.workflow, before.revisions.workflow);
+  assert.notEqual(standard.metadata.profileRevision, compact.metadata.profileRevision);
+  assert.equal(await readFile(path.join(f.root, 'missionspec/config.yaml'), 'utf8'), config);
+  await assert.rejects(f.app.commitProfileConversion('filters', 'compact', preview.plan, approval), { code: 'stale-revision' });
+  const history = await f.app.files.committedFilePlans();
+  assert(history.some((plan) => plan.digest === preview.plan.digest));
+  assert(history.some((plan) => plan.digest === returning.plan.digest));
+});
+
+test('Compact to Standard removes only the active design skip and requires a new explicit decision on return', async (t) => {
+  const f = await fixture(t);
+  const plan = await f.app.previewNewChange({ slug: 'filters', id: 'CHG-remember-filter', specs: ['filters', 'reset'], profile: 'compact' });
+  await f.app.apply(plan, f.authority.issue(plan.request));
+  const content = await drafts();
+  for (const node of ['proposal', 'specs']) {
+    const capture = await f.app.previewArtifact('filters', node, content[node]);
+    await f.app.apply(capture, f.authority.issue(capture.request));
+  }
+  const skip = await f.app.previewApplicability('filters', 'Small change: design is in tasks.');
+  await f.app.apply(skip, f.authority.issue(skip.request));
+  const tasks = await f.app.previewArtifact('filters', 'tasks', content.tasks.map((file) => ({
+    ...file, content: file.content.replace('## Tasks', '## Design\n\nUse the existing implementation.\n\n## Tasks'),
+  })));
+  await f.app.apply(tasks, f.authority.issue(tasks.request));
+  const before = await f.app.loadChange('filters');
+  assert.equal(before.implementationReady, true);
+  for (const target of ['standard', 'compact']) {
+    const preview = await f.app.previewProfileConversion('filters', target);
+    await f.app.commitProfileConversion('filters', target, preview.plan, f.authority.issue(preview.plan.request));
+    const converted = await f.app.loadChange('filters');
+    assert.deepEqual(converted.documents, before.documents);
+    assert.equal(converted.metadata.nodes.find((node) => node.node === 'design').applicability, undefined);
+    assert.equal(converted.implementationReady, false);
+    assert.equal(await f.app.files.read('missionspec/changes/filters/design.md'), null);
+  }
+  assert((await f.app.files.committedFilePlans()).some((plan) => plan.digest === skip.digest));
+});
+
+test('conversion refuses no-op, unknown formats, stale previews, promoted changes and active runs', async (t) => {
+  const f = await prepared(t);
+  for (const profile of [undefined, 'standard', 'legacy', null]) {
+    await assert.rejects(f.app.previewProfileConversion('filters', profile));
+  }
+  const preview = await f.app.previewProfileConversion('filters', 'compact');
+  const metadata = (await f.app.loadChange('filters')).metadata;
+  for (const profileRevision of ['', null, 'not-a-digest']) {
+    assert.throws(() => parseChangeMetadata({ ...metadata, profileRevision }));
+  }
+  const active = await LocalWorkflow.open(f.root, {
+    authority: f.authority, now: () => now,
+    store: { listRuns: async () => ({ status: 'ok', value: [{ state: 'running', quiescence: 'unconfirmed' }] }) },
+  });
+  await assert.rejects(active.commitProfileConversion('filters', 'compact', preview.plan,
+    f.authority.issue(preview.plan.request)), { code: 'conflict' });
+  assert.equal((await f.app.loadChange('filters')).metadata.profile, 'standard');
+  const proposal = path.join(f.root, 'missionspec/changes/filters/proposal.md');
+  await writeFile(proposal, `${await readFile(proposal, 'utf8')}\n`);
+  await assert.rejects(f.app.commitProfileConversion('filters', 'compact', preview.plan,
+    f.authority.issue(preview.plan.request)), { code: 'stale-revision' });
+  const filename = path.join(f.root, 'missionspec/changes/filters/change.yaml');
+  await writeFile(filename, stringify({ ...metadata, promotedContent: digestContent('already promoted') }));
+  await assert.rejects(f.app.previewProfileConversion('filters', 'compact'), { code: 'conflict' });
+  await writeFile(filename, stringify({ ...metadata, schemaVersion: 2 }));
+  await assert.rejects(f.app.previewProfileConversion('filters', 'compact'));
+  await writeFile(filename, stringify({ ...metadata, workflowRevision: digestContent('unverified old workflow') }));
+  await assert.rejects(f.app.previewProfileConversion('filters', 'compact'));
+});
+
 test('Compact explicitly reviews separate-design applicability while retaining combined Design and predecessor provenance', async (t) => {
       const f = await fixture(t);
       const plan = await f.app.previewNewChange({ slug: 'filters', id: 'CHG-remember-filter', specs: ['filters', 'reset'], profile: 'compact' });
@@ -143,6 +241,17 @@ test('explicit expanded verification is part of the one tasks artifact and canno
   let current = await f.app.loadChange('filters');
   assert.equal(current.implementationReady, true);
   assert.equal(current.analysis.checks.length, 2);
+  const originalDocuments = current.documents;
+  const originalOutputs = current.metadata.nodes.find((node) => node.node === 'tasks').outputs;
+  for (const target of ['compact', 'standard']) {
+    const preview = await f.app.previewProfileConversion('filters', target);
+    await f.app.commitProfileConversion('filters', target, preview.plan, f.authority.issue(preview.plan.request));
+    current = await f.app.loadChange('filters');
+    assert.deepEqual(current.documents, originalDocuments);
+    assert.deepEqual(current.metadata.nodes.find((node) => node.node === 'tasks').outputs, originalOutputs);
+    assert.equal(current.analysis.checks.length, 2);
+  }
+  assert.equal(current.implementationReady, true);
   await writeFile(path.join(f.root, taskSources[1].path), taskSources[1].content.replace('Check reset persistence', 'Review changed reset behavior'));
   current = await f.app.loadChange('filters');
   assert.equal(current.implementationReady, false);
@@ -162,6 +271,26 @@ test('explicit expanded verification is part of the one tasks artifact and canno
       };
       return { ...f, store, checks, input, register };
     }
+
+    test('profile round trips leave retained run evidence intact but ineligible for the new workflow revision', async (t) => {
+      const f = await checkFixture(t);
+      const registration = await f.register(f.input);
+      const collection = await f.checks.previewCollection('filters', 'RUN-before-profile', [registration]);
+      const collected = await f.checks.collect('filters', 'RUN-before-profile', [registration], f.authority.issue(collection.request));
+      const evidence = ok(await f.store.readEvidence(collected.evidence[0]));
+      const raw = await readFile(path.join(f.root, evidence.storage.path), 'utf8');
+      for (const target of ['compact', 'standard']) {
+        const preview = await f.app.previewProfileConversion('filters', target);
+        await f.app.commitProfileConversion('filters', target, preview.plan, f.authority.issue(preview.plan.request));
+      }
+      await assert.rejects(f.app.verify('filters', collected.runId, collected.evidence), { code: 'stale-revision' });
+      assert.deepEqual(ok(await f.store.readEvidence(collected.evidence[0])), evidence);
+      assert.equal(await readFile(path.join(f.root, evidence.storage.path), 'utf8'), raw);
+      const next = await f.checks.previewCollection('filters', 'RUN-after-profile', [registration]);
+      assert.notEqual(digestApprovalRequest(next.request), digestApprovalRequest(collection.request));
+      await assert.rejects(f.checks.collect('filters', 'RUN-after-profile', [registration],
+        f.authority.issue(collection.request)), { code: 'scope-exceeded' });
+    });
 
     test('real registered local subprocesses retain actual output and observed exit/source bindings, not caller success', async (t) => {
       const f = await checkFixture(t);

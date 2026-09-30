@@ -138,6 +138,8 @@ jobs:
         run: npm run build
       - name: Exercise actual concurrent replacements and native recovery
         run: node --test --test-concurrency=1 tests/windows-file-races.test.mjs
+      - name: Qualify reviewed Windows profile conversion
+        run: node --test --test-concurrency=1 tests/windows-profile-conversion.test.mjs
   windows-writer-instance:
     name: Windows writer-instance qualification
     runs-on: windows-latest

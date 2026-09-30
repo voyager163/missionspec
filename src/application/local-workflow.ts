@@ -343,6 +343,49 @@ export class LocalWorkflow {
     return readFile(new URL(`../../assets/workflows/${profile}/workflow.yaml`, import.meta.url), 'utf8');
   }
 
+  async previewProfileConversion(slug: string, profile: unknown) {
+    const target = parseWorkflowProfile(profile);
+    if (profile === undefined) throw new WorkflowError('invalid-input', 'Select an explicit target profile.');
+    const change = await this.loadChange(slug);
+    if (target === change.metadata.profile) throw new WorkflowError('invalid-input', 'The change already uses the selected profile.');
+    if (change.metadata.promotedContent !== null) {
+      throw new WorkflowError('conflict', 'Already promoted changes cannot change profile. Preserve that history and create a new change.');
+    }
+    const workflow = parseArtifactWorkflow(await this.workflowSource(target));
+    const metadata = parseChangeMetadata({
+      ...change.metadata, profile: target, workflowRevision: workflow.revision,
+      // Bind each conversion to its preimage so a round trip cannot revive old grants or evidence.
+      profileRevision: digestContent(JSON.stringify({
+        previousMetadata: change.metadataFile.digest, profile: target, workflow: workflow.revision,
+      })),
+      nodes: change.metadata.nodes.map((node) => {
+        const { applicability: _old, ...required } = node;
+        return required;
+      }),
+    });
+    const content = yaml(metadata);
+    const next = await this.loadChange(slug, [], new Map([[change.metadataFile.path, content]]));
+    const plan = makeFilePlan({
+      workspace: change.workspace, guards: change.guards, operation: 'revise', purpose: 'artifact-edit',
+      mutations: [writeMutation(change.metadataFile.path, change.metadataFile.digest, content, 'configuration')],
+    });
+    return {
+      from: change.metadata.profile, to: target, plan,
+      readiness: next.readiness, implementationReady: next.implementationReady,
+      documentsModified: false, projectDefaultChanged: false, authorityIssued: false,
+      priorRevisionBoundRecords: 'stale-not-deleted' as const,
+      designApplicability: 'required-until-explicitly-reviewed' as const,
+    };
+  }
+
+  async commitProfileConversion(slug: string, profile: unknown, preview: FilePlan, approval: ApprovalReference) {
+    const current = await this.previewProfileConversion(slug, profile);
+    if (current.plan.digest !== preview.digest) {
+      throw new WorkflowError('stale-revision', 'Profile conversion inputs changed; review a new conversion.');
+    }
+    return this.files.commit(current.plan, approval);
+  }
+
   async loadChange(slug: string, effects: readonly RequestedEffect[] = [], overlay: ReadonlyMap<ProjectPath, string> = new Map()) {
     return this.observeChange(slug, effects, overlay);
   }
@@ -397,6 +440,7 @@ export class LocalWorkflow {
       workflow: digestContent(JSON.stringify({
         workflow: workflow.revision, id: metadata.id, nodes: metadata.nodes, sourcePaths: metadata.sourcePaths,
         questions: metadata.questions, principles: principles?.digest ?? 'absent',
+        ...(metadata.profileRevision === undefined ? {} : { profileRevision: metadata.profileRevision }),
       })),
     };
     const origins = new Set<ContentDigest>([admittedSource ?? sourceRevision]);
@@ -455,7 +499,8 @@ export class LocalWorkflow {
     const definition = change.metadata.nodes.find((entry) => entry.node === node);
     if (selected !== undefined && definition === undefined) throw new ContractError('node', 'unknown artifact node');
     return {
-      next: change.readiness.next, selected: definition?.node ?? null, stop: 'one-ready-artifact', templateVersion: ARTIFACT_TEMPLATE_VERSION,
+      profile: change.metadata.profile, next: change.readiness.next, selected: definition?.node ?? null,
+      stop: 'one-ready-artifact', templateVersion: ARTIFACT_TEMPLATE_VERSION,
       authorityIssued: false, implementationStarted: false,
       templates: definition?.outputs.map((path) => ({
         path, content: renderArtifactTemplate({

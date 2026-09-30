@@ -508,6 +508,7 @@ test('read-only helpers, retained-evidence verification, controls, utilities and
     [['convergence', 'private-change'], { file: 'review.json', preview: true }],
     [['draft', 'private-change'], { preview: true }], [['archive', 'private-change'], { preview: true }],
     [['draft'], { help: true }], [['draft'], { version: true }],
+    [['change', 'profile', 'private-change'], { preview: true, profile: 'compact' }],
   ];
   const output = await f.run(`
     import assert from 'node:assert/strict';
@@ -544,15 +545,19 @@ test('stateful capture, patch, collection and convergence map canonical operatio
       const values = { 'no-telemetry': true, ...(command === 'convergence' ? { file: 'private.json' } : {}) };
       assert.equal(await observeCliOperation([command, 'private-change'], values, '0.0.0', async () => result), result);
     }
+    const converted = { state: 'committed', transactionId: 'private-transaction' };
+    assert.equal(await observeCliOperation(['change', 'profile', 'private-change'],
+      { 'no-telemetry': true, profile: 'compact' }, '0.0.0', async () => converted), converted);
   `);
   const lines = output.stderr.split('\n').filter((line) => line.startsWith('{"contractVersion":')).map(JSON.parse);
   const stopped = lines.filter((line) => line.code === 'operation-stopped');
-  assert.equal(lines.filter((line) => line.code === 'operation-started').length, 8);
+  assert.equal(lines.filter((line) => line.code === 'operation-started').length, 9);
   assert.deepEqual(stopped.map((line) => [line.operation, line.engine, line.severity]), [
     ['draft', 'specification', 'information'], ['draft', 'specification', 'warning'],
     ['implement', 'execution', 'information'], ['implement', 'execution', 'warning'],
     ['verify', 'verification', 'information'], ['verify', 'verification', 'warning'],
     ['verify', 'verification', 'information'], ['verify', 'verification', 'warning'],
+    ['revise', 'specification', 'information'],
   ]);
   assert.doesNotMatch(output.stderr, /private-change|private-transaction|RUN-private|EVD-private|private.json/u);
   assert.deepEqual(await readdir(f.root), []);

@@ -33,6 +33,7 @@ export const previewSchema = z.object({
       specs: z.array(path).min(1).max(128), sourcePaths: z.array(path).max(128).optional(),
       verificationPlan: z.boolean().optional(),
     }).strict(),
+    z.object({ kind: z.literal('profile-conversion'), change, profile: z.enum(['standard', 'compact']) }).strict(),
     z.object({
       kind: z.literal('artifact'), change, artifact, mode: z.enum(['draft', 'capture', 'revise']),
       files: z.array(document).min(1).max(128),
@@ -181,6 +182,11 @@ export function createMcpWorkflows(
             ...(action.verificationPlan === undefined ? {} : { verificationPlan: action.verificationPlan }),
           });
           return prepare(value, value);
+        }
+        case 'profile-conversion': {
+          const value = await workflow.previewProfileConversion(action.change, action.profile);
+          return prepare(value, value.plan, (approval) =>
+            workflow.commitProfileConversion(action.change, action.profile, value.plan, approval));
         }
         case 'artifact': {
           const value = await workflow.previewArtifact(action.change, action.artifact, documents(action.files), { mode: action.mode });

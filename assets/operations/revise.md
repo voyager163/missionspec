@@ -41,6 +41,15 @@ without applying it or claiming affected approvals were updated.
    Separate deterministic diagnostics from semantic findings and report the
    impact that still requires human review.
 
+For an explicit Standard/Compact profile change, use
+`missionspec change profile <slug> --profile <standard|compact> --preview`
+and its independently confirmed apply route, rather than editing metadata by
+hand. This converts only current version-1, unpromoted changes and preserves
+Markdown and IDs. Recheck the target readiness: design text is not moved,
+missing sections are not generated, and a Compact design skip needs fresh
+review. Prior revision-bound evidence and approvals remain historical, even
+after converting back. Unknown schemas and promoted changes are not migrated.
+
 ## Stop boundary
 
 Stop after the scoped document patch and impact report. No code edits, project

@@ -35,6 +35,7 @@ export interface ChangeMetadata {
   readonly slug: ChangeSlug;
   readonly profile: WorkflowProfile;
   readonly workflowRevision: ContentDigest;
+  readonly profileRevision?: ContentDigest;
   readonly sourcePaths: readonly ProjectPath[];
   readonly nodes: readonly NodeCapture[];
   readonly baseline: readonly { readonly path: ProjectPath; readonly digest: ContentDigest | 'absent' }[];
@@ -61,7 +62,7 @@ export function parseProjectMetadata(source: string): unknown {
 }
 
 export function parseChangeMetadata(value: unknown): ChangeMetadata {
-  const data = record(value, 'change', ['schemaVersion', 'id', 'slug', 'profile', 'workflowRevision', 'sourcePaths', 'nodes', 'baseline', 'questions', 'promotedContent']);
+  const data = record(value, 'change', ['schemaVersion', 'id', 'slug', 'profile', 'workflowRevision', 'profileRevision', 'sourcePaths', 'nodes', 'baseline', 'questions', 'promotedContent']);
   if (data.schemaVersion !== 1) throw new ContractError('change.schemaVersion', 'unsupported change metadata; no migration attempted');
   const slug = parseChangeSlug(data.slug);
   const prefix = `missionspec/changes/${slug}/`;
@@ -154,6 +155,7 @@ export function parseChangeMetadata(value: unknown): ChangeMetadata {
     schemaVersion: 1, id: parseId('change', data.id), slug,
     profile: oneOf(data.profile, ['standard', 'compact'], 'profile'),
     workflowRevision: parseDigest(data.workflowRevision), sourcePaths, nodes, baseline, questions,
+    ...(data.profileRevision === undefined ? {} : { profileRevision: parseDigest(data.profileRevision) }),
     promotedContent: data.promotedContent === null ? null : parseDigest(data.promotedContent),
   });
 }

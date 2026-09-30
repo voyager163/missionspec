@@ -19,7 +19,7 @@ export async function runMutation(
 ): Promise<unknown> {
   const [command, slug] = positionals;
   const permitted: Readonly<Record<string, readonly string[]>> = {
-    init: ['profile'], change: ['profile', 'spec', 'source', 'verification-plan'], draft: ['artifact'], capture: ['artifact'], revise: ['artifact'],
+    init: ['profile'], change: slug === 'profile' ? ['profile'] : ['profile', 'spec', 'source', 'verification-plan'], draft: ['artifact'], capture: ['artifact'], revise: ['artifact'],
     'draft-all': [], recover: [], applicability: ['reason', 'required'], approval: [], discover: ['file'], principles: ['file'], clarify: ['file'],
     check: ['file'], collect: ['registration', 'run'], accept: ['run', 'evidence'],
     patch: ['file', 'task', 'run', 'evidence'],
@@ -62,6 +62,15 @@ export async function runMutation(
       return { state: 'revoked', reference };
     }
     if (slug === undefined && !['init', 'principles'].includes(command ?? '')) throw new WorkflowError('invalid-input', 'Select an explicit change or transaction.');
+    if (command === 'change' && slug === 'profile') {
+      if (positionals.length !== 3 || values.profile === undefined) {
+        throw new WorkflowError('invalid-input', 'Use change profile <slug> --profile standard|compact [--preview].');
+      }
+      const preview = await workflow.previewProfileConversion(positionals[2]!, values.profile);
+      if (values.preview) return preview;
+      const approval = await confirm(preview.plan.request, preview, preview.plan);
+      return await workflow.commitProfileConversion(positionals[2]!, values.profile, preview.plan, approval);
+    }
     if (command === 'patch') {
       if (positionals.length !== 2 || values.file === undefined || values.task === undefined ||
           values.run === undefined && values.evidence !== undefined) throw new WorkflowError('invalid-input', 'Use patch <slug> --task <TSK-id> --file <inert-proposal.json>; predecessor evidence also requires --run.');
