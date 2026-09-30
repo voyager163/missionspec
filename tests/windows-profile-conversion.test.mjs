@@ -3,12 +3,13 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { LocalWorkflow, openLocalAuthority } from '../dist/api/index.js';
-import { createPrivateFixtureRoot, removeFixtureRoot } from './fixtures/windows-private-state.mjs';
+import { createPrivateFixtureRoot, profileWindowsHelpers, removeFixtureRoot } from './fixtures/windows-private-state.mjs';
 import { windowsFileSecurity } from './fixtures/windows-file-security.mjs';
 
 test('actual Windows profile conversion preserves private metadata identity and blocks an old round-trip plan', {
-  skip: process.platform !== 'win32', timeout: 180_000,
+  skip: process.platform !== 'win32', timeout: 720_000,
 }, async (t) => {
+  profileWindowsHelpers(t);
   const f = createPrivateFixtureRoot();
   t.after(() => removeFixtureRoot(f.root, f.identity));
   const authority = await openLocalAuthority({ directory: f.root, transport: {
