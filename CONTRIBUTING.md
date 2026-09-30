@@ -105,6 +105,10 @@ The workflow also restores the isolated ingestion service's own dependencies,
 runs its local tests, and runs static infrastructure-as-code tests, without Azure
 authentication or deployment. These are separate checks; the root command does
 not substitute for their results when changing operator components.
+Repository/service checks and the full ARM suite run in separate ten-minute
+jobs on both Linux and macOS. The existing required `Repository checks`
+contexts aggregate both complete workload matrices and fail unless both
+succeed; splitting workloads does not skip tests or increase a job timeout.
 
 Operator sources are excluded from the CLI package. Access checkout-only
 `services/`, `infrastructure/`, `src/`, and `scripts/` paths through a source

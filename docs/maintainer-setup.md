@@ -210,6 +210,15 @@ write/TTY tests or implying Windows ACL qualification. The observed required
 identities above are specific to the qualified revision. Matrix expansion and
 workflow revisions can alter the names; coordinate any rename with the ruleset.
 
+The existing Linux/macOS required contexts are explicit aggregate gates over
+the `Repository contracts` and `Telemetry ARM policy` workload matrices.
+Both workloads retain their ten-minute limits and all original commands.
+The aggregate runs with `always()` and succeeds only when both complete
+matrices report `success`; failure, cancellation, skipped work and missing
+results cannot become a green gate. Repository validation tests enforce this
+wiring, both OS entries, default event-source checkout, and complete suites.
+No required context or ruleset entry is replaced by an intermediate job.
+
 `Windows private-state qualification` exercises actual NTFS/SID/ACL storage and
 directory barriers. `Windows held-handle race qualification` exercises concurrent
 file/ancestor replacement and recoverable publication; it is a prerequisite for
@@ -219,7 +228,11 @@ their actual successful reports and GitHub App identities; never substitute
 local Windows skips or an older protocol's results.
 
 The local definition uses full-SHA-pinned actions and a read-only token, without
-secrets or caches. Its isolated service and static infrastructure checks do not
+secrets or cross-run fixture reuse. Its test-only generated-JSON cache lives
+under the protected checkout's ignored operator-private directory, verifies
+ownership, ancestry and content, and removes per-run contents after workers
+finish. It is not a store of live evidence or passed test results.
+Its isolated service and static infrastructure checks do not
 authenticate to Azure or deploy anything. This definition does not change
 repository-wide action settings or establish that a hosted run has succeeded.
 
@@ -235,7 +248,9 @@ Two additional hosted definitions are present:
 These definitions passed the recorded GitHub runs. A successful CodeQL analysis/upload
 does not mean it found no vulnerabilities. Qualify actual finding behavior,
 dependency graph coverage (including the isolated service), fork behavior, and
-any native code-scanning merge protection separately. License metadata checks
+any native code-scanning merge protection separately. Inspect findings on the
+PR merge ref as well as its head: an empty default-branch or head-only query
+does not clear the native PR check. License metadata checks
 are assistance, not blanket legal clearance. Do not widen privileges or silently
 waive unknown coverage to make a required check pass.
 

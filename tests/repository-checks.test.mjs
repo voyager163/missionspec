@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { spawnSync } from 'node:child_process';
 import { parse } from '@babel/parser';
 import {
   checkIssueForm, checkLocalLink, checkRepository, checkWorkflow, markdownInfo, parseYaml
@@ -25,15 +26,15 @@ function validWorkflow() {
   };
 }
 
-test('installed tarballs run once per OS within existing required contexts after the locked cache restore', async () => {
+test('installed tarballs run once per OS behind the existing required contexts after locked restore', async () => {
   const file = '.github/workflows/repository.yml';
   const workflow = parseYaml(await readFile(new URL(`../${file}`, import.meta.url), 'utf8'), file);
   assert.deepEqual(checkWorkflow(workflow, file), []);
   const install = 'npm run check:package -- --install';
   const jobs = Object.entries(workflow.jobs).filter(([, job]) => job.steps.some((step) => step.run === install));
-  assert.deepEqual(jobs.map(([id]) => id), ['repository-checks', 'windows-read-only']);
+  assert.deepEqual(jobs.map(([id]) => id), ['repository-contracts', 'windows-read-only']);
   const mutations = [
-    (value) => { value.jobs['repository-checks'].steps = value.jobs['repository-checks'].steps.filter((step) => step.run !== install); },
+    (value) => { value.jobs['repository-contracts'].steps = value.jobs['repository-contracts'].steps.filter((step) => step.run !== install); },
     (value) => { value.jobs['windows-read-only'].steps.find((step) => step.run === install).run = 'npm run check:package'; },
     (value) => { value.jobs['windows-read-only'].steps.unshift({ run: install }); },
     (value) => { value.jobs['windows-read-only'].steps.find((step) => step.run?.startsWith('npm ci')).run = 'npm ci'; },
@@ -107,10 +108,64 @@ test('Windows lifecycle qualification runs the complete native suite behind the 
 
 test('telemetry CI checks only the canonical ARM definition without executing cloud operations', async () => {
   const workflow = parseYaml(await readFile(new URL('../.github/workflows/repository.yml', import.meta.url), 'utf8'), 'repository workflow');
-  const steps = workflow.jobs['repository-checks'].steps;
+  const steps = workflow.jobs['telemetry-arm'].steps;
   const telemetry = steps.find((step) => step.name === 'Check telemetry infrastructure policy without cloud access');
   assert.equal(telemetry.run, 'node --test infrastructure/arm/telemetry/tests/*.test.mjs');
   assert(steps.every((step) => !step.run?.includes('infrastructure/opentofu/telemetry')));
+});
+
+test('required repository contexts fail closed over both complete OS workload matrices', async () => {
+  const file = '.github/workflows/repository.yml';
+  const workflow = parseYaml(await readFile(new URL(`../${file}`, import.meta.url), 'utf8'), file);
+  assert.deepEqual(checkWorkflow(workflow, file), []);
+  assert.deepEqual(workflow.jobs['repository-checks'].needs, ['repository-contracts', 'telemetry-arm']);
+  for (const id of ['repository-contracts', 'telemetry-arm', 'repository-checks']) {
+    assert.equal(workflow.jobs[id]['timeout-minutes'], 10);
+    assert.deepEqual(workflow.jobs[id].strategy.matrix.os, ['ubuntu-latest', 'macos-latest']);
+  }
+  const mutations = [
+    value => { delete value.jobs['repository-checks'].if; },
+    value => { value.jobs['repository-checks'].if = '${{ success() }}'; },
+    value => { value.jobs['repository-checks'].needs = ['repository-contracts']; },
+    value => { value.jobs['repository-checks'].steps[0].run = 'exit 0'; },
+    value => { value.jobs['repository-checks'].steps[0].run = value.jobs['repository-checks'].steps[0].run.replace('&&', '||'); },
+    value => { value.jobs['repository-checks'].steps[0].env.ARM_RESULT = 'success'; },
+    value => { value.jobs['repository-checks'].steps[0]['continue-on-error'] = true; },
+    value => { value.jobs['repository-checks'].steps[0].if = '${{ success() }}'; },
+    value => { value.jobs['repository-checks'].defaults = { run: { shell: 'bash' } }; },
+    value => { value.jobs['telemetry-arm']['timeout-minutes'] = 15; },
+    value => { value.jobs['telemetry-arm'].needs = 'repository-contracts'; },
+    value => { value.jobs['telemetry-arm'].strategy.matrix.os = ['ubuntu-latest']; },
+    value => { value.jobs['telemetry-arm'].strategy['fail-fast'] = true; },
+    value => { value.jobs['telemetry-arm'].steps.at(-1).run = 'node --test infrastructure/arm/telemetry/tests/private-link.test.mjs'; },
+    value => { value.jobs['telemetry-arm'].steps.at(-1)['working-directory'] = 'different'; },
+    value => { value.jobs['telemetry-arm'].steps[0].with.ref = 'develop'; },
+    value => { value.jobs['repository-contracts'].steps.pop(); },
+    value => { value.jobs['repository-contracts'].steps[0].with.ref = 'develop'; },
+    value => { value.jobs['repository-contracts'].strategy.matrix.exclude = [{ os: 'macos-latest' }]; },
+  ];
+  for (const mutate of mutations) {
+    const changed = structuredClone(workflow); mutate(changed);
+    assert.notEqual(checkWorkflow(changed, file).length, 0, mutate.toString());
+  }
+});
+
+test('the POSIX aggregate command rejects failure, cancellation, skipped and missing dependency results', {
+  skip: process.platform === 'win32',
+}, async () => {
+  const file = '.github/workflows/repository.yml';
+  const workflow = parseYaml(await readFile(new URL(`../${file}`, import.meta.url), 'utf8'), file);
+  assert.deepEqual(checkWorkflow(workflow, file), []);
+  const command = workflow.jobs['repository-checks'].steps[0].run;
+  for (const contracts of ['success', 'failure', 'cancelled', 'skipped', 'timed_out', '']) {
+    for (const arm of ['success', 'failure', 'cancelled', 'skipped', 'timed_out', '']) {
+      const result = spawnSync('/bin/sh', ['-c', command], {
+        env: { CONTRACTS_RESULT: contracts, ARM_RESULT: arm }, encoding: 'utf8',
+      });
+      assert.ifError(result.error);
+      assert.equal(result.status === 0, contracts === 'success' && arm === 'success');
+    }
+  }
 });
 
 test('Windows CLI observability runs its complete native suite within a bounded job', async () => {

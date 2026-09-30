@@ -92,8 +92,10 @@ authority, call a model or exercise a production telemetry endpoint.
 
 ### Hosted install coverage
 
-The existing repository workflow now runs the explicit install command after
-its locked, lifecycle-script-disabled restore and normal checks:
+The repository workflow runs the explicit install command after its locked,
+lifecycle-script-disabled restore and normal checks. Linux/macOS perform it
+once in each `Repository contracts` worker; the existing required contexts
+aggregate those workers with the complete independent ARM matrix:
 
 | Existing required context | Runner | Installed executable surface |
 | --- | --- | --- |
@@ -101,8 +103,11 @@ its locked, lifecycle-script-disabled restore and normal checks:
 | `Repository checks (macos-latest)` | `macos-latest` | POSIX npm executable link |
 | `Windows read-only compatibility` | `windows-latest` | npm `.cmd` and PowerShell `.ps1` shims |
 
-This adds no job or required context, does not rename any of the 22 required
-contexts, and does not repeat installs across the independent Windows
+All 22 required context names remain unchanged. The aggregate gates explicitly
+fail if either workload matrix fails, is cancelled or skipped, or has no
+successful result. The workloads keep their ten-minute job limits rather
+than reducing coverage or extending timeouts. Installs are not repeated across
+the independent Windows
 private-state/console/execution jobs. It uses the existing restore's npm cache;
 no new dependency, lifecycle script, registry/authentication probe or online
 fallback is enabled. Missing-cache, missing-shim, guard, exit-code or content

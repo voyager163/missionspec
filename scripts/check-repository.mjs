@@ -1,6 +1,7 @@
 import { readFile, readdir, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 import GithubSlugger from 'github-slugger';
 import { fromMarkdown } from 'mdast-util-from-markdown';
 import { parseDocument } from 'yaml';
@@ -137,7 +138,9 @@ export function checkWorkflow(workflow, file = 'workflow') {
       Object.keys(job.permissions).length === 3 &&
       job.permissions.contents === 'read' && job.permissions.actions === 'read' &&
       job.permissions['security-events'] === 'write';
-    if ((job.permissions !== undefined && !codeqlPermissions) || job.environment !== undefined || job.if !== undefined ||
+    const aggregate = file === '.github/workflows/repository.yml' && name === 'repository-checks';
+    if ((job.permissions !== undefined && !codeqlPermissions) || job.environment !== undefined ||
+        (job.if !== undefined && !(aggregate && job.if === '${{ always() }}')) ||
         job['continue-on-error'] !== undefined) {
       problems.push(`${file}: ${name} must not elevate, use environments, skip, or mask failures`);
     }
@@ -207,7 +210,7 @@ export function checkWorkflow(workflow, file = 'workflow') {
     const install = 'npm run check:package -- --install';
     const restore = 'npm ci --ignore-scripts --no-audit --no-fund';
     const targets = {
-      'repository-checks': { name: 'Repository checks (${{ matrix.os }})', check: 'npm run check' },
+      'repository-contracts': { name: 'Repository contracts (${{ matrix.os }})', check: 'npm run check' },
       'windows-read-only': { name: 'Windows read-only compatibility', check: 'npm run check:portable' },
     };
     for (const [name, expected] of Object.entries(targets)) {
@@ -227,13 +230,48 @@ export function checkWorkflow(workflow, file = 'workflow') {
         problems.push(`${file}: ${name} must run one explicit offline installed-tarball check after locked restore and repository checks`);
       }
     }
-    const matrixJob = workflow.jobs['repository-checks'];
-    const matrix = matrixJob?.strategy?.matrix;
-    if (matrixJob?.['runs-on'] !== '${{ matrix.os }}' ||
-        JSON.stringify(matrix?.os) !== JSON.stringify(['ubuntu-latest', 'macos-latest']) ||
-        matrix?.include !== undefined || matrix?.exclude !== undefined ||
-        workflow.jobs['windows-read-only']?.['runs-on'] !== 'windows-latest') {
-      problems.push(`${file}: installed-tarball coverage requires the existing Linux/macOS matrix and Windows read-only runner`);
+    const matrixJobs = {
+      'repository-contracts': 'Repository contracts (${{ matrix.os }})',
+      'telemetry-arm': 'Telemetry ARM policy (${{ matrix.os }})',
+      'repository-checks': 'Repository checks (${{ matrix.os }})',
+    };
+    for (const [name, expectedName] of Object.entries(matrixJobs)) {
+      const job = workflow.jobs[name];
+      if (job?.name !== expectedName || job['runs-on'] !== '${{ matrix.os }}' ||
+          job['timeout-minutes'] !== 10 || job.defaults !== undefined || job.env !== undefined ||
+          !isDeepStrictEqual(job.strategy, { 'fail-fast': false, matrix: { os: ['ubuntu-latest', 'macos-latest'] } }) ||
+          (name !== 'repository-checks' && (job.needs !== undefined || job.if !== undefined))) {
+        problems.push(`${file}: ${name} requires both original OS runners and its unchanged ten-minute independent budget`);
+      }
+    }
+    if (workflow.jobs['windows-read-only']?.['runs-on'] !== 'windows-latest') {
+      problems.push(`${file}: installed-tarball coverage requires the existing Windows read-only runner`);
+    }
+    const aggregate = workflow.jobs['repository-checks'];
+    if (!isDeepStrictEqual(aggregate?.needs, ['repository-contracts', 'telemetry-arm']) ||
+        aggregate?.if !== '${{ always() }}' || !isDeepStrictEqual(aggregate?.steps, [{
+          name: 'Require complete repository and ARM checks',
+          env: { CONTRACTS_RESULT: "${{ needs['repository-contracts'].result }}", ARM_RESULT: "${{ needs['telemetry-arm'].result }}" },
+          run: 'test "$CONTRACTS_RESULT" = success && test "$ARM_RESULT" = success',
+        }])) {
+      problems.push(`${file}: existing required repository contexts must explicitly fail unless both complete dependency matrices succeed`);
+    }
+    const serviceRestore = 'npm --prefix services/telemetry-ingest ci --ignore-scripts --no-audit --no-fund';
+    const workloads = {
+      'repository-contracts': [restore, 'npm run check', install, serviceRestore,
+        'node scripts/check-licenses.mjs --scope service', 'npm --prefix services/telemetry-ingest test'],
+      'telemetry-arm': [restore, 'npm run build', serviceRestore, 'node --test infrastructure/arm/telemetry/tests/*.test.mjs'],
+    };
+    for (const [name, commands] of Object.entries(workloads)) {
+      const steps = workflow.jobs[name]?.steps;
+      const runs = Array.isArray(steps) ? steps.filter(step => step?.run !== undefined) : [];
+      const checkouts = Array.isArray(steps) ? steps.filter(step =>
+        typeof step?.uses === 'string' && step.uses.startsWith('actions/checkout@')) : [];
+      if (!isDeepStrictEqual(runs.map(step => step.run), commands) ||
+          runs.some(step => Object.keys(step).some(key => !['name', 'run'].includes(key))) ||
+          checkouts.length !== 1 || !isDeepStrictEqual(checkouts[0]?.with, { 'persist-credentials': false })) {
+        problems.push(`${file}: ${name} must run its complete unchanged workload from the event source without step overrides`);
+      }
     }
     if (Object.entries(workflow.jobs).some(([name, job]) =>
       !Object.hasOwn(targets, name) && Array.isArray(job?.steps) && job.steps.some((step) => step?.run === install))) {
