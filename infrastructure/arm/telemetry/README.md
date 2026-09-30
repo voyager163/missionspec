@@ -17,6 +17,55 @@ CLI long-running poller. Requests remain at most 15 seconds within the same
 120-second phase-check deadline; response handles and full results stay private.
 The qualified local Azure CLI Python bridge is part of the source hash.
 
+## Private Link replacement
+
+The alternate Queue Private Link path has separate deterministic planning,
+current-state readback, control-plane execution and runtime qualification
+modules. A generated plan is never an execution approval:
+
+```sh
+node infrastructure/arm/telemetry/controller.mjs preview-private-link private-link-migration <private-revision>
+node infrastructure/arm/telemetry/controller.mjs check-private-link-plan private-link-migration <private-revision>
+```
+
+These operations require private `config.json`, `private-link-input.json` and
+`private-link-context.json`; see the operator guide for their exact scope.
+They validate retained source/history and the unresolved physical-target fence,
+then create or recheck one immutable plan without contacting Azure. The plan
+contains exact proposed ARM resources, ordered retirement/creation stages,
+cost assumptions and required evidence. It never marks the failed NSP write
+successful, consumes its intent, approves a subnet, or grants effects.
+
+Control-plane commands select one fixed migration stage:
+
+```sh
+node infrastructure/arm/telemetry/controller.mjs prepare-private-link <stage> <private-revision>
+node infrastructure/arm/telemetry/controller.mjs check-private-link <stage> <private-revision>
+node infrastructure/arm/telemetry/controller.mjs execute-private-link <stage> <private-revision>
+node infrastructure/arm/telemetry/controller.mjs reconcile-private-link <stage> <private-revision>
+node infrastructure/arm/telemetry/controller.mjs recover-private-link <stage> <private-revision>
+```
+
+The runtime routes separately prepare/publish an image, prepare/create the
+disabled replacement receiver and prepare/qualify a bounded window:
+`prepare-private-link-image`, `publish-private-link-image`,
+`prepare-private-link-receiver`, `create-private-link-receiver`,
+`prepare-private-link-window`, and `qualify-private-link-window`, each with
+the fixed selector `private-link-runtime` and a private revision directory.
+Interrupted work uses `prepare-private-link-disable-recovery`,
+`recover-private-link-disable`, or the read-only
+`reconcile-private-link-receiver`; these consume fixed retained intents,
+not caller-supplied mutation requests.
+The temporary public-control app has separate
+`prepare-private-link-public-cleanup`, `recover-private-link-public-cleanup`
+and read-only `reconcile-private-link-public-probe` routes, with the same
+fixed runtime selector. Cleanup never enables ingestion.
+Neither a local plan nor a successful setup stage authorizes runtime work.
+Effects require exact reviewed bindings, published source, fresh evidence,
+durable physical-target intent fencing and retained outcomes. Unknown
+submissions cannot be replayed by changing a directory or review wrapper.
+The operator guide documents the input artifacts and recovery boundaries.
+
 The completed budget/core/workspace-access/data/upload-role/assignments/disabled-app
 sequence uses `reconcile disabled-app` for a read-only, unapproved version-3 proposal.
 The one-image publication is independently verified history, not an ARM phase.

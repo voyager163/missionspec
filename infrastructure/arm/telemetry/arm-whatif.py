@@ -22,6 +22,12 @@ PHASE_CODES = {"core": "co", "workspace-access": "wa", "data": "da", "upload-rol
                "disabled-queue-upgrade": "qu", "queue-storage": "qs", "queue-role": "qr", "queue-assignment": "qa",
                "nsp-empty-boundary": "ne", "nsp-enforced-association": "na",
                "nsp-subscription-admission": "ns", "nsp-subscription-readmit": "nr"}
+PRIVATE_LINK_STAGES = {"private-link-create-network": 4, "private-link-create-queue-endpoint": 5,
+                      "private-link-create-environment": 6, "private-link-create-queue-role": 11,
+                      "private-link-assign-queue-role": 12, "private-link-create-disabled-receiver": 14}
+PRIVATE_LINK_RUNTIME = {"private-link-runtime-create-disabled": "c",
+                        "private-link-runtime-enable": "e", "private-link-runtime-disable": "d",
+                        "private-link-runtime-create-public-probe": "p"}
 GUID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
 
 
@@ -70,9 +76,25 @@ def static_template(value):
 
 
 def fixed_deployment_name(request):
-    require(request.get("phase") in PHASE_CODES and isinstance(request.get("namePrefix"), str)
+    phase = request.get("phase")
+    require(phase in {**PHASE_CODES, **PRIVATE_LINK_STAGES, **PRIVATE_LINK_RUNTIME} and isinstance(request.get("namePrefix"), str)
             and re.fullmatch(r"missionspec-[a-z0-9]{2,10}", request["namePrefix"])
             and isinstance(request.get("runId"), str) and GUID.fullmatch(request["runId"]), "FIXED_WHATIF_NAME_REQUIRED")
+    if phase in PRIVATE_LINK_STAGES:
+        require(isinstance(request.get("migrationKey"), str) and re.fullmatch(r"[0-9a-f]{12}", request["migrationKey"])
+                and all(isinstance(request.get(key), str) and re.fullmatch(r"[0-9a-f]{64}", request[key])
+                        for key in ("migrationPlanSha256", "migrationContextSha256"))
+                and request.get("windowInstanceId") is None and request.get("predecessorSha256") is None,
+                "FIXED_PRIVATE_LINK_WHATIF_REQUIRED")
+        return request["namePrefix"] + "-pl-" + request["migrationKey"] + "-" + str(PRIVATE_LINK_STAGES[phase])
+    if phase in PRIVATE_LINK_RUNTIME:
+        instance = request.get("windowInstanceId")
+        require(isinstance(instance, str)
+                and re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", instance)
+                and instance != request["runId"]
+                and all(isinstance(request.get(key), str) and re.fullmatch(r"[0-9a-f]{64}", request[key])
+                        for key in ("predecessorSha256", "runtimeTargetSha256")), "FIXED_PRIVATE_LINK_RUNTIME_WHATIF_REQUIRED")
+        return request["namePrefix"] + "-plr-" + instance.replace("-", "") + "-" + PRIVATE_LINK_RUNTIME[phase]
     if request["phase"] in ("synthetic-admission", "synthetic-disable", "disabled-image-upgrade", "disabled-image-rollback", "disabled-queue-upgrade", "nsp-subscription-readmit"):
         instance = request.get("windowInstanceId")
         require(isinstance(instance, str)
@@ -118,6 +140,33 @@ def poll_url(value, subscription, location):
     return absolute
 
 
+def request_context(request):
+    extra_fields = ("migrationKey", "migrationPlanSha256", "migrationContextSha256") if request.get("version") == 3 else (
+        ("runtimeTargetSha256",) if request.get("version") == 4 else ())
+    require(set(request) == {"version", "action", "subscriptionId", "tenantId", "location", "namePrefix", "runId",
+                            "phase", "scope", "phaseSha256", "body", "bodySha256", "pollUrl", "initialResponseFile",
+                            "contextSha256", "timeoutMs", "deadlineMs", "windowInstanceId", "predecessorSha256"} | set(extra_fields), "CLOSED_WHATIF_INPUT_REQUIRED")
+    require(type(request["version"]) is int and request["version"] in (2, 3, 4) and request["action"] in ("start", "poll")
+            and all(isinstance(request[key], str) and GUID.fullmatch(request[key])
+                    for key in ("subscriptionId", "tenantId", "runId"))
+            and request["location"] == "australiaeast"
+            and re.fullmatch(r"missionspec-[a-z0-9]{2,10}", request["namePrefix"])
+            and request["phase"] in (PRIVATE_LINK_RUNTIME if request["version"] == 4 else
+                                    PRIVATE_LINK_STAGES if request["version"] == 3 else PHASE_CODES), "FIXED_WHATIF_SCOPE_REQUIRED")
+    expected_scope = "subscription" if request["phase"] in ("upload-role", "project-budget", "queue-role", "private-link-create-queue-role") else "group"
+    require(request["scope"] == expected_scope, "FIXED_WHATIF_SCOPE_REQUIRED")
+    name = fixed_deployment_name(request)
+    require(all(isinstance(request[key], str) and re.fullmatch(r"[0-9a-f]{64}", request[key])
+                for key in ("phaseSha256", "bodySha256", "contextSha256")), "WHATIF_CONTEXT_INVALID")
+    fingerprint = "\n".join("" if request[key] is None else str(request[key]) for key in
+                           ("subscriptionId", "tenantId", "location", "namePrefix", "runId", "phase", "scope", "phaseSha256", "bodySha256",
+                            "windowInstanceId", "predecessorSha256") + extra_fields)
+    require(hashlib.sha256(fingerprint.encode()).hexdigest() == request["contextSha256"], "WHATIF_CONTEXT_INVALID")
+    require(type(request["timeoutMs"]) is int and 0 < request["timeoutMs"] <= 15000
+            and type(request["deadlineMs"]) is int, "BOUNDED_WHATIF_DEADLINE_REQUIRED")
+    return name, expected_scope
+
+
 def main():
     logging.disable(logging.CRITICAL)
     warnings.filterwarnings("ignore")
@@ -140,26 +189,7 @@ def main():
     require(re.fullmatch(r"whatif-request-[0-9a-f-]+\.json", request_path.name)
             and re.fullmatch(r"whatif-response-[0-9a-f-]+\.json", response_path.name), "PRIVATE_WHATIF_FILENAMES_REQUIRED")
     request = private_read(request_path)
-    require(set(request) == {"version", "action", "subscriptionId", "tenantId", "location", "namePrefix", "runId",
-                            "phase", "scope", "phaseSha256", "body", "bodySha256", "pollUrl", "initialResponseFile",
-                            "contextSha256", "timeoutMs", "deadlineMs", "windowInstanceId", "predecessorSha256"}, "CLOSED_WHATIF_INPUT_REQUIRED")
-    require(request["version"] == 2 and request["action"] in ("start", "poll")
-            and all(isinstance(request[key], str) and GUID.fullmatch(request[key])
-                    for key in ("subscriptionId", "tenantId", "runId"))
-            and request["location"] == "australiaeast"
-            and re.fullmatch(r"missionspec-[a-z0-9]{2,10}", request["namePrefix"])
-            and request["phase"] in PHASE_CODES, "FIXED_WHATIF_SCOPE_REQUIRED")
-    expected_scope = "subscription" if request["phase"] in ("upload-role", "project-budget", "queue-role") else "group"
-    require(request["scope"] == expected_scope, "FIXED_WHATIF_SCOPE_REQUIRED")
-    name = fixed_deployment_name(request)
-    require(all(isinstance(request[key], str) and re.fullmatch(r"[0-9a-f]{64}", request[key])
-                for key in ("phaseSha256", "bodySha256", "contextSha256")), "WHATIF_CONTEXT_INVALID")
-    fingerprint = "\n".join("" if request[key] is None else str(request[key]) for key in
-                           ("subscriptionId", "tenantId", "location", "namePrefix", "runId", "phase", "scope", "phaseSha256", "bodySha256",
-                            "windowInstanceId", "predecessorSha256"))
-    require(hashlib.sha256(fingerprint.encode()).hexdigest() == request["contextSha256"], "WHATIF_CONTEXT_INVALID")
-    require(type(request["timeoutMs"]) is int and 0 < request["timeoutMs"] <= 15000
-            and type(request["deadlineMs"]) is int, "BOUNDED_WHATIF_DEADLINE_REQUIRED")
+    name, expected_scope = request_context(request)
     end = min(request["deadlineMs"], int(time.time() * 1000) + request["timeoutMs"])
     subscription = request["subscriptionId"]
     scope = "/subscriptions/" + subscription

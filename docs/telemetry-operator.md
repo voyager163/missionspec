@@ -15,6 +15,224 @@ Retired-route approvals are terminal; none authorizes the direct ARM route.
 
 ## Local review and authority
 
+### Private Link replacement
+
+The alternative to the held NSP rule is a new VNet-integrated external
+Container Apps receiver and a Queue private endpoint, with ordinary queue DNS
+and unchanged TLS/UAMI authentication. The existing environment cannot change
+network type in place. This design does not make the public receiver, registry
+or Monitor upload paths private. It does not qualify the undocumented NSP
+`appliesTo` field.
+
+The checkout-only `private-link.mjs` planner provides two fixed operator
+operations:
+
+```sh
+node infrastructure/arm/telemetry/controller.mjs preview-private-link private-link-migration <private-revision>
+node infrastructure/arm/telemetry/controller.mjs check-private-link-plan private-link-migration <private-revision>
+```
+
+These two planning commands are local-only, require no cloud credentials and make no Azure calls.
+They use the existing private-directory/file rules. Preview writes one
+create-exclusive `private-link-plan.json`; check revalidates that same plan
+without overwriting it. Both recheck the existing unresolved NSP physical-target
+head and historical source digests. A changed source, original attempt, pending
+head, input or proposed resource invalidates the plan. No approval file, grant,
+new execution receipt, resolved intent or enabled runtime is produced.
+
+Supply unchanged `config.json`, plus these two closed inputs:
+
+- `private-link-input.json`: `version: 2`, `addresses` and `overlapDays` (1-7)
+  for the current version-3 plan with a patched temporary public-control app.
+  Input version 1 still reproduces the historical version-2 plan without that
+  app; it cannot qualify the current paired runtime workflow.
+  `addresses` has explicit canonical RFC1918 IPv4 `vnet` (/24), `apps` (/26)
+  and `endpoint` (/28) CIDRs plus `knownAddressSpaces` (at most 512).
+  Subnets must be contained and disjoint; known overlaps and documented ACA
+  reserved ranges are rejected. No CIDRs are chosen automatically. An empty
+  known-address list is **not** verified absence of corporate/peered networks;
+  complete current address review remains mandatory before deployment.
+- `private-link-context.json`: complete `adoption`, `network`, `original`,
+  `pendingHead`, `receiver` and `queueProfile` objects. These are the existing
+  storage adoption, three-record Enforced-empty NSP history, the dispatched
+  sole-rule attempt stopped with `NSP_RULE_DRIFT`, its exact pending head, the
+  qualified historical disabled prepared-image receiver record, and the
+  source/notices/fixture-bound queued image profile. No scalar `qualified` flag
+  or replacement history is accepted. The current Defender-preserving adoption
+  and historical versions retain their original schemas.
+
+The plan keeps the stopped rule attempt and original journals unmodified.
+Its proposed rule deletion binds the exact old rule ID; it explicitly requires
+fresh raw preimage/generation review **without** treating its undocumented
+selector as semantically accepted. The fixed order is:
+
+| Stage group | Proposed scope and required boundary |
+| --- | --- |
+| Review migration | Separate address, cost, inherited-policy, permissions and retirement decisions; exact new names absent; old receiver disabled |
+| Migration budgets | Separate project/telemetry budget phases set 425/375 USD, preserve the 50 USD state budget and exact notifications/periods, and include the new managed group |
+| Retire NSP rule | Exact rule DELETE only after new approval; Network absence and empty/converged Storage rules; no deployment replay or inferred data-plane denial |
+| Network and endpoint | One dedicated VNet with two subnets; apps subnet delegated to `Microsoft.App/environments`; one `queue` private endpoint, private DNS zone/link and zone group |
+| Replacement environment | Consumption workload profile with external HTTPS ingress; explicit platform-managed group and budget-filter coverage review |
+| Retire association | Set Storage public networking to `Disabled` while association remains Enforced and rule-free, then delete only the association and verify effective configuration removal |
+| Retire empty NSP | Profile then perimeter, only after exact inventories show no remaining associations, rules or links |
+| Queue role/assignment | Reuse the existing minimal metadata/add/process permissions and exact queue scope; no new identity or broad account grant |
+| Image and receiver | Separately reviewed one-copy publication of the existing qualified queued digest; new app stays disabled and retains the old app's identity, limits, probes and privacy contract |
+| Qualification | Actual private DNS/IP/TLS/UAMI path, intended success and unintended denial, bounded durable ACK/worker/Logs evidence, final disabled/503; no Blob test or production endpoint |
+| Old-resource retirement | Separately reviewed old disabled app/environment deletion only after replacement qualification; never directly delete platform-managed resources or evidence |
+| Steady budgets | Separate project/telemetry phases set 375/325 USD only after old-environment retirement; state budget stays 50 USD |
+| Migration record | Append-only retirement/migration receipt with exact physical-target compare-and-swap; original NSP execution stays failed and cannot be replayed |
+
+The proposed app name/FQDN is new. Registry/DCR/workspace, original identities,
+storage account/queue, image history and raw evidence are preserved. No NAT,
+Firewall, VPN/peering, Front Door, DNS Private Resolver, Blob endpoint, extra
+subscription rule or production CLI activation is generated by the planner.
+The ordinary queue URL is preserved; never use a `privatelink` hostname as the
+SDK endpoint.
+
+Costs retain the existing USD349.37 conservative base, plus USD10.34 modeled
+Private Link/DNS/data allowances: USD359.71 steady state, USD367.01 with one
+day overlap, or USD410.75 with seven days in the historical plan. The current
+plan adds a USD1 reserve for one temporary public-control app: USD368.01 for
+one day or USD411.75 for seven days, with steady state unchanged. Its planned
+15-minute lifetime is enforced for qualification, not an automatic Azure
+expiry; unresolved cleanup remains a recovery and cost obligation.
+USD375 steady and USD425 migration are **planning allowances**, not hard caps
+or approvals embedded in a generated plan. The base is
+not freshly repriced, and residual unverified NSP charges, taxes and new
+policy-mandated infrastructure are excluded. The new managed resource group
+must be explicitly included in budget coverage; neither filter nor amount is
+silently changed. Steady-state cost requires confirmed old-resource retirement.
+
+**Local preparation is not live execution.** The control-plane driver exposes
+`prepare-private-link`, `check-private-link`, `execute-private-link`,
+`reconcile-private-link`, `recover-private-link` and `retire-private-link`,
+with one fixed control stage and a private revision directory. The router reads
+`private-link-control-context.json` (`plan` and original `origin`),
+`private-link-control-evidence.json`, and closed
+`private-link-control-inputs.json`. It never accepts a replacement transport or
+test options from JSON. Checks retain exact preimages, policy, permissions,
+providers, cost evidence and native previews before an independently bound
+phase approval permits the one recorded effect.
+
+Control dispatch journals distinguish known non-submission, possible
+submission, and an invocation that was reached. A durable version-3
+`dispatchAttempted: null` marker and rollout deadline are saved before the
+HTTP call; a crash cannot turn a possibly submitted request into a safe retry.
+The first request uses that fresh rollout deadline, not time left over from
+the final preflight. Legacy false markers remain ambiguous. Resource absence
+alone cannot downgrade either kind of unknown outcome. A reviewed
+known-not-submitted resolution records no phase success and does not itself
+authorize another attempt.
+
+Explicit continuation is limited to a conclusively never-invoked version-3
+attempt. Use a **new private revision directory**, preserving the original
+artifacts, context and successful chain. Forward control inputs may include
+`continuation` with exactly `version: 1`,
+`kind: "reviewed-private-link-no-submission-continuation"`, a new UUIDv4
+`attemptId`, the complete no-submission `resolution`, and its exact `review`.
+The review binds the resolution, prior intent and pending head, unchanged
+fixed phase/request, current source, new attempt ID and expiry. Both fresh
+preflight and the final check must establish deployment absence and repeat
+the normal permission, policy, price, source and target-state checks.
+Admission atomically checks the prior physical head and creates a distinct
+immutable attempt; it does not overwrite the old stage archive or grant
+automatic retries. Legacy false, durable unknown and attempted markers cannot
+use this path. Reconciliation/recovery instead consume any continuation from
+their original recorded phase, not an additional outer input.
+
+Runtime has separate `prepare-private-link-image` / `publish-private-link-image`,
+`prepare-private-link-receiver` / `create-private-link-receiver`, and
+`prepare-private-link-window` / `qualify-private-link-window` commands, with
+the fixed selector `private-link-runtime`. Their closed
+`private-link-runtime-inputs.json` references the exact candidate, local uploader
+or fixed diagnostic transport, current control evidence and action-specific
+approval. Publication preserves both original manifests and separately records
+the returned third-image candidate as `private-link-published-candidate.json`.
+Preparation never implies publication, deployment or enabled ingestion.
+
+The six forward runtime commands accept an optional `runtimeReview` containing
+exactly `policyRevision`, `costReview`, and `costEvidence`. This supports a
+freshly reviewed policy source or renewed cost evidence without rewriting the
+original plan, candidate, successful control records, or failed attempts.
+`policyRevision` is null only when retaining the original policy source;
+otherwise it is the explicit identical-plan/new-source review. The complete
+three-record object is included in the runtime approval binding. Current proof
+must echo it exactly and all forward-dispatch source, price and review-expiry
+checks still apply. Recovery and reconciliation commands reject `runtimeReview`
+and retain their frozen-source, backend-independent scope. Arbitrary `options`,
+IO adapters and transport replacements are never accepted from JSON.
+
+Versioned native what-if contexts distinguish the new fixed control phases
+and UUID-bound replacement-app phases from historical collector requests.
+The same authenticated request bounds, no-redirect/no-retry transport and
+full static payload review apply. Direct budget/PATCH/DELETE previews bind
+their precise request and preimage rather than pretending they are ARM what-if.
+Budget changes are separately enumerated: migration project/telemetry/state
+425/375/50 USD, then steady 375/325/50 after old-environment retirement, with
+exact notification/period preservation and the new managed group in coverage.
+Budget alerts do not impose a hard spending cap.
+
+Private-path qualification uses the replacement receiver and a temporary,
+always-disabled `-public-probe` app in the existing non-VNet environment as
+separate probes with the **same authorized ingest identity and patched image**.
+The old receiver stays disabled and unchanged; its expired historical scan is
+not refreshed by rewriting the original candidate. A separate current scan
+found two High-severity Debian OpenSSL findings in that old image, so it is not
+used to execute the diagnostic. Normal DNS and verified TLS must resolve/reach the private
+endpoint successfully from the replacement and deny the original public path.
+No DNS override, IP-address URL, disabled certificate validation, or unrelated
+principal's authentication failure is accepted as network-denial evidence.
+The two bounded event requests still belong to the product receiver, not the
+metadata probes. Unqualified or unknown delivery produces a failed operator
+result with retained evidence, never a success-shaped CLI response.
+The temporary app has no enable action or synthetic event requests. Its exact
+creation and cleanup are reviewed and journaled separately; confirmed absence
+is required before qualification and retirement of the old environment.
+The window approval object has exactly `enable`, `disable`, `publicCreate`
+and `publicDelete` reviews. Preparation binds both the fixed
+`create-public-probe` phase and the exact bodyless app DELETE; the immutable
+window intent retains both before creation.
+
+Interrupted enabled windows have separate
+`prepare-private-link-disable-recovery` and `recover-private-link-disable`
+routes, using the fixed original intent and preplanned false request rather
+than a caller-supplied ARM body. An expired approval requires a fresh,
+exactly bound false-only recovery review. Recovery cannot enable ingestion or
+rewrite the original failed result. `reconcile-private-link-receiver` performs
+read-only reconciliation of an unknown create outcome; it cannot submit that
+creation again.
+
+Temporary-app recovery is separate from disabling the replacement receiver:
+`prepare-private-link-public-cleanup` takes only `recoveryId`,
+`recover-private-link-public-cleanup` takes `recoveryId` and an exact
+`private-link-recover-public-cleanup` approval, and
+`reconcile-private-link-public-probe` takes only `reconciliationId`.
+These use `private-link-runtime` and the original private revision directory.
+The driver loads the fixed retained intent, physical target and creation
+generation; none accepts an arbitrary resource ID, request body or transport.
+Cleanup does not require healthy queue delivery and cannot enable either app.
+An unknown create/delete outcome stays recorded as unknown unless separately
+reconciled; a new recovery receipt never rewrites the failed attempt.
+Before DELETE, both normal cleanup and recovery compare the current app's
+creation identity against the immutable creation receipt. A deleted and
+recreated app at the same ID is not the original cleanup target. If the initial
+create produced no receipt, the original delete authority cannot be used:
+read-only cleanup preparation must retain the exact observed generation and
+a new cleanup approval must bind its hash. That review authorizes only the
+fixed observed public-probe generation; it neither proves original creation
+nor grants generic resource adoption.
+
+The existing NSP failure remains an original failure. Supersession and
+retirement records are appended separately, bound to its physical target and
+pending intent. No generic NSP rule-shape waiver or repeated original PUT is
+introduced. Live resource and runtime evidence, not the planner's requirement
+strings, determines whether each phase is qualified.
+
+References: [Storage private endpoints](https://learn.microsoft.com/en-us/azure/storage/common/storage-private-endpoints),
+[ACA network immutability](https://learn.microsoft.com/en-us/azure/container-apps/networking),
+[ACA VNet requirements](https://learn.microsoft.com/en-us/azure/container-apps/custom-virtual-networks),
+[Storage NSP precedence](https://learn.microsoft.com/en-us/azure/storage/common/storage-network-security-perimeter).
+
 ### Durable queue design: separate topology and third-image review
 
 The approved architecture keeps the CLI's **1,000 ms** request deadline and

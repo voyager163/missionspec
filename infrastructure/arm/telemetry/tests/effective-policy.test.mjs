@@ -583,7 +583,8 @@ test('source publication hashes include the new imported module but preserve pre
     assert.equal(await publishedSourceDigest(commit, run), expected.digest('hex'));
   }
   const current = createHash('sha256');
-  for (const name of [...names, 'effective-policy.mjs', ...nspNames, 'queue-defender.mjs']) current.update(name).update(await readFile(prefix + name));
+  for (const name of [...names, 'effective-policy.mjs', ...nspNames, 'queue-defender.mjs', 'private-link.mjs', 'private-link-whatif.mjs',
+    'private-link-controller.mjs', 'private-link-readback.mjs', 'private-link-runtime.mjs', 'private-link-exec.py']) current.update(name).update(await readFile(prefix + name));
   current.update(json(contract));
   assert.equal(await sourceDigest(), current.digest('hex'));
 });

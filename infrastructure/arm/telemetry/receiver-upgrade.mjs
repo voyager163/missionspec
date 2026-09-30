@@ -56,6 +56,15 @@ const hash = value => typeof value === 'string' && /^[0-9a-f]{64}$/u.test(value)
 const imageHash = value => typeof value === 'string' && /^sha256:[0-9a-f]{64}$/u.test(value);
 const repository = 'missionspec/telemetry-ingest';
 const clearance = 'CONDITIONAL_DISABLED_OR_SYNTHETIC_ONLY';
+export const OVERLAY_NATIVE_COVERAGE = 'partial; verified Debian OpenSSL security overlay only; unchanged Node/OpenSSL and prior V8/glibc conditions retained';
+const OVERLAY_PATHS = Object.freeze([
+  'usr/lib/x86_64-linux-gnu/engines-3/afalg.so', 'usr/lib/x86_64-linux-gnu/engines-3/loader_attic.so',
+  'usr/lib/x86_64-linux-gnu/engines-3/padlock.so', 'usr/lib/x86_64-linux-gnu/libcrypto.so.3',
+  'usr/lib/x86_64-linux-gnu/libssl.so.3', 'usr/share/doc/libssl3t64/NEWS.Debian.gz',
+  'usr/share/doc/libssl3t64/changelog.Debian.gz', 'usr/share/doc/libssl3t64/changelog.gz',
+  'usr/share/doc/libssl3t64/copyright', 'usr/share/lintian/overrides/libssl3t64',
+  'var/lib/dpkg/status.d/libssl3t64', 'var/lib/dpkg/status.d/libssl3t64.md5sums',
+]);
 const wireSchema = JSON.parse(readFileSync(new URL('../../../assets/schemas/telemetry-event.schema.json', import.meta.url), 'utf8'));
 
 function parseArtifact(bytes) {
@@ -147,6 +156,8 @@ export function verifyReceiverProfile(profile) {
   }
   if (!isDeepStrictEqual(counts, scan.counts)) fail('RECEIVER_SCAN_COUNTS_INVALID');
   const qualification = parseArtifact(profile.qualification.reportJson), artifact = qualification.artifact;
+  const overlay = qualification.runtimeSecurityOverlay;
+  if (overlay !== undefined) verifyReceiverSecurityOverlay(profile, overlay);
   if (profile.qualification.reportSha256 !== digest(profile.qualification.reportJson) ||
       qualification.result !== 'LOCAL_TECHNICAL_QUALIFICATION_PASSED_CONDITIONAL_RELEASE_ONLY' ||
       artifact?.manifest !== profile.manifestDigest || artifact.config !== profile.configDigest ||
@@ -162,7 +173,9 @@ export function verifyReceiverProfile(profile) {
       qualification.scanner?.dbMetadata?.UpdatedAt !== scan.databaseUpdatedAt ||
       qualification.scanner?.dbMetadata?.NextUpdate !== scan.databaseNextUpdate ||
       qualification.scanner.localOnlyScan !== true ||
-      qualification.nativeCoverage !== 'partial; no new native patch proof; CVE-2026-91745, CVE-2026-93377, CVE-2026-91728 conditions retained' ||
+      qualification.nativeCoverage !== (overlay === undefined
+        ? 'partial; no new native patch proof; CVE-2026-91745, CVE-2026-93377, CVE-2026-91728 conditions retained'
+        : OVERLAY_NATIVE_COVERAGE) ||
       qualification.priorUnknownGlibcCaveatWaived !== false || qualification.productionAzureQualification !== false ||
       qualification.publicationAuthorized !== false || qualification.azureEffects !== false ||
       qualification.oldImagePreserved !== RECEIVER_DIGEST ||
@@ -182,6 +195,45 @@ export function verifyReceiverProfile(profile) {
   return { digest: profile.manifestDigest, configSha256: profile.configDigest, configUser: config.config.User,
     command: config.config.Cmd, manifest, nativeV8Clearance: clearance,
     ...(queued ? { queueRuntime: QUEUE_RUNTIME } : {}) };
+}
+
+export function verifyReceiverSecurityOverlay(profile, proof) {
+  closed(proof, ['version', 'kind', 'manifestDigest', 'configDigest', 'sourceLockJson', 'sourceLockSha256',
+    'observedFiles', 'maintainerScriptsExecuted', 'nodePatched', 'bundledOpenSSLVersion']);
+  if (proof.version !== 1 || proof.kind !== 'observed-debian-openssl-security-overlay' ||
+      profile.version !== 2 || profile.kind !== QUEUE_PROFILE_KIND ||
+      proof.manifestDigest !== profile.manifestDigest || proof.configDigest !== profile.configDigest ||
+      typeof proof.sourceLockJson !== 'string' || proof.sourceLockSha256 !== digest(proof.sourceLockJson) ||
+      proof.sourceLockSha256 !== profile.source.files['services/telemetry-ingest/runtime-sources.lock.json'] ||
+      proof.maintainerScriptsExecuted !== false || proof.nodePatched !== false ||
+      proof.bundledOpenSSLVersion !== '3.5.8') fail('RECEIVER_SECURITY_OVERLAY_INVALID');
+  const lock = parseArtifact(proof.sourceLockJson), overlay = lock.overlay;
+  closed(lock, ['schemaVersion', 'platform', 'identities', 'node', 'distroless', 'packages', 'sources',
+    'artifacts', 'files', 'blobs', 'provenanceLimits', 'overlay']);
+  closed(overlay, ['schemaVersion', 'method', 'artifact', 'snapshotApi', 'basePackage', 'files']);
+  if (lock.schemaVersion !== 2 || lock.platform !== 'linux/amd64' ||
+      overlay.schemaVersion !== 1 || overlay.method !== 'debian-security-binary-overlay' ||
+      overlay.artifact !== 'libssl3t64_3.5.7-1~deb13u3_amd64.deb' ||
+      overlay.basePackage?.name !== 'libssl3t64' || overlay.basePackage.version !== '3.5.7-1~deb13u2' ||
+      !Array.isArray(lock.packages) ||
+      lock.packages.filter(value => value.name === 'libssl3t64').length !== 1 ||
+      lock.packages.filter(value => value.name === 'libssl3t64' && value.version === '3.5.7-1~deb13u3' &&
+        value.architecture === 'amd64' && value.source === 'openssl' && value.sourceVersion === value.version).length !== 1 ||
+      !Array.isArray(lock.artifacts) || lock.artifacts.filter(value => value.filename === overlay.artifact &&
+        value.role === 'debian-security-binary' && value.sha256 === 'ff16bc048bcd7d1b256094450b79c77947d8e76fe2a24bd99b91021d591fa074' &&
+        value.size === 2458176).length !== 1 ||
+      !Array.isArray(overlay.files) || !Array.isArray(proof.observedFiles) ||
+      overlay.files.length !== OVERLAY_PATHS.length || proof.observedFiles.length !== OVERLAY_PATHS.length ||
+      !isDeepStrictEqual(overlay.files.map(value => value.path).sort(), [...OVERLAY_PATHS].sort())) fail('RECEIVER_SECURITY_OVERLAY_INVALID');
+  const seen = new Set();
+  for (const file of proof.observedFiles) {
+    closed(file, ['path', 'sha256', 'size', 'mode']);
+    const expected = overlay.files.find(value => value.path === file.path);
+    if (!expected || seen.has(file.path) || !hash(file.sha256) || file.sha256 !== expected.sha256 ||
+        !Number.isSafeInteger(file.size) || file.size <= 0 || file.size !== expected.size ||
+        file.mode !== 0o644 || file.mode !== expected.mode) fail('RECEIVER_SECURITY_OVERLAY_INVALID');
+    seen.add(file.path);
+  }
 }
 
 export function verifyQueueEncodingProof(proof) {

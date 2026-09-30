@@ -22,6 +22,10 @@ import { NSP_PHASES, NSP_LIMITS, NSP_API, NSP_STORAGE_API, nspTopology, emptyNsp
   nspState, nspReadinessBinding, verifyNspPreview, nspIntentKey, nspPendingHead, nspTargetKey, nspIntentFence, verifyNspApiCatalog } from './nsp.mjs';
 import { NspController, nspTransport, collectNspObservation, checkNspReadOnly, collectNspPermissions, collectNspEffectivePolicies } from './nsp-controller.mjs';
 import { collectNspReconciliation, qualifyNspReconciliation, verifyNspStoppedAttempt } from './nsp-reconciliation.mjs';
+import { buildPrivateLinkPlan, verifyPrivateLinkPlan, verifyPrivateLinkContext, PRIVATE_LINK_CONTROL_STAGES } from './private-link.mjs';
+import { privateLinkWhatIfContext, privateLinkRuntimeWhatIfContext } from './private-link-whatif.mjs';
+import { runPrivateLinkControl } from './private-link-controller.mjs';
+import { runPrivateLinkRuntime } from './private-link-runtime.mjs';
 import { PHASES, buildPhase, deploymentName, validateConfig, ids, digest, json, fail, sameId, storageContract, firstReleaseCost, assertOwned, RECEIVER_COMMAND,
   closed, budgetConfiguration, projectBudgetFilter, verifyFoundationBudgets, reconciliationBinding, assignmentRoleTargets,
   TOGGLE_PHASES, SYNTHETIC_LIMITS, SYNTHETIC_FIXTURES, requireAccess, validateWindowInstance } from './definition.mjs';
@@ -157,7 +161,9 @@ export async function load(directory, name, optional = false) {
 }
 export async function sourceDigest() {
   const names = ['definition.mjs', 'policy.mjs', 'controller.mjs', 'arm-whatif.py', 'receiver-upgrade.mjs', 'durable-queue.mjs', 'effective-policy.mjs',
-    'queue-adoption.mjs', 'nsp.mjs', 'nsp-controller.mjs', 'nsp-reconciliation.mjs', 'queue-defender.mjs'];
+    'queue-adoption.mjs', 'nsp.mjs', 'nsp-controller.mjs', 'nsp-reconciliation.mjs', 'queue-defender.mjs',
+    'private-link.mjs', 'private-link-whatif.mjs', 'private-link-controller.mjs', 'private-link-readback.mjs',
+    'private-link-runtime.mjs', 'private-link-exec.py'];
   const hash = createHash('sha256');
   for (const name of names) hash.update(name).update(await readFile(resolve(here, name)));
   const contract = await storageContract(); hash.update(json(contract));
@@ -320,6 +326,8 @@ async function azureCliPython() {
   fail('AZURE_CLI_RUNTIME_UNAVAILABLE');
 }
 export function whatIfRequestContext(c, phase) {
+  if (phase.kind === 'fixed-private-link-control-phase') return privateLinkWhatIfContext(c, phase);
+  if (phase.kind === 'fixed-private-link-runtime-phase') return privateLinkRuntimeWhatIfContext(c, phase);
   const r = ids(c), scope = ['project-budget', 'upload-role', 'queue-role'].includes(phase.phase) ? 'subscription' : 'group';
   const instance = phase.windowInstance ?? (phase.phase === 'nsp-subscription-readmit' ? phase.instance : undefined);
   if ([...TOGGLE_PHASES, ...IMAGE_PHASES].includes(phase.phase)) validateWindowInstance(c, phase.windowInstance);
@@ -349,7 +357,9 @@ export async function authenticatedWhatIfRequest(context, directory, operation, 
   else if (pollUrl !== null || initialResponseFile !== null) fail('WHAT_IF_START_HANDLE_FORBIDDEN');
   const id = randomUUID(), requestFile = `whatif-request-${id}.json`, responseFile = `whatif-response-${id}.json`;
   const { body, ...fields } = context;
-  await saveImmutable(directory, requestFile, { version: 2, ...fields, action, body: action === 'start' ? body : null,
+  await saveImmutable(directory, requestFile, { version: Object.hasOwn(fields, 'runtimeTargetSha256') ? 4
+    : Object.hasOwn(fields, 'migrationKey') ? 3 : 2,
+    ...fields, action, body: action === 'start' ? body : null,
     pollUrl, initialResponseFile, timeoutMs, deadlineMs });
   const started = performance.now();
   try {
@@ -599,8 +609,14 @@ export async function publishedSourceDigest(commitSha, run = execute) {
     if (controller.includes("from './effective-policy.mjs'")) {
       hash.update('effective-policy.mjs').update(await file('infrastructure/arm/telemetry/effective-policy.mjs'));
     }
-    for (const name of ['queue-adoption.mjs', 'nsp.mjs', 'nsp-controller.mjs', 'nsp-reconciliation.mjs', 'queue-defender.mjs']) {
-      if (controller.includes(`from './${name}'`)) hash.update(name).update(await file(`infrastructure/arm/telemetry/${name}`));
+    for (const name of ['queue-adoption.mjs', 'nsp.mjs', 'nsp-controller.mjs', 'nsp-reconciliation.mjs', 'queue-defender.mjs',
+      'private-link.mjs', 'private-link-whatif.mjs', 'private-link-controller.mjs', 'private-link-readback.mjs',
+      'private-link-runtime.mjs']) {
+      const dependency = name === 'private-link-readback.mjs' ? 'private-link-controller.mjs' : name;
+      if (controller.includes(`from './${dependency}'`)) hash.update(name).update(await file(`infrastructure/arm/telemetry/${name}`));
+    }
+    if (controller.includes("from './private-link-runtime.mjs'")) {
+      hash.update('private-link-exec.py').update(await file('infrastructure/arm/telemetry/private-link-exec.py'));
     }
     const schema = JSON.parse(await file('assets/schemas/telemetry-event.schema.json'));
     const columns = JSON.parse(await file('services/telemetry-ingest/schema/storage-columns.json'));
@@ -2547,17 +2563,112 @@ export function queueTopologyIO(c, phase, receipts, origin, evidence, directory,
   };
 }
 
+export async function preparePrivateLinkLocal(c, operation, directory, io = {
+  read: load, save: saveImmutable, source: sourceDigest, readHead: readNspHead, lookup: publishedSourceDigest,
+}) {
+  if (!['preview-private-link', 'check-private-link-plan'].includes(operation)) fail('FIXED_PHASE_COMMAND_REQUIRED');
+  const source = await io.source(), context = await io.read(directory, 'private-link-context.json');
+  verifyPrivateLinkContext(c, context);
+  await io.readHead(context.network, context.pendingHead);
+  await verifyPublishedNspEvidence(c, context.network, context.adoption.topology, context.adoption, io.lookup);
+  if (await io.lookup(context.original.publication.commitSha) !== context.original.publication.sourceSha256) {
+    fail('NSP_ORIGINAL_PUBLISHED_SOURCE_CHANGED');
+  }
+  const input = await io.read(directory, 'private-link-input.json');
+  const plan = buildPrivateLinkPlan(c, context, input, source);
+  const saved = operation === 'check-private-link-plan' ? await io.read(directory, 'private-link-plan.json') : plan;
+  if (!isDeepStrictEqual(saved, plan)) fail('PRIVATE_LINK_PLAN_DRIFT');
+  const result = verifyPrivateLinkPlan(c, context, saved, source);
+  await io.readHead(context.network, context.pendingHead);
+  if (await io.source() !== source) fail('PRIVATE_LINK_SOURCE_CHANGED');
+  if (operation === 'preview-private-link') await io.save(directory, 'private-link-plan.json', plan);
+  return result;
+}
+
+export const PRIVATE_LINK_CONTROL_COMMANDS = Object.freeze({
+  'prepare-private-link': 'prepare', 'check-private-link': 'check', 'execute-private-link': 'execute',
+  'reconcile-private-link': 'reconcile', 'recover-private-link': 'recover', 'retire-private-link': 'retire',
+});
+export const PRIVATE_LINK_RUNTIME_COMMANDS = Object.freeze({
+  'prepare-private-link-image': 'prepare-image', 'publish-private-link-image': 'publish-image',
+  'prepare-private-link-receiver': 'prepare-receiver', 'create-private-link-receiver': 'create-receiver',
+  'prepare-private-link-window': 'prepare-window', 'qualify-private-link-window': 'qualify-window',
+  'prepare-private-link-disable-recovery': 'prepare-disable-recovery',
+  'recover-private-link-disable': 'recover-disable', 'reconcile-private-link-receiver': 'reconcile-receiver',
+  'prepare-private-link-public-cleanup': 'prepare-public-cleanup',
+  'recover-private-link-public-cleanup': 'recover-public-cleanup',
+  'reconcile-private-link-public-probe': 'reconcile-public-probe',
+});
+
+export async function dispatchPrivateLinkOperation(c, operation, stage, directoryArg, io = {
+  directory: privateDirectory, read: load, immutable: saveImmutable, control: runPrivateLinkControl, runtime: runPrivateLinkRuntime,
+}) {
+  const control = Object.hasOwn(PRIVATE_LINK_CONTROL_COMMANDS, operation);
+  const runtime = Object.hasOwn(PRIVATE_LINK_RUNTIME_COMMANDS, operation);
+  if (control ? !PRIVATE_LINK_CONTROL_STAGES.includes(stage) : !runtime || stage !== 'private-link-runtime') {
+    fail('FIXED_PHASE_COMMAND_REQUIRED');
+  }
+  const directory = await io.directory(directoryArg);
+  const context = await io.read(directory, 'private-link-control-context.json');
+  const evidence = await io.read(directory, 'private-link-control-evidence.json');
+  if (control) {
+    const action = PRIVATE_LINK_CONTROL_COMMANDS[operation];
+    const keys = ['publication', 'costReview', 'costEvidence', 'migrationReview'];
+    const inputs = await io.read(directory, 'private-link-control-inputs.json');
+    const fields = action === 'prepare' ? [] : [...keys,
+      ...(['execute', 'retire'].includes(action) ? ['proof', 'approval'] : []),
+      ...(['reconcile', 'recover'].includes(action) ? ['original'] : []),
+      ...(action === 'recover' ? ['proposal', 'recoveryReview'] : []),
+      ...(stage.startsWith('retire-old-') || stage.includes('steady-budget') || stage === 'record-migration' ? ['runtimeCompletion'] : []),
+    ];
+    if (inputs && Object.hasOwn(inputs, 'policyRevision')) fields.push('policyRevision');
+    if (['prepare', 'check', 'execute', 'retire'].includes(action) &&
+        inputs && Object.hasOwn(inputs, 'continuation')) fields.push('continuation');
+    closed(inputs, fields);
+    return io.control(c, context, evidence, stage, action, directoryArg, inputs);
+  }
+  const action = PRIVATE_LINK_RUNTIME_COMMANDS[operation];
+  const inputs = await io.read(directory, 'private-link-runtime-inputs.json');
+  const result = await io.runtime(c, context, evidence, action, directoryArg, inputs);
+  if (action === 'publish-image') await io.immutable(directory, 'private-link-published-candidate.json', result);
+  if (action === 'qualify-window' && result?.outcome !== 'qualified-private-delivery-disabled') {
+    fail('PRIVATE_LINK_WINDOW_STOPPED_INSPECT_RETAINED_RESULT');
+  }
+  return result;
+}
+
 async function main() {
   const [operation, phaseName, directoryArg, ...extra] = process.argv.slice(2);
+  if (Object.hasOwn(PRIVATE_LINK_CONTROL_COMMANDS, operation) || Object.hasOwn(PRIVATE_LINK_RUNTIME_COMMANDS, operation)) {
+    if (!directoryArg || extra.length ||
+        (Object.hasOwn(PRIVATE_LINK_CONTROL_COMMANDS, operation) ? !PRIVATE_LINK_CONTROL_STAGES.includes(phaseName)
+          : phaseName !== 'private-link-runtime')) fail('FIXED_PHASE_COMMAND_REQUIRED');
+    if (Object.entries(process.env).some(([key, value]) => value && /^(CI$|GITHUB_|ACTIONS_|RUNNER_)/u.test(key))) fail('UNTRUSTED_RUNNER_FORBIDDEN');
+    const directory = await privateDirectory(directoryArg), c = validateConfig(await load(directory, 'config.json'));
+    const result = await dispatchPrivateLinkOperation(c, operation, phaseName, directoryArg);
+    console.log(json({ operation, stage: phaseName, resultKind: result?.kind ?? null,
+      resultSha256: digest(json(result)), outcome: result?.outcome ?? null }));
+    return;
+  }
+  const privateLinkOperation = ['preview-private-link', 'check-private-link-plan'].includes(operation);
+  if (privateLinkOperation !== (phaseName === 'private-link-migration')) fail('FIXED_PHASE_COMMAND_REQUIRED');
   if (!['prepare', 'check', 'validate-preview', 'prepare-window', 'run-window', 'execute-disable',
     'reconcile', 'qualify-reconciliation', 'image-before-push', 'image-readback', 'execute',
     'prepare-image', 'check-image', 'execute-image', 'preview-image-publication',
     'preview-queue', 'prepare-queue', 'check-queue', 'execute-queue',
     'observe-queue-adoption', 'adopt-queue-storage', 'preview-nsp', 'prepare-nsp', 'check-nsp', 'execute-nsp',
-    'reconcile-nsp', 'prepare-nsp-reconciliation', 'qualify-nsp-reconciliation', 'check-image-publication'].includes(operation) ||
-      ![...PHASES, ...IMAGE_PHASES, ...QUEUE_PHASES, ...NSP_PHASES].includes(phaseName) || !directoryArg || extra.length) fail('FIXED_PHASE_COMMAND_REQUIRED');
+    'reconcile-nsp', 'prepare-nsp-reconciliation', 'qualify-nsp-reconciliation', 'check-image-publication',
+    'preview-private-link', 'check-private-link-plan'].includes(operation) ||
+      ![...PHASES, ...IMAGE_PHASES, ...QUEUE_PHASES, ...NSP_PHASES, 'private-link-migration'].includes(phaseName) ||
+      !directoryArg || extra.length) fail('FIXED_PHASE_COMMAND_REQUIRED');
   const directory = await privateDirectory(directoryArg), c = validateConfig(await load(directory, 'config.json'));
   if (Object.entries(process.env).some(([key, value]) => value && /^(CI$|GITHUB_|ACTIONS_|RUNNER_)/u.test(key))) fail('UNTRUSTED_RUNNER_FORBIDDEN');
+  if (privateLinkOperation) {
+    await preparePrivateLinkLocal(c, operation, directory);
+    console.log(operation === 'preview-private-link' ? 'PRIVATE_LINK_LOCAL_PLAN_NO_CLOUD_OR_RETIREMENT_AUTHORITY'
+      : 'PRIVATE_LINK_LOCAL_CONTRACT_VALID_CLOUD_STATE_UNVERIFIED');
+    return;
+  }
   if (operation === 'image-readback' && phaseName === 'disabled-queue-upgrade') {
     await captureQueuedPublication(c, await load(directory, 'receiver-candidate.json'), directory);
     console.log('QUEUED_IMAGE_READBACK_CAPTURED_NO_RETRY_OR_ADMISSION_AUTHORITY'); return;
