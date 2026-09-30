@@ -213,6 +213,11 @@ workflow revisions can alter the names; coordinate any rename with the ruleset.
 The existing Linux/macOS required contexts are explicit aggregate gates over
 the `Repository contracts` and `Telemetry ARM policy` workload matrices.
 Both workloads retain their ten-minute limits and all original commands.
+The ARM matrix uses five native Node test shards on each OS, each receiving
+the complete `*.test.mjs` list. Every shard index is mandatory, and the
+repository tests prove that the fixed shard set covers every file exactly
+once. Individual jobs keep the ten-minute bound; no test-name filter or
+partial filename allowlist is substituted for the full suite.
 The aggregate runs with `always()` and succeeds only when both complete
 matrices report `success`; failure, cancellation, skipped work and missing
 results cannot become a green gate. Repository validation tests enforce this

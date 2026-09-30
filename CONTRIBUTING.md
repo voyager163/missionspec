@@ -109,6 +109,8 @@ Repository/service checks and the full ARM suite run in separate ten-minute
 jobs on both Linux and macOS. The existing required `Repository checks`
 contexts aggregate both complete workload matrices and fail unless both
 succeed; splitting workloads does not skip tests or increase a job timeout.
+The ARM matrix partitions the full file glob with all five native Node
+shard indices on each OS; coverage and aggregate wiring are regression-tested.
 
 Operator sources are excluded from the CLI package. Access checkout-only
 `services/`, `infrastructure/`, `src/`, and `scripts/` paths through a source

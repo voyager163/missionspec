@@ -232,14 +232,16 @@ export function checkWorkflow(workflow, file = 'workflow') {
     }
     const matrixJobs = {
       'repository-contracts': 'Repository contracts (${{ matrix.os }})',
-      'telemetry-arm': 'Telemetry ARM policy (${{ matrix.os }})',
+      'telemetry-arm': 'Telemetry ARM policy (${{ matrix.os }}, shard ${{ matrix.shard }}/5)',
       'repository-checks': 'Repository checks (${{ matrix.os }})',
     };
     for (const [name, expectedName] of Object.entries(matrixJobs)) {
       const job = workflow.jobs[name];
       if (job?.name !== expectedName || job['runs-on'] !== '${{ matrix.os }}' ||
           job['timeout-minutes'] !== 10 || job.defaults !== undefined || job.env !== undefined ||
-          !isDeepStrictEqual(job.strategy, { 'fail-fast': false, matrix: { os: ['ubuntu-latest', 'macos-latest'] } }) ||
+          !isDeepStrictEqual(job.strategy, { 'fail-fast': false, matrix: {
+            os: ['ubuntu-latest', 'macos-latest'], ...(name === 'telemetry-arm' ? { shard: [1, 2, 3, 4, 5] } : {}),
+          } }) ||
           (name !== 'repository-checks' && (job.needs !== undefined || job.if !== undefined))) {
         problems.push(`${file}: ${name} requires both original OS runners and its unchanged ten-minute independent budget`);
       }
@@ -260,7 +262,8 @@ export function checkWorkflow(workflow, file = 'workflow') {
     const workloads = {
       'repository-contracts': [restore, 'npm run check', install, serviceRestore,
         'node scripts/check-licenses.mjs --scope service', 'npm --prefix services/telemetry-ingest test'],
-      'telemetry-arm': [restore, 'npm run build', serviceRestore, 'node --test infrastructure/arm/telemetry/tests/*.test.mjs'],
+      'telemetry-arm': [restore, 'npm run build', serviceRestore,
+        'node --test --test-shard=${{ matrix.shard }}/5 infrastructure/arm/telemetry/tests/*.test.mjs'],
     };
     for (const [name, commands] of Object.entries(workloads)) {
       const steps = workflow.jobs[name]?.steps;

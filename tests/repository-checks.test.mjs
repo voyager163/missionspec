@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -110,7 +110,7 @@ test('telemetry CI checks only the canonical ARM definition without executing cl
   const workflow = parseYaml(await readFile(new URL('../.github/workflows/repository.yml', import.meta.url), 'utf8'), 'repository workflow');
   const steps = workflow.jobs['telemetry-arm'].steps;
   const telemetry = steps.find((step) => step.name === 'Check telemetry infrastructure policy without cloud access');
-  assert.equal(telemetry.run, 'node --test infrastructure/arm/telemetry/tests/*.test.mjs');
+  assert.equal(telemetry.run, 'node --test --test-shard=${{ matrix.shard }}/5 infrastructure/arm/telemetry/tests/*.test.mjs');
   assert(steps.every((step) => !step.run?.includes('infrastructure/opentofu/telemetry')));
 });
 
@@ -137,6 +137,10 @@ test('required repository contexts fail closed over both complete OS workload ma
     value => { value.jobs['telemetry-arm'].needs = 'repository-contracts'; },
     value => { value.jobs['telemetry-arm'].strategy.matrix.os = ['ubuntu-latest']; },
     value => { value.jobs['telemetry-arm'].strategy['fail-fast'] = true; },
+    value => { value.jobs['telemetry-arm'].strategy.matrix.shard = [1, 2, 3, 4]; },
+    value => { value.jobs['telemetry-arm'].strategy.matrix.shard = [1, 2, 3, 4, 4]; },
+    value => { value.jobs['telemetry-arm'].steps.at(-1).run =
+      'node --test --test-shard=${{ matrix.shard }}/6 infrastructure/arm/telemetry/tests/*.test.mjs'; },
     value => { value.jobs['telemetry-arm'].steps.at(-1).run = 'node --test infrastructure/arm/telemetry/tests/private-link.test.mjs'; },
     value => { value.jobs['telemetry-arm'].steps.at(-1)['working-directory'] = 'different'; },
     value => { value.jobs['telemetry-arm'].steps[0].with.ref = 'develop'; },
@@ -148,6 +152,38 @@ test('required repository contexts fail closed over both complete OS workload ma
     const changed = structuredClone(workflow); mutate(changed);
     assert.notEqual(checkWorkflow(changed, file).length, 0, mutate.toString());
   }
+});
+
+test('the fixed native ARM shards cover every discovered test file exactly once', async t => {
+  const workflow = parseYaml(await readFile(new URL('../.github/workflows/repository.yml', import.meta.url), 'utf8'), 'repository workflow');
+  const shards = workflow.jobs['telemetry-arm'].strategy.matrix.shard;
+  assert.deepEqual(shards, [1, 2, 3, 4, 5]);
+  const names = (await readdir(new URL('../infrastructure/arm/telemetry/tests/', import.meta.url)))
+    .filter(name => name.endsWith('.test.mjs')).sort();
+  assert(names.length > shards.length);
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'missionspec-shard-coverage-'));
+  t.after(() => rm(directory, { recursive: true }));
+  const files = [];
+  for (const name of names) {
+    const file = path.join(directory, name);
+    await writeFile(file, `import test from 'node:test'; test(${JSON.stringify(name)}, () => {});\n`,
+      { flag: 'wx', mode: 0o600 });
+    files.push(file);
+  }
+  const covered = [];
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  for (const shard of shards) {
+    const result = spawnSync(process.execPath, ['--test', `--test-shard=${shard}/5`, '--test-reporter=tap', ...files],
+      { env, encoding: 'utf8', timeout: 30000, maxBuffer: 1024 * 1024 });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    const selected = [...result.stdout.matchAll(/^# Subtest: (.+)$/gmu)].map(match => match[1]);
+    assert(selected.length > 0);
+    covered.push(...selected);
+  }
+  assert.deepEqual(covered.sort(), names);
+  assert.equal(new Set(covered).size, names.length);
 });
 
 test('the POSIX aggregate command rejects failure, cancellation, skipped and missing dependency results', {
