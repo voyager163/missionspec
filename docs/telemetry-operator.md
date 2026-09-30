@@ -124,6 +124,12 @@ alone cannot downgrade either kind of unknown outcome. A reviewed
 known-not-submitted resolution records no phase success and does not itself
 authorize another attempt.
 
+Provider metadata stays byte-preserved. An explicit `+00:00` UTC suffix, as
+returned by ACR, is equivalent to `Z` for 100ns identity comparisons; other
+offsets or an absent zone are not inferred to be UTC. The separately scoped
+timezone-less ACA creation format remains an opaque recorded identity rather
+than a reconstructed timestamp.
+
 Explicit continuation is limited to a conclusively never-invoked version-3
 attempt. Use a **new private revision directory**, preserving the original
 artifacts, context and successful chain. Forward control inputs may include

@@ -8,6 +8,7 @@ import { privateLinkAzureIO, privateLinkHead, privateLinkTargetKey, readPrivateL
   preparePrivateLinkPhase, checkPrivateLinkPhase, executePrivateLinkPhase, reconcilePrivateLinkPhase,
   recoverPrivateLinkPhase, verifyPrivateLinkContinuation, verifyPrivateLinkControlEvidence, runPrivateLinkControl } from '../private-link-controller.mjs';
 import { privateLinkFixture, privateInput, privateControlChain, privateControlHarness } from './private-link.fixture.mjs';
+import { privateLinkCachedFixture } from './private-link-cache.fixture.mjs';
 
 const hash = value => digest(json(value));
 const f = await privateLinkFixture({ ...privateInput, version: 2 });
@@ -47,15 +48,23 @@ async function noSubmission(t) {
     saveJournal: adapter.saveJournal, resolveNoSubmission: adapter.resolveNoSubmission, verifyOriginal: adapter.verifyOriginal,
     read: (request, deadline) => request.id === q.phase.deploymentId ? Promise.resolve(null) : read(request, deadline),
     write: async () => { throw new Error('UNIT_CAUGHT_BEFORE_ARM'); } };
-  await assert.rejects(executePrivateLinkPhase(f.c, f.context, evidence, q.phase, q.proof, q.approval, io), /STOPPED_ORIGINAL_INTENT_PRESERVED/);
-  const archived = files.get(`private-link-intent-${hash({ target, stage })}.json`);
-  const original = { phase: q.phase, publication: q.io.publication, approval: q.approval, preflight: q.proof,
-    intent: archived.intent, journal: await adapter.journal() };
-  const proposal = await reconcilePrivateLinkPhase(f.c, f.context, evidence, original, io);
-  const review = { version: 1, action: 'record-exact-private-link-no-submission-without-replay',
-    proposalSha256: hash(proposal), pendingHeadSha256: hash(proposal.pendingHead), sourceSha256: f.source,
-    approvedAt: new Date(io.now()).toISOString(), expiresAt: new Date(io.now() + 600000).toISOString() };
-  const resolution = await recoverPrivateLinkPhase(f.c, f.context, evidence, original, proposal, review, io);
+  const prepared = await privateLinkCachedFixture('resolved-no-submission-prefix',
+    { config: f.c, context: f.context, evidence, phase: q.phase, proof: q.proof, approval: q.approval }, async () => {
+      await assert.rejects(executePrivateLinkPhase(f.c, f.context, evidence, q.phase, q.proof, q.approval, io), /STOPPED_ORIGINAL_INTENT_PRESERVED/);
+      const archived = files.get(`private-link-intent-${hash({ target, stage })}.json`);
+      const original = { phase: q.phase, publication: q.io.publication, approval: q.approval, preflight: q.proof,
+        intent: archived.intent, journal: await adapter.journal() };
+      const proposal = await reconcilePrivateLinkPhase(f.c, f.context, evidence, original, io);
+      const review = { version: 1, action: 'record-exact-private-link-no-submission-without-replay',
+        proposalSha256: hash(proposal), pendingHeadSha256: hash(proposal.pendingHead), sourceSha256: f.source,
+        approvedAt: new Date(io.now()).toISOString(), expiresAt: new Date(io.now() + 600000).toISOString() };
+      const resolution = await recoverPrivateLinkPhase(f.c, f.context, evidence, original, proposal, review, io);
+      return { archived, original, resolution, files: [...files] };
+    });
+  files.clear();
+  for (const [name, value] of prepared.files) files.set(name, value);
+  const { archived, original, resolution } = prepared;
+  await adapter.saveJournal(original.journal);
   return { q, files, store, input, io, original, resolution, target, archived };
 }
 function approval(phase, proof, now) {

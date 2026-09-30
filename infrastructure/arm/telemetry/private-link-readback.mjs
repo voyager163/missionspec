@@ -39,6 +39,11 @@ function opaqueAcaDate(value) {
   const days = [31, year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
   return year > 0 && month >= 1 && month <= 12 && day >= 1 && day <= days[month - 1] && hour < 24 && minute < 60 && second < 60;
 }
+function metadataInstant(value) {
+  // ACR returns explicit +00:00 UTC. Keep the original record bytes; only the
+  // arithmetic parser receives the equivalent Z suffix, never an inferred zone.
+  return queueArmInstant(typeof value === 'string' && value.endsWith('+00:00') ? value.slice(0, -6) + 'Z' : value);
+}
 export function privateLinkAcaCreationIdentity(resource, expectedId) {
   if (!acaId(expectedId) || !sameId(resource?.id, expectedId) ||
       !sameId(resource.type, expectedId.toLowerCase().includes('/managedenvironments/')
@@ -47,8 +52,8 @@ export function privateLinkAcaCreationIdentity(resource, expectedId) {
   const data = resource.systemData;
   plOnly(data, ['createdAt', 'createdBy', 'createdByType', 'lastModifiedAt', 'lastModifiedBy', 'lastModifiedByType']);
   const opaque = opaqueAcaDate(data.createdAt);
-  const ticks = opaque ? null : queueArmInstant(data.createdAt).toString();
-  if (data.lastModifiedAt !== undefined && !opaqueAcaDate(data.lastModifiedAt)) queueArmInstant(data.lastModifiedAt);
+  const ticks = opaque ? null : metadataInstant(data.createdAt).toString();
+  if (data.lastModifiedAt !== undefined && !opaqueAcaDate(data.lastModifiedAt)) metadataInstant(data.lastModifiedAt);
   for (const key of ['createdBy', 'lastModifiedBy']) if (data[key] !== undefined && (typeof data[key] !== 'string' || !data[key])) fail('PRIVATE_LINK_METADATA_INVALID');
   for (const key of ['createdByType', 'lastModifiedByType']) if (data[key] !== undefined &&
       !['User', 'Application', 'ManagedIdentity', 'Key'].includes(data[key])) fail('PRIVATE_LINK_METADATA_INVALID');
@@ -62,7 +67,7 @@ export function privateLinkGeneration(resource) {
     ['Microsoft.App/containerApps', 'Microsoft.App/managedEnvironments'].some(type => sameId(type, resource.type));
   if (scopedAca && resource.systemData?.createdAt !== undefined) privateLinkAcaCreationIdentity(resource, resource.id);
   const time = value => scopedAca && opaqueAcaDate(value)
-    ? `opaque-recorded-aca:${value}` : queueArmInstant(value).toString();
+    ? `opaque-recorded-aca:${value}` : metadataInstant(value).toString();
   const data = resource.systemData;
   if (data !== undefined && data !== null) {
     plOnly(data, ['createdAt', 'createdBy', 'createdByType', 'lastModifiedAt', 'lastModifiedBy', 'lastModifiedByType']);

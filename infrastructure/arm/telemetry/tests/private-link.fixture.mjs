@@ -9,7 +9,7 @@ import { buildPrivateLinkPlan, PRIVATE_LINK_API as API, PRIVATE_LINK_CONTROL_STA
 import { privateLinkReadRequests, privateLinkResourceDescriptors } from '../private-link-readback.mjs';
 import { emptyPrivateLinkControlEvidence, privateLinkHead, preparePrivateLinkPhase, privateLinkPermissions,
   checkPrivateLinkPhase, executePrivateLinkPhase, PRIVATE_LINK_PRICE_METERS } from '../private-link-controller.mjs';
-import { collectEffectivePolicies } from '../effective-policy.mjs';
+import { privateLinkCachedFixture } from './private-link-cache.fixture.mjs';
 
 const hash = value => digest(json(value));
 const clone = structuredClone;
@@ -18,7 +18,8 @@ export const privateInput = Object.freeze({ version: 1, addresses: { vnet: '10.2
   endpoint: '10.240.8.64/28', knownAddressSpaces: ['10.88.0.0/24', '192.168.0.0/20'] }, overlapDays: 7 });
 // Entirely generated unit history. No cloud identity, approval or operator receipt.
 export async function privateLinkFixture(input = privateInput) {
-  const upgraded = await queueUpgradeFixture(), f = await queueAdoptionFixture(upgraded);
+  const upgraded = await privateLinkCachedFixture('queue-upgrade-origin', {}, queueUpgradeFixture);
+  const f = await queueAdoptionFixture(upgraded);
   const network = emptyNspEvidence(nspTopology(f.c, f.topology, f.adoption));
   for (const name of ['nsp-empty-boundary', 'nsp-storage-lock', 'nsp-enforced-association']) {
     const phase = nspPhaseFixture(f, f.adoption, network, name);
@@ -182,9 +183,9 @@ export function privateSnapshotFixture(f, stage, at = f.at) {
     value.id?.startsWith(r.group + '/') && !value.id.includes('/providers/Microsoft.Consumption/'));
   return s;
 }
-export async function privateControlHarness(f, evidence, stage, options = {}) {
+function privateControlSetup(f, evidence, stage, options) {
   const phase = preparePrivateLinkPhase(f.c, f.context, evidence, stage), previous = evidence.records.at(-1);
-  let now = f.at, before = previous ? clone(previous.after) : privateSnapshotFixture(f, 'initial', now);
+  const now = f.at, before = previous ? clone(previous.after) : privateSnapshotFixture(f, 'initial', now);
   before.startedAt = before.completedAt = now;
   const after = privateSnapshotFixture(f, stage, now);
   for (const [id, value] of Object.entries(before.resources)) if (value && after.resources[id]) {
@@ -211,8 +212,7 @@ export async function privateControlHarness(f, evidence, stage, options = {}) {
   }]));
   catalogs.network.resourceTypes.push({ resourceType: 'networkSecurityPerimeters', apiVersions: ['2025-09-01'], locations: ['Australia East'] });
   catalogs.storage.resourceTypes.push({ resourceType: 'storageAccounts', apiVersions: [API.storage], locations: ['Australia East'] });
-  let live = before, journal = null, head = privateLinkHead(f.context, evidence), writes = 0, reserved = false, appended = null, savedIntent = null;
-  const requests = privateLinkReadRequests(f.c, f.context), traces = [], retained = [];
+  const requests = privateLinkReadRequests(f.c, f.context);
   const deployment = phase.deploymentId ? { id: phase.deploymentId, properties: { provisioningState: 'Succeeded',
     mode: 'Incremental', correlationId: 'UNIT-private-link', timestamp: new Date(now).toISOString(), templateHash: hash(phase.template),
     outputResources: phase.resources.map(({ id }) => ({ id })) } } : null;
@@ -221,6 +221,13 @@ export async function privateControlHarness(f, evidence, stage, options = {}) {
     properties: { provisioningState: 'Succeeded', provisioningOperation: 'Create', statusCode: 'OK',
       targetResource: { id: d.id, resourceType: d.type, resourceName: d.expected.name } },
   })) } : null;
+  return { phase, before, after, cost, migrationReview, permissions, catalogs, requests, deployment, operations };
+}
+async function controlHarnessFromSetup(f, evidence, stage, options, setup) {
+  const { phase, before, after, cost, migrationReview, permissions, catalogs, requests, deployment, operations } = setup;
+  let now = f.at, live = before, journal = null, head = privateLinkHead(f.context, evidence),
+    writes = 0, reserved = false, appended = null, savedIntent = null;
+  const traces = clone(setup.traces ?? []), retained = clone(setup.retained ?? []);
   const io = { now: () => now, sourceDigest: async () => f.source, sleep: async ms => { now += ms; },
     batch: async (values, map) => Promise.all(values.map(map)), account: async () => clone(live.accountContext),
     registry: async () => clone(live.images), allowPolicyRead: () => {},
@@ -266,20 +273,40 @@ export async function privateControlHarness(f, evidence, stage, options = {}) {
     },
     append: async (pending, record, next) => { assert.deepEqual(head, pending); appended = clone(record); head = next; },
   };
-  const proof = await checkPrivateLinkPhase(f.c, f.context, evidence, phase, io);
-  const approval = { version: 1, action: `execute-exact-private-link-${stage}`, configSha256: hash(f.c),
+  const proof = setup.proof ?? await checkPrivateLinkPhase(f.c, f.context, evidence, phase, io);
+  const approval = setup.approval ?? { version: 1, action: `execute-exact-private-link-${stage}`, configSha256: hash(f.c),
     planSha256: f.context.plan.planSha256, phaseSha256: hash(phase), bindingSha256: hash(proof.binding),
     sourceSha256: f.source, requestSha256: hash(phase.request),
     approvedAt: new Date(now - 1000).toISOString(), expiresAt: new Date(now + 1800000).toISOString() };
   return { phase, proof, approval, io, before, after, traces, retained,
+    fixtureSetup: { ...setup, proof, approval, traces, retained },
     execute: () => executePrivateLinkPhase(f.c, f.context, evidence, phase, proof, approval, io),
     advance: ms => { now += ms; }, get journal() { return journal; }, get intent() { return savedIntent; }, get writes() { return writes; },
     get appended() { return appended; }, setLive: value => { live = value; } };
 }
-export async function privateControlChain(f, through = 'assign-queue-role') {
+function controlFixtureKey(f, evidence, stage) {
+  return { config: f.c, context: f.context, source: f.source, at: f.at,
+    topology: f.topology, opaque: f.opaque, evidence, stage };
+}
+export async function privateControlHarness(f, evidence, stage, options = {}) {
+  if (options.uncached || options.snapshot || options.runtimeCompletion) {
+    return controlHarnessFromSetup(f, evidence, stage, options, privateControlSetup(f, evidence, stage, options));
+  }
+  const setup = await privateLinkCachedFixture('checked-control-setup', controlFixtureKey(f, evidence, stage), async () => {
+    const original = await controlHarnessFromSetup(f, evidence, stage, options, privateControlSetup(f, evidence, stage, options));
+    return original.fixtureSetup;
+  });
+  return controlHarnessFromSetup(f, evidence, stage, options, setup);
+}
+export async function privateControlChain(f, through = 'assign-queue-role', options = {}) {
   const evidence = emptyPrivateLinkControlEvidence(f.context);
   for (const stage of PRIVATE_LINK_CONTROL_STAGES) {
-    const q = await privateControlHarness(f, evidence, stage), record = await q.execute();
+    const build = async () => {
+      const q = await privateControlHarness(f, evidence, stage, options);
+      return q.execute();
+    };
+    const record = options.uncached ? await build() :
+      await privateLinkCachedFixture('verified-control-prefix', controlFixtureKey(f, evidence, stage), build);
     evidence.records.push(record); f.at += 1000;
     if (stage === through) return evidence;
   }
