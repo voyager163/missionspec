@@ -11,6 +11,7 @@ test('final runtime genuinely selects minimal pinned closure rather than purging
   assert(stage.startsWith(`FROM ${lock.identities.runtimeBase}\n`));
   assert.match(stage, /COPY --from=build \/usr\/local\/bin\/node \/usr\/local\/bin\/node/u);
   assert.match(stage, /COPY --from=build \/usr\/local\/LICENSE \/usr\/share\/doc\/node\/LICENSE/u);
+  assert.match(stage, /COPY --from=build \/app\/runtime-overlay\/ \//u);
   assert.match(stage, /USER 65532:65532/u);
   assert.match(stage, /CMD \["\/usr\/local\/bin\/node", "--no-turbofan", "--no-maglev", "--disable-sigusr1", "dist\/main.js"\]/u);
   assert.doesNotMatch(stage, /^RUN /mu);
@@ -21,6 +22,9 @@ test('final runtime genuinely selects minimal pinned closure rather than purging
 test('build and source handoff use fixed inputs without operator state or verification binaries in the runtime', () => {
   assert.match(dockerfile, /node scripts\/runtime-sources.mjs/u);
   assert.match(dockerfile, /--project-root \/app --download/u);
+  assert.match(dockerfile, /--runtime-base \/app\/runtime-base --overlay-output \/app\/runtime-overlay/u);
+  assert(dockerfile.startsWith(`FROM ${lock.identities.runtimeBase} AS runtime-base\n`));
+  assert.match(dockerfile, /COPY --from=runtime-base \/ \/app\/runtime-base\//u);
   for (const file of ['runtime-sources.lock.json', 'scripts/runtime-sources.mjs', 'scripts/container-qualification.mjs']) {
     assert(ignore.includes(`!services/telemetry-ingest/${file}`));
     assert(dockerfile.includes(`COPY services/telemetry-ingest/${file}`) || dockerfile.includes(` services/telemetry-ingest/${file}`));

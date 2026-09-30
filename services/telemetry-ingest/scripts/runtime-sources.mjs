@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { constants, createReadStream, createWriteStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -9,12 +10,21 @@ import { createGunzip, crc32 } from 'node:zlib';
 
 const MAX_ARTIFACT = 512 * 1024 * 1024;
 const MAX_TOTAL = 1024 * 1024 * 1024;
-const roles = new Set(['debian-source', 'node-source', 'node-distribution', 'release-checksums', 'release-signature', 'assembly-source', 'assembly-license']);
+const roles = new Set(['debian-source', 'debian-security-binary', 'node-source', 'node-distribution', 'release-checksums', 'release-signature', 'assembly-source', 'assembly-license']);
 const sha256 = data => createHash('sha256').update(data).digest('hex');
 const json = data => `${JSON.stringify(data, null, 2)}\n`;
 const fail = message => { throw new Error(message); };
 const check = (condition, message) => { if (!condition) fail(message); };
 const hashPattern = /^[a-f0-9]{64}$/;
+const OVERLAY_FILES = new Map([
+  ...['libcrypto.so.3', 'libssl.so.3', 'engines-3/afalg.so', 'engines-3/loader_attic.so', 'engines-3/padlock.so']
+    .map(name => [`usr/lib/x86_64-linux-gnu/${name}`, ['data', `usr/lib/x86_64-linux-gnu/${name}`]]),
+  ...['NEWS.Debian.gz', 'changelog.Debian.gz', 'changelog.gz', 'copyright']
+    .map(name => [`usr/share/doc/libssl3t64/${name}`, ['data', `usr/share/doc/libssl3t64/${name}`]]),
+  ['usr/share/lintian/overrides/libssl3t64', ['data', 'usr/share/lintian/overrides/libssl3t64']],
+  ['var/lib/dpkg/status.d/libssl3t64', ['control', 'control']],
+  ['var/lib/dpkg/status.d/libssl3t64.md5sums', ['control', 'md5sums']],
+]);
 
 function keys(value, expected, label) {
   check(value && typeof value === 'object' && !Array.isArray(value), `Invalid ${label}`);
@@ -77,8 +87,9 @@ export function packageFromStatus(data) {
   };
 }
 export function validateLock(lock) {
-  keys(lock, ['schemaVersion', 'platform', 'identities', 'node', 'distroless', 'packages', 'sources', 'artifacts', 'files', 'blobs', 'provenanceLimits'], 'lock');
-  check(lock.schemaVersion === 1 && lock.platform === 'linux/amd64', 'Unsupported runtime source lock');
+  keys(lock, ['schemaVersion', 'platform', 'identities', 'node', 'distroless', 'packages', 'sources', 'artifacts', 'files', 'blobs', 'provenanceLimits',
+    ...(lock.schemaVersion === 2 ? ['overlay'] : [])], 'lock');
+  check([1, 2].includes(lock.schemaVersion) && lock.platform === 'linux/amd64', 'Unsupported runtime source lock');
   keys(lock.identities, ['runtimeBase', 'runtimeBaseIndexDigest', 'nodeBuildBase', 'candidateImageId'], 'identities');
   identity(lock.identities.runtimeBase);
   identity(lock.identities.nodeBuildBase);
@@ -126,9 +137,9 @@ export function validateLock(lock) {
   check(index.manifests.some(m => m.digest === `sha256:${baseDigest}` && m.platform?.os === 'linux' && m.platform?.architecture === 'amd64'), 'Base index does not cover the pinned platform');
   check(Array.isArray(lock.sources) && lock.sources.length > 0, 'Missing Debian source closure');
   const sources = new Map(), usedArtifacts = new Set();
-  function use(name, role) {
+  function use(name, role, sharedSource = false) {
     const artifact = artifacts.get(name);
-    check(artifact?.role === role && !usedArtifacts.has(name), `Missing, reused, or misclassified artifact ${name}`);
+    check(artifact?.role === role && (sharedSource || !usedArtifacts.has(name)), `Missing, reused, or misclassified artifact ${name}`);
     usedArtifacts.add(name);
     return artifact;
   }
@@ -139,26 +150,66 @@ export function validateLock(lock) {
     check(s.snapshotApi === `https://snapshot.debian.org/mr/package/${s.name}/${encodeURIComponent(s.version)}/srcfiles`, 'Invalid snapshot provenance');
     const key = `${s.name}@${s.version}`;
     check(!sources.has(key) && Array.isArray(s.artifacts) && s.artifacts.length >= 2 && s.artifacts.includes(s.dsc) && s.dsc.endsWith('.dsc'), 'Invalid/duplicate source closure');
-    for (const a of s.artifacts) use(a, 'debian-source');
+    check(new Set(s.artifacts).size === s.artifacts.length, 'Duplicate source component');
+    for (const a of s.artifacts) use(a, 'debian-source', lock.schemaVersion === 2);
     check(s.artifacts.filter(a => a.endsWith('.dsc')).length === 1, 'Source closure must have one dsc');
     sources.set(key, s);
   }
   check(Array.isArray(lock.packages) && lock.packages.length > 0, 'Missing runtime packages');
   const packageNames = new Set(), usedSources = new Set();
-  for (const p of lock.packages) {
+  function validatePackage(p, prefix = '', overlaid = false) {
     keys(p, ['name', 'version', 'architecture', 'source', 'sourceVersion', 'metadataPath', 'copyrightPath', 'binaryProvenance'], 'package');
-    check(/^[a-z0-9][a-z0-9+.-]*$/.test(p.name) && !packageNames.has(p.name), 'Invalid/duplicate runtime package');
+    check(/^[a-z0-9][a-z0-9+.-]*$/.test(p.name), 'Invalid runtime package');
     check(p.metadataPath === `runtime/var/lib/dpkg/status.d/${p.name}` && p.copyrightPath === `runtime/usr/share/doc/${p.name}/copyright`, 'Wrong package notice/metadata path');
-    check(files.has(p.metadataPath) && files.has(p.copyrightPath), `Missing package metadata/notice ${p.name}`);
-    const actual = packageFromStatus(files.get(p.metadataPath).toString('utf8'));
+    check(files.has(prefix + p.metadataPath) && files.has(prefix + p.copyrightPath), `Missing package metadata/notice ${p.name}`);
+    const actual = packageFromStatus(files.get(prefix + p.metadataPath).toString('utf8'));
     for (const key of ['name', 'version', 'architecture', 'source', 'sourceVersion']) check(actual[key] === p[key], `Package metadata mismatch ${p.name}:${key}`);
     check(['amd64', 'all'].includes(p.architecture), 'Wrong runtime architecture');
     const source = `${p.source}@${p.sourceVersion}`;
     check(sources.has(source), `Missing exact source version ${source}`);
-    keys(p.binaryProvenance, ['url', 'sha256', 'assemblyRevision'], 'binary provenance');
-    check(/^https:\/\/snapshot\.debian\.org\/archive\/debian(?:-security)?\/\d{8}T\d{6}Z\/pool\/(?:updates\/)?main\/[a-z0-9+/.-]+\/[a-zA-Z0-9+_.~%-]+\.deb$/.test(p.binaryProvenance.url), 'Unpinned binary provenance');
-    check(hashPattern.test(p.binaryProvenance.sha256) && /^[a-f0-9]{40}$/.test(p.binaryProvenance.assemblyRevision), 'Invalid binary provenance');
-    packageNames.add(p.name); usedSources.add(source);
+    keys(p.binaryProvenance, ['url', 'sha256', overlaid ? 'overlayRevision' : 'assemblyRevision'], 'binary provenance');
+    if (overlaid) {
+      validateUrl(p.binaryProvenance.url);
+      check(p.binaryProvenance.overlayRevision === 1, 'Unsupported overlay revision');
+    } else {
+      check(/^https:\/\/snapshot\.debian\.org\/archive\/debian(?:-security)?\/\d{8}T\d{6}Z\/pool\/(?:updates\/)?main\/[a-z0-9+/.-]+\/[a-zA-Z0-9+_.~%-]+\.deb$/.test(p.binaryProvenance.url), 'Unpinned binary provenance');
+      check(p.binaryProvenance.assemblyRevision === lock.distroless.revision, 'Assembly revision mismatch');
+    }
+    check(hashPattern.test(p.binaryProvenance.sha256), 'Invalid binary provenance');
+    usedSources.add(source);
+  }
+  for (const p of lock.packages) {
+    check(!packageNames.has(p.name), 'Duplicate runtime package');
+    validatePackage(p, '', lock.schemaVersion === 2 && p.name === 'libssl3t64');
+    packageNames.add(p.name);
+  }
+  if (lock.schemaVersion === 2) {
+    const o = lock.overlay, p = lock.packages.find(p => p.name === 'libssl3t64');
+    keys(o, ['schemaVersion', 'method', 'artifact', 'snapshotApi', 'basePackage', 'files'], 'security overlay');
+    check(o.schemaVersion === 1 && o.method === 'debian-security-binary-overlay', 'Unsupported security overlay');
+    check(p && p.source === 'openssl' && p.architecture === 'amd64' && p.sourceVersion === p.version, 'Unsupported overlay package');
+    check(o.basePackage.name === p.name && o.basePackage.source === p.source && o.basePackage.architecture === p.architecture &&
+      o.basePackage.version !== p.version, 'Overlay must replace the original OpenSSL package');
+    validatePackage(o.basePackage, 'provenance/base/');
+    check(o.artifact === `libssl3t64_${p.version}_amd64.deb` &&
+      o.snapshotApi === `https://snapshot.debian.org/mr/binary/libssl3t64/${encodeURIComponent(p.version)}/binfiles`, 'Invalid overlay snapshot provenance');
+    const a = use(o.artifact, 'debian-security-binary');
+    check(a.url === p.binaryProvenance.url && a.sha256 === p.binaryProvenance.sha256, 'Overlay binary provenance mismatch');
+    check(Array.isArray(o.files) && o.files.length === OVERLAY_FILES.size, 'Incomplete overlay payload');
+    const seen = new Set();
+    for (const f of o.files) {
+      keys(f, ['path', 'archive', 'member', 'sha256', 'size', 'baseSha256', 'baseSize', 'mode'], 'overlay file');
+      const expected = OVERLAY_FILES.get(f.path);
+      check(expected && f.archive === expected[0] && f.member === expected[1] && !seen.has(f.path) && f.mode === 0o644, 'Unreviewed overlay path/type/mode');
+      integrity(f); integrity({ sha256: f.baseSha256, size: f.baseSize });
+      seen.add(f.path);
+    }
+    for (const name of [p.metadataPath, p.copyrightPath]) {
+      const f = o.files.find(f => `runtime/${f.path}` === name);
+      check(sha256(files.get(name)) === f.sha256 && files.get(name).length === f.size &&
+        sha256(files.get(`provenance/base/${name}`)) === f.baseSha256 &&
+        files.get(`provenance/base/${name}`).length === f.baseSize, 'Overlay metadata/notice mismatch');
+    }
   }
   check(usedSources.size === sources.size, 'Unneeded Debian source version');
   const statuses = [...files.keys()].filter(p => p.startsWith('runtime/var/lib/dpkg/status.d/'));
@@ -178,7 +229,6 @@ export function validateLock(lock) {
   text(d.provenance, 'assembly provenance');
   check(use(d.sourceArtifact, 'assembly-source').url === `https://codeload.github.com/GoogleContainerTools/distroless/tar.gz/${d.revision}`, 'Unpinned assembly source');
   check(use(d.licenseArtifact, 'assembly-license').url === `https://raw.githubusercontent.com/GoogleContainerTools/distroless/${d.revision}/LICENSE`, 'Unpinned assembly license');
-  check(lock.packages.every(p => p.binaryProvenance.assemblyRevision === d.revision), 'Assembly revision mismatch');
   check(usedArtifacts.size === artifacts.size, 'Unreferenced public source artifact');
   check(Array.isArray(lock.provenanceLimits) && lock.provenanceLimits.length > 0, 'Missing provenance limits');
   for (const limit of lock.provenanceLimits) text(limit, 'provenance limit');
@@ -291,6 +341,129 @@ export async function acquireArtifact(artifact, cache, download = false, request
   } finally {
     controller.abort();
     await fs.rm(partial, { force: true });
+  }
+}
+
+export function inspectOverlayTar(bytes, targets, complete = true) {
+  const found = new Map();
+  let offset = 0, ended = false;
+  while (offset + 512 <= bytes.length) {
+    const header = bytes.subarray(offset, offset + 512);
+    offset += 512;
+    if (header.every(byte => byte === 0)) {
+      check(bytes.subarray(offset).every(byte => byte === 0), 'Unexpected overlay tar trailer');
+      ended = true; break;
+    }
+    const str = (start, length) => header.subarray(start, start + length).toString('utf8').replace(/\0.*$/s, '');
+    const octal = (start, length) => {
+      const value = str(start, length).trim();
+      check(/^[0-7]+$/.test(value), 'Invalid overlay tar number');
+      return parseInt(value, 8);
+    };
+    check(header.reduce((sum, byte, i) => sum + (i >= 148 && i < 156 ? 32 : byte), 0) === octal(148, 8), 'Invalid overlay tar checksum');
+    const raw = `${str(345, 155) ? `${str(345, 155)}/` : ''}${str(0, 100)}`;
+    const name = raw.replace(/^\.\//, '').replace(/\/$/, ''), type = str(156, 1);
+    const size = octal(124, 12), mode = octal(100, 8);
+    check(offset + size <= bytes.length && size <= 16 * 1024 * 1024, 'Truncated/oversized overlay tar');
+    if (type === '5') {
+      if (name) safePath(name);
+      check(size === 0, 'Invalid overlay directory');
+    } else {
+      safePath(name);
+      check((type === '0' || type === '') && !found.has(name), 'Non-regular/duplicate overlay member');
+      const expected = targets.get(name);
+      check(expected || !complete, `Unreviewed overlay member ${name}`);
+      const data = bytes.subarray(offset, offset + size);
+      if (expected) {
+        check(size === expected.size && sha256(data) === expected.sha256 && mode === expected.mode,
+          `Overlay member identity mismatch: ${name}`);
+        found.set(name, Buffer.from(data));
+      }
+    }
+    offset += Math.ceil(size / 512) * 512;
+  }
+  check(ended && [...targets.keys()].every(name => found.has(name)), 'Incomplete overlay tar');
+  return found;
+}
+
+export async function readOverlay(lock, cache) {
+  validateLock(lock);
+  check(lock.schemaVersion === 2, 'A schema-2 overlay is required');
+  const o = lock.overlay, artifact = lock.artifacts.find(a => a.filename === o.artifact);
+  return heldRegularFile(cache, o.artifact, artifact.size, async (handle, before) => {
+    const digest = createHash('sha256');
+    const size = await consumeBounded(handle, artifact.size, chunk => digest.update(chunk));
+    check(before.size === BigInt(size) && size === artifact.size && digest.digest('hex') === artifact.sha256, 'Overlay Debian binary identity mismatch');
+    const result = new Map();
+    for (const archive of ['control', 'data']) {
+      const targets = new Map(o.files.filter(f => f.archive === archive).map(f => [f.member, f]));
+      // The held descriptor binds decompression to the hashed inode. No maintainer scripts run.
+      const tar = execFileSync('dpkg-deb', [archive === 'control' ? '--ctrl-tarfile' : '--fsys-tarfile', '/proc/self/fd/3'], {
+        stdio: ['ignore', 'pipe', 'pipe', handle.fd], maxBuffer: 16 * 1024 * 1024, timeout: 30000,
+      });
+      const members = inspectOverlayTar(tar, targets, archive === 'data');
+      for (const f of o.files.filter(f => f.archive === archive)) result.set(f.path, members.get(f.member));
+    }
+    return result;
+  });
+}
+
+export async function verifyOverlayRoot(lock, root, state = 'patched') {
+  const { files } = validateLock(lock);
+  check(lock.schemaVersion === 2 && ['base', 'patched'].includes(state), 'Invalid overlay verification state');
+  const base = state === 'base', o = lock.overlay;
+  const names = (await fs.readdir(path.join(root, 'var/lib/dpkg/status.d'))).sort();
+  check(JSON.stringify(names) === JSON.stringify(lock.packages.flatMap(p => [p.name, `${p.name}.md5sums`]).sort()),
+    'Runtime package inventory changed');
+  for (const p of lock.packages) {
+    for (const relative of [p.metadataPath, p.copyrightPath]) {
+      const bytes = files.get(`${base && p.name === o.basePackage.name ? 'provenance/base/' : ''}${relative}`);
+      await verifyFile(path.join(root, relative.slice('runtime/'.length)), { size: bytes.length, sha256: sha256(bytes) });
+    }
+  }
+  for (const f of o.files) {
+    await verifyFile(path.join(root, f.path), { size: base ? f.baseSize : f.size, sha256: base ? f.baseSha256 : f.sha256 });
+    check(((await fs.lstat(path.join(root, f.path))).mode & 0o7777) === f.mode, `Overlay mode mismatch: ${f.path}`);
+  }
+  const native = [];
+  async function walk(relative) {
+    for (const e of await fs.readdir(path.join(root, relative), { withFileTypes: true })) {
+      const name = relative ? `${relative}/${e.name}` : e.name;
+      if (e.isDirectory()) await walk(name);
+      else if (/^lib(?:ssl|crypto)\.so(?:\.|$)/.test(e.name) || /(?:^|\/)(?:engines-3|ossl-modules)\//.test(name)) {
+        check(e.isFile(), `Unexpected OpenSSL link or file type: ${name}`);
+        native.push(name);
+      }
+    }
+  }
+  // Only inspect the runtime library trees; source archives/notices are not installed libraries.
+  await walk('usr/lib');
+  for (const name of ['lib', 'lib64']) {
+    const info = await fs.lstat(path.join(root, name)).catch(error => { if (error.code !== 'ENOENT') throw error; });
+    if (info?.isDirectory()) await walk(name);
+    else if (info) check(info.isSymbolicLink() && ['usr/lib', 'usr/lib64', '/usr/lib', '/usr/lib64'].includes(await fs.readlink(path.join(root, name))), 'Unexpected runtime library alias');
+  }
+  const expected = o.files.filter(f => f.path.startsWith('usr/lib/')).map(f => f.path).sort();
+  check(JSON.stringify(native.sort()) === JSON.stringify(expected), 'Unexpected or leftover OpenSSL library/provider');
+}
+
+export async function writeOverlay(lock, cache, root, output) {
+  await verifyOverlayRoot(lock, root, 'base');
+  const payload = await readOverlay(lock, cache);
+  const out = path.resolve(output);
+  try { await fs.lstat(out); fail('Overlay output must not already exist'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  const stage = `${out}.partial-${randomUUID()}`;
+  await fs.mkdir(stage, { mode: 0o755 });
+  try {
+    for (const f of lock.overlay.files) {
+      const destination = path.join(stage, f.path);
+      await fs.mkdir(path.dirname(destination), { recursive: true, mode: 0o755 });
+      await fs.writeFile(destination, payload.get(f.path), { flag: 'wx', mode: f.mode });
+      await fs.utimes(destination, 0, 0);
+    }
+    await fs.rename(stage, out);
+  } finally {
+    await fs.rm(stage, { recursive: true, force: true });
   }
 }
 
@@ -452,12 +625,25 @@ source, upstream notices, and the allowlisted service/build-source snapshot.
 Runtime: ${lock.platform}
 Base: ${lock.identities.runtimeBase}
 Node: ${lock.node.version} (official linux-x64 binary SHA256 ${lock.node.binarySha256})
+${lock.schemaVersion === 2 ? `
+Security overlay: ${lock.overlay.artifact}
+The original base OCI identity and assembly revision are unchanged. The overlay
+replaces the reviewed OpenSSL libraries/engines, notices and dpkg metadata from
+the separately pinned Debian security binary, without running maintainer scripts.
+Both original and overlaid Debian source revisions are included because original
+bytes remain in lower OCI layers. The overlay is not a new distroless build.
+Original lower-layer package: ${lock.overlay.basePackage.name} ${lock.overlay.basePackage.version}
+  -> ${lock.overlay.basePackage.source} ${lock.overlay.basePackage.sourceVersion}
+The official Node binary is unchanged; its bundled OpenSSL is NOT patched by this
+shared-library replacement. Native advisory applicability remains conditional.
+` : ''}
 
 Debian source mapping:
 ${lock.packages.map(p => `  ${p.name} ${p.version} -> ${p.source} ${p.sourceVersion}`).join('\n')}
 
 No distribution binary archive is included: the official Node linux-x64 tarball
-is used only for verification. Original Node source may contain upstream tool
+is used only for verification; the pinned Debian overlay archive is used only
+to select verified installed files. Original Node source may contain upstream tool
 sources; that does not install npm, Corepack, Yarn, or Debian utilities at runtime.
 Production JavaScript dependency licenses remain in the service's existing
 THIRD_PARTY_NOTICES, also copied into this source snapshot; these are not relicensed.
@@ -565,7 +751,7 @@ function memoryEntry(name, bytes) {
   const value = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
   return { path: name, bytes: value, size: value.length, sha256: sha256(value) };
 }
-export async function assemble({ lockPath, cache, output, projectRoot, download = false }) {
+export async function assemble({ lockPath, cache, output, projectRoot, download = false, runtimeBase, overlayOutput }) {
   const lockBytes = await fs.readFile(lockPath);
   check(lockBytes.length <= 12 * 1024 * 1024, 'Oversized source lock');
   const lock = JSON.parse(lockBytes), validated = validateLock(lock);
@@ -576,10 +762,15 @@ export async function assemble({ lockPath, cache, output, projectRoot, download 
   try { await fs.lstat(out); fail('Output must not already exist'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
   for (const artifact of lock.artifacts) await acquireArtifact(artifact, cachePath, download);
   await verifyUpstream(lock, cachePath);
+  if (lock.schemaVersion === 2) {
+    check(runtimeBase && overlayOutput, 'Schema-2 assembly requires --runtime-base and --overlay-output');
+    await verifyFile(process.execPath, { size: lock.node.binarySize, sha256: lock.node.binarySha256 });
+    await writeOverlay(lock, cachePath, runtimeBase, overlayOutput);
+  } else check(!runtimeBase && !overlayOutput, 'Schema-1 assembly does not accept overlay options');
   const entries = [memoryEntry('runtime-sources.lock.json', lockBytes), memoryEntry('NOTICE', notice(lock))];
   for (const [name, bytes] of validated.files) entries.push(memoryEntry(name, bytes));
   for (const artifact of lock.artifacts) {
-    if (artifact.role === 'node-distribution') continue;
+    if (['node-distribution', 'debian-security-binary'].includes(artifact.role)) continue;
     const directory = artifact.role === 'debian-source' ? 'debian' : artifact.role.startsWith('assembly-') ? 'distroless' : 'node';
     entries.push({ path: `sources/${directory}/${artifact.filename}`, size: artifact.size, sha256: artifact.sha256, file: path.join(cachePath, artifact.filename) });
   }
@@ -589,9 +780,10 @@ export async function assemble({ lockPath, cache, output, projectRoot, download 
   check(bases.includes(lock.identities.runtimeBase) && bases.includes(lock.identities.nodeBuildBase), 'Dockerfile bases do not match the runtime source lock');
   entries.push(...snapshot, memoryEntry('service/services/telemetry-ingest/runtime-sources.lock.json', lockBytes));
   const manifest = {
-    schemaVersion: 1, archiveRoot: 'runtime-corresponding-source', timestamp: '1970-01-01T00:00:00.000Z',
+    schemaVersion: lock.schemaVersion, archiveRoot: 'runtime-corresponding-source', timestamp: '1970-01-01T00:00:00.000Z',
     platform: lock.platform, identities: lock.identities, lockSha256: sha256(lockBytes),
     packages: lock.packages, sources: lock.sources, node: lock.node, distroless: lock.distroless,
+    ...(lock.schemaVersion === 2 ? { overlay: lock.overlay } : {}),
     verification: { sha256AndLengths: true, dscClosure: true, officialNodeBinaryAndBothLicenses: true, signaturesAuthenticated: false },
     provenanceLimits: lock.provenanceLimits,
     files: entries.map(({ path, size, sha256 }) => ({ path, size, sha256 })).sort((a, b) => a.path < b.path ? -1 : 1),
@@ -630,8 +822,14 @@ export async function assemble({ lockPath, cache, output, projectRoot, download 
 }
 
 async function main(argv) {
+  if (argv.length === 4 && argv[0] === '--verify-overlay-root' && argv[2] === '--lock') {
+    await verifyOverlayRoot(JSON.parse(await fs.readFile(argv[3])), argv[1]);
+    console.log('RUNTIME_SECURITY_OVERLAY_VERIFIED');
+    return;
+  }
   const options = { download: false };
-  const names = new Map([['--lock', 'lockPath'], ['--cache', 'cache'], ['--output', 'output'], ['--project-root', 'projectRoot']]);
+  const names = new Map([['--lock', 'lockPath'], ['--cache', 'cache'], ['--output', 'output'], ['--project-root', 'projectRoot'],
+    ['--runtime-base', 'runtimeBase'], ['--overlay-output', 'overlayOutput']]);
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--download') {
@@ -642,7 +840,8 @@ async function main(argv) {
       options[name] = argv[++i];
     }
   }
-  for (const name of names.values()) check(options[name], 'Usage: node runtime-sources.mjs --lock FILE --cache DIR --output NEW_DIR --project-root ROOT [--download]');
+  for (const name of ['lockPath', 'cache', 'output', 'projectRoot']) check(options[name],
+    'Usage: node runtime-sources.mjs --lock FILE --cache DIR --output NEW_DIR --project-root ROOT [--download] [--runtime-base ROOT --overlay-output NEW_DIR]');
   console.log(json(await assemble(options)).trim());
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

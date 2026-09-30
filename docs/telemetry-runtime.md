@@ -21,6 +21,37 @@ service runtime dependency graph. It is not a claim of file-by-file minimality
 within every maintained base package. Development packages and verification-only
 Node distribution archives do not enter the executable runtime.
 
+### Pinned Debian OpenSSL security overlay
+
+The current schema-2 source lock keeps the original distroless base digest and
+assembly provenance, then applies one separately pinned Debian security binary:
+`libssl3t64 3.5.7-1~deb13u3`. This replaces the vulnerable `~deb13u2` shared
+libraries without claiming that the original distroless image was rebuilt.
+The SHA-256/length-bound official `.deb` is inspected through a held descriptor.
+Only its twelve explicitly reviewed files are copied: two libraries, three
+engines, package notices/documentation and dpkg metadata. No maintainer script
+runs, no package manager enters the final image, and no legacy provider is added.
+The complete base inventory, before/after file hashes and modes, and absence
+of other OpenSSL library/provider paths are independently checked.
+
+Both original and patched OpenSSL source revisions remain included because
+the old bytes still exist in lower OCI layers. The schema-2 closure therefore
+has **14 final Debian packages, 11 exact Debian source versions and 30 source
+artifacts**, alongside the separately maintained 63-package JavaScript runtime
+inventory. The original base metadata is retained under `provenance/base/`;
+the overlay uses its own provenance revision, not a false distroless assembly
+attribution. Strict schema-1 records remain supported unchanged.
+
+The overlay fixes the Debian package findings for `CVE-2026-75804` and
+`CVE-2026-84782`; it does **not** patch Node's separately bundled OpenSSL.
+The unchanged official Node 24.21.0 binary reports statically linked OpenSSL
+3.5.8, `node_use_quic=false`, no ngtcp2 and no `node:quic` API. The lack of a
+Node DTLS API does not prove native DTLS code was compiled out. These observations
+limit specific reachable protocol paths; they do not establish universal native
+patch clearance. Existing V8, libc and other applicability caveats remain.
+See the [OpenSSL advisory](https://openssl-library.org/news/secadv/20260929.txt)
+and the [pinned Debian binary metadata](https://snapshot.debian.org/mr/binary/libssl3t64/3.5.7-1~deb13u3/binfiles).
+
 The process runs as UID/GID `65532:65532`, with direct Node invocation and
 `--no-turbofan --no-maglev --disable-sigusr1`. The normal JavaScript optimizing
 compiler paths are disabled; this is a reviewed runtime mitigation, not an
@@ -52,6 +83,12 @@ coverage, and an allowlisted service/build-source snapshot. It produces:
 | `runtime-source-manifest.json` | Package-to-source mapping, file lengths/hashes, verification scope and provenance limitations |
 | `runtime-source-receipt.json` | Exact final source archive size/hash and manifest hash |
 | `runtime-notices/` | Immediately readable original runtime copyrights/common licenses, Node/distroless/service licenses and source instructions |
+
+Schema-2 assembly additionally requires the exact pinned base filesystem via
+`--runtime-base` and a new `--overlay-output` directory. The source manifest
+records the explicit security overlay and original package identity. Independent
+offline reproduction must produce identical archive/manifest receipts and
+overlay bytes; a successful package scan alone is insufficient.
 
 Recipients receive the source bytes with the **same one image**. This is not a
 homepage link, invented written offer or promise of a later source publication.
