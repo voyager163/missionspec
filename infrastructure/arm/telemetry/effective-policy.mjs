@@ -171,7 +171,15 @@ function applies(scope, resource) {
   return managementScope.test(scope) || scope === '' || within(resource.id, scope);
 }
 
-function evaluate(phase, snapshot) {
+function compareVersions(a, b) {
+  const left = a.replace(/-preview$/u, '').split('.').map(BigInt);
+  const right = b.replace(/-preview$/u, '').split('.').map(BigInt);
+  for (let index = 0; index < 3; index++) {
+    if (left[index] !== right[index]) return left[index] < right[index] ? -1 : 1;
+  }
+  return 0;
+}
+function evaluate(phase, snapshot, evaluationVersion) {
   const scopes = effectivePolicyScopes(phase), pending = new Map(), entries = new Map(), used = new Set();
   const observations = [], blockers = [];
   if (!object(snapshot) || !Array.isArray(snapshot.reads) || snapshot.reads.length > POLICY_LIMITS.reads ||
@@ -198,14 +206,13 @@ function evaluate(phase, snapshot) {
     const effective = reference.effectiveDefinitionVersion;
     if (selector !== undefined && !/^(?:\*\.\*\.\*|\d+\.\*\.\*|\d+\.\d+\.\*|\d+\.\d+\.\d+)(?:-preview)?$/u.test(selector)) fail('EFFECTIVE_POLICY_VERSION_INVALID');
     // Preview is a status annotation; existing assignments survive promotion to GA.
-    // Inspect every numeric match, rather than selecting an optimistic latest version.
     const matches = version => !selector || selector.replace(/-preview$/u, '').split('.').every((part, i) =>
         part === '*' || part === version.replace(/-preview$/u, '').split('.')[i]);
     const pin = parsed.version ?? effective ?? (versionPattern.test(selector ?? '') ? selector : null);
     if ((parsed.version && !versionPattern.test(parsed.version)) ||
         effective !== undefined && (!versionPattern.test(effective) || (parsed.version && parsed.version !== effective))) fail('EFFECTIVE_POLICY_VERSION_INVALID');
     if (pin && !matches(pin)) fail('EFFECTIVE_POLICY_VERSION_INVALID');
-    let versions;
+    let versions, resolution = pin ? 'exact-version' : 'all-matching-versions';
     const listedDocuments = new Map();
     if (pin) versions = [pin];
     else {
@@ -219,6 +226,13 @@ function evaluate(phase, snapshot) {
         return version;
       }).filter(matches);
       if (!versions.length || new Set(versions).size !== versions.length) fail('EFFECTIVE_POLICY_VERSION_UNRESOLVED');
+      if (evaluationVersion === 2 && /^\d+\.(?:\*|\d+)\.\*(?:-preview)?$/u.test(selector ?? '')) {
+        // Explicit major/minor wildcards auto-ingest updates. Keep numeric ties
+        // conservative and retain the complete catalog in the bound snapshot.
+        const latest = versions.reduce((a, b) => compareVersions(a, b) >= 0 ? a : b);
+        versions = versions.filter(version => compareVersions(version, latest) === 0);
+        resolution = 'latest-matching-versions';
+      }
     }
     return versions.sort().flatMap(version => {
       const id = `${parsed.base}/versions/${version}`, listed = listedDocuments.get(version);
@@ -232,7 +246,7 @@ function evaluate(phase, snapshot) {
           if (!isDeepStrictEqual(value.properties[key], listed.properties[key])) fail('EFFECTIVE_POLICY_DEFINITION_DRIFT');
         }
       }
-      return [{ value, kind: parsed.kind, resolution: pin ? 'exact-version' : 'all-matching-versions' }];
+      return [{ value, kind: parsed.kind, resolution }];
     });
   };
   const assignmentLists = [], exemptions = [];
@@ -356,17 +370,18 @@ function evaluate(phase, snapshot) {
   return { pending: [...pending.values()], analysis: { observations, blockers, exemptionsApplied: false } };
 }
 
-export function analyzeEffectivePolicies(phase, snapshot) {
-  const result = evaluate(phase, snapshot);
+export function analyzeEffectivePolicies(phase, snapshot, version = 2) {
+  if (![1, 2].includes(version)) fail('EFFECTIVE_POLICY_BINDING_INVALID');
+  const result = evaluate(phase, snapshot, version);
   if (result.pending.length) fail('EFFECTIVE_POLICY_EVIDENCE_INCOMPLETE');
-  return { version: 1, kind: 'effective-policy-preflight', phaseSha256: sha(phase),
+  return { version, kind: 'effective-policy-preflight', phaseSha256: sha(phase),
     snapshot, analysis: result.analysis, qualified: result.analysis.blockers.length === 0 };
 }
 export function verifyEffectivePolicyEvidence(phase, evidence) {
   closed(evidence, ['version', 'kind', 'phaseSha256', 'snapshot', 'analysis', 'qualified']);
-  if (evidence.version !== 1 || evidence.kind !== 'effective-policy-preflight' ||
+  if (![1, 2].includes(evidence.version) || evidence.kind !== 'effective-policy-preflight' ||
       evidence.phaseSha256 !== sha(phase) || evidence.qualified !== true ||
-      !isDeepStrictEqual(evidence, analyzeEffectivePolicies(phase, evidence.snapshot))) fail('EFFECTIVE_POLICY_BINDING_INVALID');
+      !isDeepStrictEqual(evidence, analyzeEffectivePolicies(phase, evidence.snapshot, evidence.version))) fail('EFFECTIVE_POLICY_BINDING_INVALID');
   return evidence;
 }
 export async function collectEffectivePolicies(phase, read, readBatch, retain) {
@@ -374,7 +389,7 @@ export async function collectEffectivePolicies(phase, read, readBatch, retain) {
   let bytes = 0;
   try {
     for (let wave = 0; wave < POLICY_LIMITS.waves; wave++) {
-      const { pending } = evaluate(phase, snapshot);
+      const { pending } = evaluate(phase, snapshot, 2);
       if (!pending.length) return analyzeEffectivePolicies(phase, snapshot);
       await readBatch(pending, async request => {
         const response = await read(request.id, request.apiVersion, request.filter ?? undefined);

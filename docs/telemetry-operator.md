@@ -450,13 +450,27 @@ changes, independent reads are limited to four in flight, each request to
 a bounded 120-second rollout; uncertainty requires reconciliation, never retry.
 
 **Effective-policy binding.** The preflight hardening
-adds version-1 effective-policy evidence for new queue execution, rather than
+adds an explicit effective-policy binding for new queue execution, rather than
 relying only on assignment hashes and what-if. Its proof binds
 `effectivePolicyVersion`, `effectivePolicySha256` and the retained
 `effectivePolicy` analysis/read evidence into the approval baseline. An
 incomplete or mismatched binding cannot authorize dispatch. The previous
 baseline algorithm remains available only to verify historical records;
 historical verification does not admit a new operation without the new proof.
+
+Current analysis evidence is version 2. An explicit major/minor wildcard
+(`1.*.*` or `1.2.*`, including its preview annotation) auto-ingests the newest
+numeric matching version from a complete, retained catalog, as documented in
+[Azure Policy assignment versioning](https://learn.microsoft.com/en-us/azure/governance/policy/concepts/assignment-structure#policy-definition-id-and-version)
+and [initiative definition references](https://learn.microsoft.com/en-us/azure/governance/policy/concepts/initiative-definition-structure).
+This prevents a new initiative parameter from being incorrectly applied to
+obsolete child schemas. Unknown parameters in the selected version still
+fail; no parameter is dropped. Numeric preview/GA ties remain conservatively
+evaluated together. Exact effective/version pins are unchanged, and missing
+selectors retain the conservative all-version behavior. Historical version-1
+analysis is recomputed with its original all-matching algorithm, not upgraded
+or rewritten. Both algorithms retain complete catalog bytes in the evidence
+hash, so catalog/content changes still require fresh review.
 
 This is a conservative evaluator for the exact phase, not a general Azure
 Policy interpreter. Effective scopes, definition versions and parameter

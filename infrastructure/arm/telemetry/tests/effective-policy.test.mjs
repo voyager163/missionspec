@@ -29,7 +29,7 @@ test('inherited initiative/default modify blocks Enabled to Disabled before a qu
   assert.equal(proof.qualified, false);
   assert.deepEqual(proof.analysis.blockers.map(v => [v.reason, v.field, v.requested, v.mutation, v.condition]),
     [['REQUEST_REWRITTEN', network, 'Enabled', 'Disabled', 'unknown']]);
-  assert.equal(proof.analysis.blockers[0].versionResolution, 'all-matching-versions');
+  assert.equal(proof.analysis.blockers[0].versionResolution, 'latest-matching-versions');
   assert.equal(proof.analysis.blockers[0].exemptionsApplied, false);
   assert.deepEqual(proof, analyzeEffectivePolicies(x.phase, proof.snapshot));
   assert.equal(x.calls.length, 5);
@@ -304,6 +304,7 @@ test('allowedValues assignment validation remains case-sensitive and rejects mal
 
 test('all matching unpinned versions are checked; no optimistic latest-version selection', async () => {
   const x = effectivePolicyFixture();
+  delete x.initiative.properties.policyDefinitions[0].definitionVersion;
   x.definition.properties.policyRule.then.effect = 'audit';
   const other = structuredClone(x.definition);
   other.id = `${x.definitionId}/versions/1.1.0`; other.properties.version = '1.1.0';
@@ -321,7 +322,7 @@ test('all matching unpinned versions are checked; no optimistic latest-version s
   await assert.rejects(x.analyze(), /EFFECTIVE_POLICY_VERSION_INVALID/);
 });
 
-test('preview annotations retain all numeric version matches and exact effective pins', async () => {
+test('preview annotations preserve legacy matches while explicit wildcards auto-ingest numeric updates', async () => {
   const x = effectivePolicyFixture(), reference = x.initiative.properties.policyDefinitions[0];
   reference.definitionVersion = '1.*.*-preview';
   x.catalog.value = [];
@@ -330,10 +331,14 @@ test('preview annotations retain all numeric version matches and exact effective
     definition.id = `${x.definitionId}/versions/${version}`;
     definition.properties.version = version;
     definition.properties.policyRule.then.effect = effect;
-    x.catalog.value.push({ id: definition.id, name: version, properties: { version } });
+    x.catalog.value.push(structuredClone(definition));
     x.responses.set(definition.id, definition);
   }
-  const ambiguous = await x.analyze();
+  const current = await x.analyze();
+  assert.equal(current.version, 2);
+  assert.equal(current.qualified, true);
+  assert.deepEqual([...new Set(current.analysis.observations.map(value => value.definitionVersion))], ['1.2.0']);
+  const ambiguous = analyzeEffectivePolicies(x.phase, current.snapshot, 1);
   assert.equal(ambiguous.qualified, false);
   assert.deepEqual([...new Set(ambiguous.analysis.observations.map(value => value.definitionVersion))].sort(),
     ['1.0.0-preview', '1.1.0-preview', '1.2.0']);
@@ -356,6 +361,71 @@ test('preview annotations retain all numeric version matches and exact effective
     reference.definitionVersion = selector;
     await assert.rejects(x.analyze(), /EFFECTIVE_POLICY_VERSION_INVALID/);
   }
+});
+
+test('explicit wildcard selection uses the newest matching schema without ignoring unknown parameters', async () => {
+  const x = effectivePolicyFixture(), reference = x.initiative.properties.policyDefinitions[0];
+  x.definition.properties.policyRule.then.effect = 'audit';
+  reference.parameters = { excludedManagedByResourceProviders: { value: [] } };
+  const latest = structuredClone(x.definition);
+  latest.id = `${x.definitionId}/versions/1.2.0`; latest.properties.version = '1.2.0';
+  latest.properties.parameters.excludedManagedByResourceProviders = { type: 'Array', defaultValue: [] };
+  x.catalog.value = [structuredClone(x.definition), latest];
+  const current = await x.analyze();
+  assert.equal(current.qualified, true);
+  assert(current.analysis.observations.every(value => value.definitionVersion === '1.2.0'));
+  verifyEffectivePolicyEvidence(x.phase, current);
+  assert.throws(() => analyzeEffectivePolicies(x.phase, current.snapshot, 1), /EFFECTIVE_POLICY_PARAMETERS_INVALID/);
+  reference.effectiveDefinitionVersion = '1.0.0';
+  await assert.rejects(x.analyze(), /EFFECTIVE_POLICY_PARAMETERS_INVALID/);
+  delete reference.effectiveDefinitionVersion;
+  reference.parameters.unrecognized = { value: [] };
+  await assert.rejects(x.analyze(), /EFFECTIVE_POLICY_PARAMETERS_INVALID/);
+});
+
+test('numeric wildcard updates cannot choose a safer old version or cross a pinned major/minor', async () => {
+  const x = effectivePolicyFixture(), reference = x.initiative.properties.policyDefinitions[0];
+  x.catalog.value = [];
+  for (const [version, effect] of [['1.9.0', 'audit'], ['1.10.0', 'deny'], ['1.10.1', 'audit'], ['2.0.0', 'deny']]) {
+    const definition = structuredClone(x.definition);
+    definition.id = `${x.definitionId}/versions/${version}`; definition.properties.version = version;
+    definition.properties.policyRule.then.effect = effect;
+    x.catalog.value.push(definition);
+  }
+  let current = await x.analyze();
+  assert.equal(current.qualified, true);
+  assert(current.analysis.observations.every(value => value.definitionVersion === '1.10.1'));
+  reference.definitionVersion = '1.9.*';
+  assert((await x.analyze()).analysis.observations.every(value => value.definitionVersion === '1.9.0'));
+  reference.definitionVersion = '1.*.*';
+  x.catalog.value = x.catalog.value.filter(value => value.properties.version !== '1.10.1');
+  current = await x.analyze();
+  assert.equal(current.qualified, false);
+  assert(current.analysis.blockers.every(value => value.definitionVersion === '1.10.0'));
+  const tied = structuredClone(x.catalog.value.find(value => value.properties.version === '1.10.0'));
+  tied.id += '-preview'; tied.properties.version += '-preview'; tied.properties.policyRule.then.effect = 'audit';
+  x.catalog.value.push(tied);
+  current = await x.analyze();
+  assert.equal(current.qualified, false, 'preview status ties cannot hide a potentially enforced rule');
+  assert.deepEqual([...new Set(current.analysis.observations.map(value => value.definitionVersion))].sort(), ['1.10.0', '1.10.0-preview']);
+});
+
+test('historical version-one evidence is rechecked with its original algorithm, never relabeled', async () => {
+  const x = effectivePolicyFixture();
+  x.definition.properties.policyRule.then.effect = 'audit';
+  const latest = structuredClone(x.definition);
+  latest.id = `${x.definitionId}/versions/1.1.0`; latest.properties.version = '1.1.0';
+  x.catalog.value = [structuredClone(x.definition), latest];
+  const current = await x.analyze(), historical = analyzeEffectivePolicies(x.phase, current.snapshot, 1);
+  const original = structuredClone(historical);
+  assert.equal(historical.version, 1);
+  assert(historical.analysis.observations.every(value => value.versionResolution === 'all-matching-versions'));
+  assert.equal(historical.analysis.observations.length, current.analysis.observations.length * 2);
+  verifyEffectivePolicyEvidence(x.phase, historical);
+  assert.deepEqual(historical, original);
+  assert.throws(() => verifyEffectivePolicyEvidence(x.phase, { ...historical, version: 2 }), /EFFECTIVE_POLICY_BINDING_INVALID/);
+  assert.throws(() => verifyEffectivePolicyEvidence(x.phase, { ...current, version: 1 }), /EFFECTIVE_POLICY_BINDING_INVALID/);
+  assert.throws(() => analyzeEffectivePolicies(x.phase, current.snapshot, 3), /EFFECTIVE_POLICY_BINDING_INVALID/);
 });
 
 test('complete version-list documents avoid redundant reads while summary lists still require exact GETs', async () => {
@@ -478,6 +548,7 @@ test('definition drift, including safe-effect changes, invalidates the fresh evi
 
 test('scoped routes remain GET-only, explicit-account authenticated, bounded and four-way concurrency limited', async t => {
   const x = effectivePolicyFixture(), directory = await scratch(t);
+  delete x.initiative.properties.policyDefinitions[0].definitionVersion;
   x.definition.properties.policyRule.then.effect = 'audit';
   for (let i = 1; i < 9; i++) {
     const version = `1.${i}.0`, d = structuredClone(x.definition);
