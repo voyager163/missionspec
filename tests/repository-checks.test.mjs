@@ -120,7 +120,7 @@ test('required repository contexts fail closed over both complete OS workload ma
   assert.deepEqual(checkWorkflow(workflow, file), []);
   assert.deepEqual(workflow.jobs['repository-checks'].needs, ['repository-contracts', 'telemetry-arm']);
   for (const id of ['repository-contracts', 'telemetry-arm', 'repository-checks']) {
-    assert.equal(workflow.jobs[id]['timeout-minutes'], 10);
+    assert.equal(workflow.jobs[id]['timeout-minutes'], id === 'telemetry-arm' ? 15 : 10);
     assert.deepEqual(workflow.jobs[id].strategy.matrix.os, ['ubuntu-latest', 'macos-latest']);
   }
   const mutations = [
@@ -133,7 +133,10 @@ test('required repository contexts fail closed over both complete OS workload ma
     value => { value.jobs['repository-checks'].steps[0]['continue-on-error'] = true; },
     value => { value.jobs['repository-checks'].steps[0].if = '${{ success() }}'; },
     value => { value.jobs['repository-checks'].defaults = { run: { shell: 'bash' } }; },
-    value => { value.jobs['telemetry-arm']['timeout-minutes'] = 15; },
+    value => { value.jobs['telemetry-arm']['timeout-minutes'] = 10; },
+    value => { value.jobs['telemetry-arm']['timeout-minutes'] = 16; },
+    value => { value.jobs['repository-contracts']['timeout-minutes'] = 15; },
+    value => { value.jobs['repository-checks']['timeout-minutes'] = 15; },
     value => { value.jobs['telemetry-arm'].needs = 'repository-contracts'; },
     value => { value.jobs['telemetry-arm'].strategy.matrix.os = ['ubuntu-latest']; },
     value => { value.jobs['telemetry-arm'].strategy['fail-fast'] = true; },

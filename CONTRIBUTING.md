@@ -105,10 +105,13 @@ The workflow also restores the isolated ingestion service's own dependencies,
 runs its local tests, and runs static infrastructure-as-code tests, without Azure
 authentication or deployment. These are separate checks; the root command does
 not substitute for their results when changing operator components.
-Repository/service checks and the full ARM suite run in separate ten-minute
-jobs on both Linux and macOS. The existing required `Repository checks`
+Repository/service checks and the full ARM suite run in separate jobs on both
+Linux and macOS. Repository/service jobs retain their ten-minute limit; only
+ARM shard jobs have the explicitly approved fifteen-minute CI limit.
+The existing required `Repository checks`
 contexts aggregate both complete workload matrices and fail unless both
-succeed; splitting workloads does not skip tests or increase a job timeout.
+succeed; no tests or required gates are skipped, and production deadlines
+are unchanged.
 The ARM matrix partitions the full file glob with all five native Node
 shard indices on each OS; coverage and aggregate wiring are regression-tested.
 

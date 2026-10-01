@@ -105,8 +105,10 @@ aggregate those workers with the complete independent ARM matrix:
 
 All 22 required context names remain unchanged. The aggregate gates explicitly
 fail if either workload matrix fails, is cancelled or skipped, or has no
-successful result. The workloads keep their ten-minute job limits rather
-than reducing coverage or extending timeouts. Installs are not repeated across
+successful result. Repository/service workers and aggregate gates keep their
+ten-minute job limits; only ARM shard jobs use the explicitly approved
+fifteen-minute CI limit. Test coverage and production deadlines are unchanged.
+Installs are not repeated across
 the independent Windows
 private-state/console/execution jobs. It uses the existing restore's npm cache;
 no new dependency, lifecycle script, registry/authentication probe or online

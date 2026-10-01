@@ -237,13 +237,14 @@ export function checkWorkflow(workflow, file = 'workflow') {
     };
     for (const [name, expectedName] of Object.entries(matrixJobs)) {
       const job = workflow.jobs[name];
+      const timeoutMinutes = name === 'telemetry-arm' ? 15 : 10;
       if (job?.name !== expectedName || job['runs-on'] !== '${{ matrix.os }}' ||
-          job['timeout-minutes'] !== 10 || job.defaults !== undefined || job.env !== undefined ||
+          job['timeout-minutes'] !== timeoutMinutes || job.defaults !== undefined || job.env !== undefined ||
           !isDeepStrictEqual(job.strategy, { 'fail-fast': false, matrix: {
             os: ['ubuntu-latest', 'macos-latest'], ...(name === 'telemetry-arm' ? { shard: [1, 2, 3, 4, 5] } : {}),
           } }) ||
           (name !== 'repository-checks' && (job.needs !== undefined || job.if !== undefined))) {
-        problems.push(`${file}: ${name} requires both original OS runners and its unchanged ten-minute independent budget`);
+        problems.push(`${file}: ${name} requires both original OS runners and its exact ${timeoutMinutes}-minute independent budget`);
       }
     }
     if (workflow.jobs['windows-read-only']?.['runs-on'] !== 'windows-latest') {

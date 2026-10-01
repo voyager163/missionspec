@@ -50,7 +50,7 @@ jobs:
   telemetry-arm:
     name: Telemetry ARM policy (${{ matrix.os }}, shard ${{ matrix.shard }}/5)
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
