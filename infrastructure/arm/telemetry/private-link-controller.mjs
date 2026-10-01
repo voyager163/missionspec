@@ -292,8 +292,11 @@ export function verifyPrivateLinkPreview(phase, preview, snapshot, known) {
         name: value.id.split('/').at(-1), properties: structuredClone(value.expected.properties),
       }));
     }
-    if (phase.stage === 'create-network' && d.type === 'Microsoft.Network/virtualNetworks/subnets' &&
+    if (['Microsoft.Network/virtualNetworks/subnets', 'Microsoft.Network/privateDnsZones/virtualNetworkLinks',
+      'Microsoft.Network/privateEndpoints/privateDnsZoneGroups'].includes(d.type) &&
         actual.name === d.id.split('/').at(-1)) expected.name = actual.name;
+    if (phase.stage === 'create-queue-endpoint' && d.type === 'Microsoft.Network/privateDnsZones' &&
+        !Object.hasOwn(actual, 'properties') && isDeepStrictEqual(expected.properties, {})) delete expected.properties;
     for (const key of ['apiVersion', 'dependsOn']) {
       if (Object.hasOwn(actual, key)) equal(actual[key], expected[key], 'PRIVATE_LINK_WHATIF_CONTRADICTION');
       delete actual[key]; delete expected[key];

@@ -177,7 +177,10 @@ Network CREATE previews may repeat the two explicitly declared subnet
 properties inside the parent VNet and return leaf names on the separately
 identified subnet resources. Both nested definitions and both separate
 CREATE entries must exactly match the fixed plan; no extra subnet or property
-is allowed, and raw what-if bytes remain retained unchanged. Preserved
+is allowed, and raw what-if bytes remain retained unchanged.
+Private DNS link and zone-group previews also use exact child leaf names.
+Only the empty private DNS zone property bag may be omitted; nonempty,
+null or missing endpoint/link/zone-group properties are not waived. Preserved
 Defender Event Grid resources may appear only as `Ignore`, and only after
 their existing full current-inventory validator proves the exact IDs and
 configuration. An unverified resource or any mutation of those resources

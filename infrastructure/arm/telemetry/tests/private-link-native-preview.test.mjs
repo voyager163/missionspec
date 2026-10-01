@@ -59,3 +59,33 @@ test('only independently verified current Defender resources enter preserved Ign
   snapshot.defender.topic.id += '-foreign';
   assert.throws(() => privateLinkPreservedIds(f.c, context, snapshot));
 });
+
+test('DNS previews permit only exact child leaf names and omission of the empty zone property bag', async () => {
+  const f = await privateLinkFixture({ ...privateInput, version: 2 });
+  const phase = privateLinkPhase(f.c, f.context, 'create-queue-endpoint');
+  const preview = { status: 'Succeeded', changes: phase.resources.map(d => {
+    const after = { ...structuredClone(d.expected), id: d.id };
+    delete after.dependsOn;
+    if (d.type === 'Microsoft.Network/privateDnsZones') delete after.properties;
+    if (['Microsoft.Network/privateDnsZones/virtualNetworkLinks',
+      'Microsoft.Network/privateEndpoints/privateDnsZoneGroups'].includes(d.type)) after.name = d.id.split('/').at(-1);
+    return { resourceId: d.id, changeType: 'Create', after };
+  }) };
+  const bytes = json(preview);
+  verifyPrivateLinkPreview(phase, preview, {}, []);
+  assert.equal(json(preview), bytes);
+  const locate = (p, type) => p.changes.find(c => c.after.type === `Microsoft.Network/${type}`).after;
+  for (const change of [
+    p => { locate(p, 'privateDnsZones').properties = null; },
+    p => { locate(p, 'privateDnsZones').properties = { unreviewed: true }; },
+    p => { delete locate(p, 'privateEndpoints').properties; },
+    p => { delete locate(p, 'privateDnsZones/virtualNetworkLinks').properties; },
+    p => { locate(p, 'privateDnsZones/virtualNetworkLinks').name = 'foreign/link'; },
+    p => { locate(p, 'privateEndpoints/privateDnsZoneGroups').name = 'foreign/queue'; },
+    p => { locate(p, 'privateEndpoints/privateDnsZoneGroups').properties.privateDnsZoneConfigs[0].properties.privateDnsZoneId += '-foreign'; },
+    p => { locate(p, 'privateDnsZones/virtualNetworkLinks').properties.registrationEnabled = true; },
+  ]) {
+    const changed = structuredClone(preview); change(changed);
+    assert.throws(() => verifyPrivateLinkPreview(phase, changed, {}, []));
+  }
+});
