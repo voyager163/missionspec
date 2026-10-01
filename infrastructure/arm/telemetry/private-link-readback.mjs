@@ -179,7 +179,7 @@ function verifyNetwork(c, context, s) {
     }
   }
 }
-function verifyEndpoint(c, context, s) {
+export function verifyPrivateLinkEndpoint(c, context, s) {
   const t = context.plan.topology, n = t.ids, r = s.resources, d = privateLinkResources(c, t, context.origin);
   owned(c, r[n.endpoint], d.endpoint);
   const p = resource(r[n.endpoint], n.endpoint, d.endpoint.type, API.network, ['provisioningState', 'subnet',
@@ -645,7 +645,7 @@ export function verifyPrivateLinkSnapshot(c, context, s, stage = 'initial', envi
     plEqual([...new Set(spaces)].sort(), [...t.addresses.knownAddressSpaces].sort(), 'PRIVATE_LINK_ADDRESS_INVENTORY_CHANGED');
   } else verifyNetwork(c, context, s);
   let privatePath = null;
-  if (atLeast(stage, 'create-queue-endpoint')) privatePath = verifyEndpoint(c, context, s);
+  if (atLeast(stage, 'create-queue-endpoint')) privatePath = verifyPrivateLinkEndpoint(c, context, s);
   else if (plList(s.lists.storageConnections).length || s.nic !== null) fail('PRIVATE_LINK_ALTERNATIVE_ENDPOINT');
   if (atLeast(stage, 'create-environment')) verifyEnvironment(c, context, s, environmentWireVersion);
   else if (s.resources[n.managedGroup] !== null || Object.keys(s.managed).length) fail('PRIVATE_LINK_MANAGED_GROUP_ALREADY_EXISTS');

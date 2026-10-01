@@ -3,7 +3,7 @@ import test from 'node:test';
 import { digest, json } from '../definition.mjs';
 import { privateLinkPhase } from '../private-link.mjs';
 import { privateLinkPreservedIds, verifyPrivateLinkPreview } from '../private-link-controller.mjs';
-import { privateLinkFixture, privateInput } from './private-link.fixture.mjs';
+import { privateLinkFixture, privateInput, privateSnapshotFixture } from './private-link.fixture.mjs';
 import { queueDefenderFixture } from './queue-defender.fixture.mjs';
 
 test('native network preview binds exact aggregated subnets plus both separate child creates without changing bytes', async () => {
@@ -87,5 +87,33 @@ test('DNS previews permit only exact child leaf names and omission of the empty 
   ]) {
     const changed = structuredClone(preview); change(changed);
     assert.throws(() => verifyPrivateLinkPreview(phase, changed, {}, []));
+  }
+});
+
+test('only the fully verified owned endpoint NIC may be preserved by later control and runtime previews', async () => {
+  const f = await privateLinkFixture({ ...privateInput, version: 2 });
+  const snapshot = privateSnapshotFixture(f, 'create-queue-endpoint');
+  const known = privateLinkPreservedIds(f.c, f.context, snapshot);
+  assert(known.includes(snapshot.nic.id));
+  const phase = privateLinkPhase(f.c, f.context, 'create-environment');
+  const preview = { status: 'Succeeded', changes: [
+    { resourceId: snapshot.nic.id, changeType: 'Ignore' },
+    ...phase.resources.map(d => ({ resourceId: d.id, changeType: 'Create',
+      after: { ...structuredClone(d.expected), id: d.id } })),
+  ] };
+  verifyPrivateLinkPreview(phase, preview, snapshot, known);
+  for (const change of [
+    s => { s.nic.id += '-foreign'; },
+    s => { s.nic.properties.privateEndpoint.id += '-foreign'; },
+    s => { s.nic.properties.enableIPForwarding = true; },
+    s => { s.nic.properties.ipConfigurations[0].properties.privateIPAddress = '10.1.1.1'; },
+    s => { s.nic.properties.ipConfigurations[0].properties.privateLinkConnectionProperties.groupId = 'blob'; },
+  ]) {
+    const changed = structuredClone(snapshot); change(changed);
+    assert.throws(() => privateLinkPreservedIds(f.c, f.context, changed));
+  }
+  for (const changeType of ['Create', 'Modify', 'Delete']) {
+    const changed = structuredClone(preview); changed.changes[0].changeType = changeType;
+    assert.throws(() => verifyPrivateLinkPreview(phase, changed, snapshot, known), /SCOPE_CHANGED/);
   }
 });

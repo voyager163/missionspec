@@ -15,7 +15,8 @@ import { PRIVATE_LINK_API as API, PRIVATE_LINK_CONTROL_STAGES as STAGES, PRIVATE
   PRIVATE_LINK_RUNTIME_STAGES, privateLinkAtLeast, privateLinkCost, privateLinkPhase,
   verifyPrivateLinkControlContext, verifyPrivateLinkEnvironmentWire } from './private-link.mjs';
 import { collectPrivateLinkSnapshot, privateLinkGeneration, privateLinkHash as hash, privateLinkReadRequests,
-  privateLinkResourceDescriptors, privateLinkResourceState, verifyPrivateLinkSnapshot, plEqual as equal, plList, plOnly } from './private-link-readback.mjs';
+  privateLinkResourceDescriptors, privateLinkResourceState, verifyPrivateLinkSnapshot, verifyPrivateLinkEndpoint,
+  plEqual as equal, plList, plOnly } from './private-link-readback.mjs';
 import { verifyPrivateLinkRuntimeCompletion } from './private-link-runtime.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url)), sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -259,6 +260,10 @@ function verifyProviders(context, catalogs, phase) {
 }
 export function privateLinkPreservedIds(c, context, snapshot) {
   const ids = Object.keys(snapshot.resources).filter(id => snapshot.resources[id] !== null);
+  if (snapshot.nic !== null && snapshot.nic !== undefined) {
+    verifyPrivateLinkEndpoint(c, context, snapshot);
+    ids.push(snapshot.nic.id);
+  }
   if (context.origin.adoption.version === 3) {
     ids.push(...Object.keys(queueDefenderInventory(c, context.origin.adoption.origin,
       context.origin.adoption.proposal.defender, snapshot.defender)));

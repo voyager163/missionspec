@@ -185,6 +185,10 @@ Defender Event Grid resources may appear only as `Ignore`, and only after
 their existing full current-inventory validator proves the exact IDs and
 configuration. An unverified resource or any mutation of those resources
 still blocks the phase.
+The provider-created endpoint NIC enters this same preserved inventory only
+after the full endpoint/NIC/DNS validator proves its ownership, private IP,
+queue-only connection and privacy settings. Later control and runtime
+previews may ignore that exact NIC, never create, modify or delete it.
 The current environment execution phase is version 2: it projects the
 immutable plan's no-export intent to
 `appLogsConfiguration: { destination: null, logAnalyticsConfiguration: null }`,
