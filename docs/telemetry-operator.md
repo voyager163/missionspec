@@ -173,6 +173,15 @@ and UUID-bound replacement-app phases from historical collector requests.
 The same authenticated request bounds, no-redirect/no-retry transport and
 full static payload review apply. Direct budget/PATCH/DELETE previews bind
 their precise request and preimage rather than pretending they are ARM what-if.
+Network CREATE previews may repeat the two explicitly declared subnet
+properties inside the parent VNet and return leaf names on the separately
+identified subnet resources. Both nested definitions and both separate
+CREATE entries must exactly match the fixed plan; no extra subnet or property
+is allowed, and raw what-if bytes remain retained unchanged. Preserved
+Defender Event Grid resources may appear only as `Ignore`, and only after
+their existing full current-inventory validator proves the exact IDs and
+configuration. An unverified resource or any mutation of those resources
+still blocks the phase.
 Budget changes are separately enumerated: migration project/telemetry/state
 425/375/50 USD, then steady 375/325/50 after old-environment retirement, with
 exact notification/period preservation and the new managed group in coverage.

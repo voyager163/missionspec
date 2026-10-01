@@ -7,6 +7,7 @@ import { closed, digest, fail, ids, json, sameId } from './definition.mjs';
 import { canonicalInstant, verifyDeploymentIdentity } from './policy.mjs';
 import { collectEffectivePolicies, verifyEffectivePolicyEvidence } from './effective-policy.mjs';
 import { verifyQueueAdoptionSources, queueArmInstant } from './queue-adoption.mjs';
+import { queueDefenderInventory } from './queue-defender.mjs';
 import { nspTargetKey } from './nsp.mjs';
 import { az, sourceDigest, publishedSourceDigest, save, saveImmutable, load, readBatch, limitReadConcurrency,
   asyncWhatIf, authenticatedWhatIfRequest, whatIfRequestContext, safeOperationFailure, verifyReceiverSource, readNspHead, privateDirectory } from './controller.mjs';
@@ -252,6 +253,14 @@ function verifyProviders(context, catalogs, phase) {
         (d.expected.location && d.expected.location !== 'global' && !rows[0].locations?.some(value => value.replaceAll(' ', '').toLowerCase() === context.plan.topology.location))) fail('PRIVATE_LINK_PINNED_API_UNVERIFIED');
   }
 }
+export function privateLinkPreservedIds(c, context, snapshot) {
+  const ids = Object.keys(snapshot.resources).filter(id => snapshot.resources[id] !== null);
+  if (context.origin.adoption.version === 3) {
+    ids.push(...Object.keys(queueDefenderInventory(c, context.origin.adoption.origin,
+      context.origin.adoption.proposal.defender, snapshot.defender)));
+  }
+  return [...new Set(ids)];
+}
 export function verifyPrivateLinkPreview(phase, preview, snapshot, known) {
   if (!phase.deploymentId) {
     closed(preview, ['version', 'kind', 'request', 'preimageSha256', 'nativeArmWhatIf']);
@@ -274,6 +283,17 @@ export function verifyPrivateLinkPreview(phase, preview, snapshot, known) {
     if (change.changeType !== 'Create' || change.before !== undefined) fail('PRIVATE_LINK_CREATE_ONLY_REQUIRED');
     const actual = structuredClone(change.after), expected = { ...structuredClone(d.expected), id: d.id };
     if (!actual || typeof actual !== 'object') fail('PRIVATE_LINK_WHATIF_AFTER_REQUIRED');
+    if (phase.stage === 'create-network' && d.type === 'Microsoft.Network/virtualNetworks' &&
+        Object.hasOwn(actual.properties ?? {}, 'subnets')) {
+      const children = phase.resources.filter(value => value.type === 'Microsoft.Network/virtualNetworks/subnets' &&
+        sameId(value.id.slice(0, value.id.lastIndexOf('/subnets/')), d.id));
+      if (children.length !== 2) fail('PRIVATE_LINK_WHATIF_CONTRADICTION');
+      expected.properties.subnets = children.map(value => ({
+        name: value.id.split('/').at(-1), properties: structuredClone(value.expected.properties),
+      }));
+    }
+    if (phase.stage === 'create-network' && d.type === 'Microsoft.Network/virtualNetworks/subnets' &&
+        actual.name === d.id.split('/').at(-1)) expected.name = actual.name;
     for (const key of ['apiVersion', 'dependsOn']) {
       if (Object.hasOwn(actual, key)) equal(actual[key], expected[key], 'PRIVATE_LINK_WHATIF_CONTRADICTION');
       delete actual[key]; delete expected[key];
@@ -331,7 +351,7 @@ function verifyProof(c, context, evidence, phase, proof, at) {
   verifyPermissions(c, context, phase, proof.permissions); verifyProviders(context, proof.providers, phase);
   const policyPhase = policyTargetPhase(c, context, phase, proof.before);
   verifyEffectivePolicyEvidence(policyPhase, proof.policy);
-  verifyPrivateLinkPreview(phase, proof.preview, proof.before, Object.keys(proof.before.resources).filter(id => proof.before.resources[id] !== null));
+  verifyPrivateLinkPreview(phase, proof.preview, proof.before, privateLinkPreservedIds(c, context, proof.before));
   if (privateLinkAtLeast(phase.stage, 'retire-old-receiver')) {
     verifyPrivateLinkRuntimeCompletion(c, context, proof.runtimeCompletion, at);
     const runtimeEvidence = proof.runtimeCompletion.controlEvidence;
@@ -1277,7 +1297,7 @@ export async function currentPrivateLinkRuntimeProof(c, context, evidence, direc
   if (await io.sourceDigest() !== source || io.now() >= deadline) fail('PRIVATE_LINK_RUNTIME_PROOF_EXPIRED');
   return { version: 1, kind: 'current-private-link-runtime-proof', sourceSha256: source, checkedAt: stamp(io.now()),
     head, headSha256: hash(head), planSha256: context.plan.planSha256, snapshot,
-    effectivePolicy: policy,
+    effectivePolicy: policy, preservedResourceIds: privateLinkPreservedIds(c, context, snapshot),
     billingReview: options.costReview ?? currentReview.costReview, costEvidence: options.costEvidence ?? currentReview.costEvidence,
     policyRevision: revision,
     prerequisites: { ...prerequisites, environment: snapshot.resources[context.plan.topology.ids.environment] } };

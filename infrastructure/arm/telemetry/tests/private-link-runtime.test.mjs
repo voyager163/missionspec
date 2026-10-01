@@ -38,7 +38,9 @@ function windowFixture() {
     reserve: async (kind, key, value) => { const name = `fence-${kind}-${key}`; if (files.has(name)) throw new Error('PRIVATE_RUNTIME_PHYSICAL_FENCE_NO_RETRY');
       files.set(name, structuredClone(value)); },
     windowHead: async intent => files.get(`fence-window-${intent.physicalKey}`),
-    current: async () => ({ sourceSha256: f.source, headSha256: 'a'.repeat(64), prerequisites: f.prerequisites }),
+    current: async () => ({ sourceSha256: f.source, headSha256: 'a'.repeat(64), prerequisites: f.prerequisites,
+      preservedResourceIds: [ids(f.c).app, ids(f.c).environment, f.prerequisites.environment.id,
+        ids(f.c).registry, ids(f.c).ingestIdentity, ids(f.c).pullIdentity] }),
     identities: async () => f.observation(flag).identities,
     observe: async target => ({ ...(target.appId === f.r.app ? f.oldObservation() :
       target.appId === f.publicTarget.appId ? f.publicObservation(publicCreatedAt) : f.observation(flag)), observedAt: new Date(now).toISOString() }),
@@ -152,10 +154,11 @@ test('backend denial and ambiguous enqueue stop before a second event but still 
 
 test('deadline after last asynchronous read stops dispatch and storage illness cannot veto rollback', async () => {
   const f = windowFixture();
+  const current = f.io.current;
   let calls = 0;
   f.io.current = async () => {
     if (++calls >= 3) { f.advance(420001); throw new Error('PRIVATE_STORAGE_UNAVAILABLE'); }
-    return { sourceSha256: f.source, prerequisites: f.prerequisites };
+    return current();
   };
   const result = await f.run();
   assert.equal(f.posted, 0);
@@ -166,9 +169,10 @@ test('deadline after last asynchronous read stops dispatch and storage illness c
 
 test('a late window still takes its separately approved false-only recovery but can never qualify', async () => {
   const f = windowFixture();
+  const current = f.io.current;
   f.io.current = async () => {
     if (f.events.includes('write:true')) { f.advance(610000); throw new Error('PRIVATE_STORAGE_UNAVAILABLE'); }
-    return { prerequisites: f.prerequisites };
+    return current();
   };
   const result = await f.run();
   assert.equal(result.enabledWindowExceeded, true);
@@ -451,9 +455,10 @@ test('realistic 60s current proofs and 30s previews do not consume create or ena
   verifyPrivateLinkRuntimeCompletion(f.c, f.context, result, f.io.now());
 
   const created = windowFixture();
+  const creationCurrent = created.io.current;
   let present = false;
   created.io.read = async id => id === created.target.appId ? present ? created.observation('false').app : null : {};
-  created.io.current = async until => { created.advance(60000); assert(created.io.now() < until); return {}; };
+  created.io.current = async until => { created.advance(60000); assert(created.io.now() < until); return creationCurrent(); };
   created.io.preview = async phase => {
     created.advance(30000);
     return { validation: { properties: { provisioningState: 'Succeeded' } }, whatIf: { status: 'Succeeded', changes: [
@@ -825,6 +830,38 @@ test('a claimed absent public control without exact create/delete evidence or wi
   ]) {
     const value = structuredClone(result); change(value);
     assert.throws(() => verifyPrivateLinkRuntimeCompletion(f.c, f.context, value, f.io.now()));
+  }
+});
+
+test('private and public app previews preserve only independently current known resources', async () => {
+  const f = windowFixture(), preview = f.io.preview, actions = [];
+  f.io.preview = async phase => {
+    const value = await preview(phase);
+    actions.push(phase.action);
+    value.whatIf.changes.unshift(
+      { resourceId: ids(f.c).app, changeType: 'Ignore' },
+      { resourceId: ids(f.c).environment, changeType: 'NoChange' },
+      { resourceId: f.prerequisites.environment.id, changeType: 'Ignore' });
+    return value;
+  };
+  const result = await f.run();
+  assert.equal(result.outcome, 'qualified-private-delivery-disabled');
+  assert.deepEqual(actions, ['enable', 'create-public-probe']);
+  verifyPrivateLinkRuntimeCompletion(f.c, f.context, result, f.io.now());
+  for (const change of [
+    value => { value.resourceId += '-unknown'; },
+    value => { value.changeType = 'Modify'; },
+    value => { value.error = { code: 'UNIT uncertainty' }; },
+    value => { value.nextLink = 'https://unit.invalid/next'; },
+  ]) {
+    const negative = windowFixture(), originalPreview = negative.io.preview;
+    negative.io.preview = async phase => {
+      const value = await originalPreview(phase), ignored = { resourceId: ids(negative.c).app, changeType: 'Ignore' };
+      change(ignored); value.whatIf.changes.push(ignored);
+      return value;
+    };
+    await assert.rejects(negative.run(), /PRIVATE_RUNTIME_PREVIEW_SCOPE/);
+    assert(!negative.events.some(value => value.startsWith('write:') || value === 'create:public'));
   }
 });
 

@@ -497,6 +497,7 @@ export function privateRuntimePhase(c, target, instanceId, action, predecessorSh
 }
 
 export function verifyPrivateRuntimePreview(target, phase, preview, before, preserved, runtime) {
+  if (!Array.isArray(preserved) || preserved.some(id => typeof id !== 'string')) fail('PRIVATE_RUNTIME_PRESERVED_INVENTORY_REQUIRED');
   if (preview.validation?.properties?.provisioningState !== 'Succeeded' || preview.validation.error ||
       preview.validation.properties.error || preview.validation.properties.errors?.length ||
       preview.validation.errors?.length || preview.validation.nextLink ||
@@ -505,7 +506,8 @@ export function verifyPrivateRuntimePreview(target, phase, preview, before, pres
       !Array.isArray(preview.whatIf.changes)) fail('PRIVATE_RUNTIME_PREVIEW_REQUIRED');
   const seen = new Set(), changes = [];
   for (const change of preview.whatIf.changes) {
-    if (typeof change.resourceId !== 'string' || seen.has(change.resourceId.toLowerCase())) fail('PRIVATE_RUNTIME_PREVIEW_SCOPE');
+    if (typeof change.resourceId !== 'string' || seen.has(change.resourceId.toLowerCase()) ||
+        change.error || change.nextLink) fail('PRIVATE_RUNTIME_PREVIEW_SCOPE');
     seen.add(change.resourceId.toLowerCase());
     if (['NoChange', 'Ignore'].includes(change.changeType) && preserved.some(id => sameId(id, change.resourceId))) continue;
     changes.push(change);
@@ -566,7 +568,7 @@ export async function createPrivateLinkReceiver(c, context, evidence, candidate,
   const current = await io.current(stageDeadline(io, cap)); guard();
   const before = await io.read(target.appId, appApi, stageDeadline(io, cap));
   const preview = await io.preview(phase, stageDeadline(io, cap)); guard();
-  verifyPrivateRuntimePreview(target, phase, preview, before, context.plan.preservedResourceIds ?? [],
+  verifyPrivateRuntimePreview(target, phase, preview, before, current.preservedResourceIds,
     { c, candidate, identities: { [ids(c).ingestIdentity]: prerequisites.identity, [ids(c).pullIdentity]: prerequisites.pullIdentity } });
   await io.immutable('private-receiver-preview.json', { binding, current, before, preview });
   let receipt, intent, effectUntil;
@@ -977,7 +979,7 @@ export async function qualifyPrivateLinkDelivery(c, context, evidence, candidate
   const initial = await io.observe(target, stageDeadline(io, approvalCap)); reviewed();
   verifyObservation(c, target, candidate, initial, 'false');
   const preview = await io.preview(phases.enable, stageDeadline(io, approvalCap)); reviewed();
-  verifyPrivateRuntimePreview(target, phases.enable, preview, initial.app, context.plan.preservedResourceIds ?? [],
+  verifyPrivateRuntimePreview(target, phases.enable, preview, initial.app, current.preservedResourceIds,
     { c, candidate, identities: initial.identities });
   const disableBody = structuredClone(phases.disable.request);
   const publicTarget = publicControlTarget(c, target, context, evidence);
@@ -1409,7 +1411,7 @@ async function createPublicControl(c, window, io) {
   const before = await io.read(target.appId, appApi, stageDeadline(io, cap));
   const preview = await io.preview(phase, stageDeadline(io, cap)); guard();
   const identities = await io.identities(stageDeadline(io, cap));
-  verifyPrivateRuntimePreview(target, phase, preview, before, [], { c, candidate, identities });
+  verifyPrivateRuntimePreview(target, phase, preview, before, current.preservedResourceIds, { c, candidate, identities });
   await io.immutable('private-public-preview.json', { phase, current, before, preview });
   let intent, effectUntil;
   await io.deploy(phase.request, guard, stageDeadline(io, cap), async until => {

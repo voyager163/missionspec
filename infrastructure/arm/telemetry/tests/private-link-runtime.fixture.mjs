@@ -162,7 +162,9 @@ export async function privateRuntimeCompletionFixture(f, evidence, prerequisites
     reserve: async (kind, key, value) => { const name = `${kind}-${key}`; if (store.has(name)) throw new Error('UNIT_FENCE_REPLAY');
       store.set(name, structuredClone(value)); },
     windowHead: async intent => store.get(`window-${intent.physicalKey}`),
-    current: async () => ({ sourceSha256: f.source, headSha256: prerequisites.controlHeadSha256, prerequisites }),
+    current: async () => ({ sourceSha256: f.source, headSha256: prerequisites.controlHeadSha256, prerequisites,
+      preservedResourceIds: Object.keys(evidence.records.at(-1).after.resources).filter(id =>
+        evidence.records.at(-1).after.resources[id] !== null) }),
     identities: async () => identityValues,
     observe: async selected => observe(selected),
     read: async id => id === target.appId ? created ? observe(target).app : null :
