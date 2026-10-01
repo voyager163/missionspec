@@ -135,11 +135,14 @@ function verifyNetwork(c, context, s) {
     const a = resource(r[id], id, 'Microsoft.Network/virtualNetworks/subnets', API.network,
       ['addressPrefix', 'delegations', 'privateEndpointNetworkPolicies', 'privateLinkServiceNetworkPolicies',
         'provisioningState', 'ipConfigurations', 'privateEndpoints', 'serviceAssociationLinks', 'resourceNavigationLinks',
-        'serviceEndpoints', 'serviceEndpointPolicies', 'networkSecurityGroup', 'routeTable', 'natGateway', 'defaultOutboundAccess']);
+        'serviceEndpoints', 'serviceEndpointPolicies', 'networkSecurityGroup', 'routeTable', 'natGateway', 'defaultOutboundAccess', 'purpose']);
     succeeded(a);
     if (a.addressPrefix !== address || a.networkSecurityGroup || a.routeTable || a.natGateway ||
         (a.defaultOutboundAccess !== undefined && typeof a.defaultOutboundAccess !== 'boolean')) fail('PRIVATE_LINK_SUBNET_DRIFT');
     for (const key of ['serviceEndpoints', 'serviceEndpointPolicies']) if (a[key] !== undefined) plEqual(a[key], [], 'PRIVATE_LINK_SUBNET_FEATURE_DRIFT');
+    if (a.purpose !== undefined && (isApps || r[n.endpoint] === null || a.purpose !== 'PrivateEndpoints')) {
+      fail('PRIVATE_LINK_SUBNET_PURPOSE_UNVERIFIED');
+    }
     if (isApps) {
       if (!Array.isArray(a.delegations) || a.delegations.length !== 1) fail('PRIVATE_LINK_ACA_DELEGATION_REQUIRED');
       const delegation = a.delegations[0];
@@ -181,8 +184,11 @@ function verifyEndpoint(c, context, s) {
   owned(c, r[n.endpoint], d.endpoint);
   const p = resource(r[n.endpoint], n.endpoint, d.endpoint.type, API.network, ['provisioningState', 'subnet',
     'privateLinkServiceConnections', 'manualPrivateLinkServiceConnections', 'networkInterfaces', 'customDnsConfigs',
-    'ipConfigurations', 'customNetworkInterfaceName', 'resourceGuid']);
+    'ipConfigurations', 'customNetworkInterfaceName', 'resourceGuid', 'isIPv6EnabledPrivateEndpoint']);
   succeeded(p); ref(p.subnet, n.endpointSubnet);
+  if (p.isIPv6EnabledPrivateEndpoint !== undefined && p.isIPv6EnabledPrivateEndpoint !== false) fail('PRIVATE_LINK_IPV6_UNREVIEWED');
+  if (p.customNetworkInterfaceName !== undefined && p.customNetworkInterfaceName !== '') fail('PRIVATE_LINK_NIC_NAME_UNREVIEWED');
+  if (p.customDnsConfigs !== undefined) plEqual(p.customDnsConfigs, [], 'PRIVATE_LINK_CUSTOM_DNS_FORBIDDEN');
   if (p.manualPrivateLinkServiceConnections !== undefined) plEqual(p.manualPrivateLinkServiceConnections, [], 'PRIVATE_LINK_MANUAL_CONNECTION_FORBIDDEN');
   if (p.ipConfigurations !== undefined) plEqual(p.ipConfigurations, [], 'PRIVATE_LINK_STATIC_IP_UNREVIEWED');
   if (!Array.isArray(p.privateLinkServiceConnections) || p.privateLinkServiceConnections.length !== 1) fail('PRIVATE_LINK_QUEUE_CONNECTION_REQUIRED');
@@ -203,8 +209,26 @@ function verifyEndpoint(c, context, s) {
     `${ids(c).group}/providers/Microsoft.Network/networkInterfaces`)) fail('PRIVATE_LINK_NIC_SCOPE_DRIFT');
   const np = resource(s.nic, nicId, 'Microsoft.Network/networkInterfaces', API.network, ['provisioningState',
     'resourceGuid', 'ipConfigurations', 'privateEndpoint', 'dnsSettings', 'enableAcceleratedNetworking',
-    'enableIPForwarding', 'disableTcpStateTracking', 'hostedWorkloads', 'nicType', 'macAddress', 'tapConfigurations']);
+    'enableIPForwarding', 'disableTcpStateTracking', 'hostedWorkloads', 'nicType', 'macAddress', 'tapConfigurations',
+    'allowPort25Out', 'auxiliaryMode', 'auxiliarySku', 'defaultOutboundConnectivityEnabled', 'vnetEncryptionSupported'],
+  ['kind', 'managedBy']);
   succeeded(np); ref(np.privateEndpoint, n.endpoint);
+  if (s.nic.kind !== undefined && s.nic.kind !== 'Regular' ||
+      s.nic.managedBy !== undefined && !sameId(s.nic.managedBy, n.endpoint)) fail('PRIVATE_LINK_NIC_OWNER_DRIFT');
+  for (const [key, value] of Object.entries({ allowPort25Out: true, auxiliaryMode: 'None', auxiliarySku: 'None',
+    defaultOutboundConnectivityEnabled: false, vnetEncryptionSupported: false, disableTcpStateTracking: false,
+    nicType: 'Standard', macAddress: '' })) {
+    if (np[key] !== undefined && np[key] !== value) fail('PRIVATE_LINK_NIC_FEATURE_DRIFT');
+  }
+  for (const key of ['hostedWorkloads', 'tapConfigurations']) if (np[key] !== undefined) plEqual(np[key], [], 'PRIVATE_LINK_NIC_FEATURE_DRIFT');
+  if (np.dnsSettings !== undefined) {
+    plOnly(np.dnsSettings, ['dnsServers', 'appliedDnsServers', 'internalDomainNameSuffix']);
+    for (const key of ['dnsServers', 'appliedDnsServers']) if (np.dnsSettings[key] !== undefined) {
+      plEqual(np.dnsSettings[key], [], 'PRIVATE_LINK_CUSTOM_DNS_FORBIDDEN');
+    }
+    if (np.dnsSettings.internalDomainNameSuffix !== undefined &&
+        !/^[a-z0-9]+(?:\.[a-z0-9]+)*\.internal\.cloudapp\.net$/u.test(np.dnsSettings.internalDomainNameSuffix)) fail('PRIVATE_LINK_NIC_DNS_SUFFIX_UNVERIFIED');
+  }
   if (np.enableIPForwarding === true || np.enableAcceleratedNetworking === true ||
       !Array.isArray(np.ipConfigurations) || np.ipConfigurations.length !== 1) fail('PRIVATE_LINK_NIC_DRIFT');
   const ip = np.ipConfigurations[0];
@@ -240,7 +264,12 @@ function verifyEndpoint(c, context, s) {
   succeeded(group);
   if (!Array.isArray(group.privateDnsZoneConfigs) || group.privateDnsZoneConfigs.length !== 1) fail('PRIVATE_LINK_DNS_ZONE_GROUP_DRIFT');
   const config = group.privateDnsZoneConfigs[0];
-  plOnly(config, ['name', 'properties']); plOnly(config.properties, ['privateDnsZoneId', 'recordSets']);
+  plOnly(config, ['id', 'name', 'type', 'etag', 'properties']);
+  if (config.id !== undefined && !sameId(config.id, `${n.dnsZoneGroup}/privateDnsZoneConfigs/queue`) ||
+      config.type !== undefined && !sameId(config.type, 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups/privateDnsZoneConfigs') ||
+      config.etag !== undefined && typeof config.etag !== 'string') fail('PRIVATE_LINK_DNS_ZONE_GROUP_DRIFT');
+  plOnly(config.properties, ['privateDnsZoneId', 'recordSets', 'provisioningState']);
+  if (config.properties.provisioningState !== undefined) succeeded(config.properties);
   if (config.name !== 'queue' || !sameId(config.properties.privateDnsZoneId, n.dnsZone)) fail('PRIVATE_LINK_DNS_ZONE_GROUP_DRIFT');
   if (config.properties.recordSets !== undefined) for (const value of config.properties.recordSets) {
     plOnly(value, ['recordType', 'recordSetName', 'fqdn', 'ipAddresses', 'ttl', 'provisioningState']);
@@ -259,7 +288,20 @@ function verifyEndpoint(c, context, s) {
   plEqual(ap.aRecords, [{ ipv4Address: privateIp }], 'PRIVATE_LINK_DNS_ADDRESS_DRIFT');
   return { privateIp, queueHost };
 }
-function verifyEnvironment(c, context, s) {
+export function verifyPrivateLinkEnvironmentNoLogs(value, version = 2) {
+  if (version === 1) {
+    // Preserve the original phase-1 readback interpretation for immutable history.
+    if (value?.destination !== 'none' || value.logAnalyticsConfiguration) fail('PRIVATE_LINK_ENVIRONMENT_LOGGING_OR_DOMAIN_DRIFT');
+    return;
+  }
+  if (version !== 2) fail('PRIVATE_LINK_WIRE_VERSION_UNSUPPORTED');
+  plOnly(value, ['destination', 'logAnalyticsConfiguration'], 'PRIVATE_LINK_ENVIRONMENT_LOGGING_OR_DOMAIN_DRIFT');
+  if (!Object.hasOwn(value, 'destination') || value.destination !== null ||
+      (Object.hasOwn(value, 'logAnalyticsConfiguration') && value.logAnalyticsConfiguration !== null)) {
+    fail('PRIVATE_LINK_ENVIRONMENT_LOGGING_OR_DOMAIN_DRIFT');
+  }
+}
+function verifyEnvironment(c, context, s, environmentWireVersion) {
   const t = context.plan.topology, n = t.ids, d = privateLinkResources(c, t, context.origin);
   const value = s.resources[n.environment]; owned(c, value, d.environment);
   const p = resource(value, n.environment, d.environment.type, API.app, [
@@ -280,8 +322,8 @@ function verifyEnvironment(c, context, s) {
   plOnly(p.workloadProfiles[0], ['name', 'workloadProfileType', 'minimumCount', 'maximumCount']);
   if (p.workloadProfiles[0].name !== 'Consumption' || p.workloadProfiles[0].workloadProfileType !== 'Consumption' ||
       p.workloadProfiles[0].minimumCount != null || p.workloadProfiles[0].maximumCount != null) fail('PRIVATE_LINK_CONSUMPTION_REQUIRED');
-  if (p.appLogsConfiguration?.destination !== 'none' || p.appLogsConfiguration?.logAnalyticsConfiguration ||
-      p.daprAIInstrumentationKey || p.daprAIConnectionString ||
+  verifyPrivateLinkEnvironmentNoLogs(p.appLogsConfiguration, environmentWireVersion);
+  if (p.daprAIInstrumentationKey || p.daprAIConnectionString ||
       p.customDomainConfiguration?.dnsSuffix || p.customDomainConfiguration?.certificateValue ||
       p.customDomainConfiguration?.certificateKeyVaultProperties) fail('PRIVATE_LINK_ENVIRONMENT_LOGGING_OR_DOMAIN_DRIFT');
   const group = s.resources[n.managedGroup];
@@ -453,7 +495,7 @@ export async function collectPrivateLinkSnapshot(c, context, io, deadline, resou
   s.managed = Object.fromEntries(Object.entries(s.managed).sort(([a], [b]) => a.localeCompare(b)));
   return s;
 }
-export function verifyPrivateLinkSnapshot(c, context, s, stage = 'initial') {
+export function verifyPrivateLinkSnapshot(c, context, s, stage = 'initial', environmentWireVersion = 2) {
   verifyPrivateLinkControlContext(c, context);
   closed(s, ['version', 'kind', 'startedAt', 'completedAt', 'accountContext', 'resources', 'lists', 'diagnostics', 'nic', 'effective', 'defender', 'images', 'managed']);
   if (s.version !== 1 || s.kind !== 'private-link-control-snapshot' || !Number.isSafeInteger(s.startedAt) ||
@@ -605,7 +647,7 @@ export function verifyPrivateLinkSnapshot(c, context, s, stage = 'initial') {
   let privatePath = null;
   if (atLeast(stage, 'create-queue-endpoint')) privatePath = verifyEndpoint(c, context, s);
   else if (plList(s.lists.storageConnections).length || s.nic !== null) fail('PRIVATE_LINK_ALTERNATIVE_ENDPOINT');
-  if (atLeast(stage, 'create-environment')) verifyEnvironment(c, context, s);
+  if (atLeast(stage, 'create-environment')) verifyEnvironment(c, context, s, environmentWireVersion);
   else if (s.resources[n.managedGroup] !== null || Object.keys(s.managed).length) fail('PRIVATE_LINK_MANAGED_GROUP_ALREADY_EXISTS');
   const budgets = privateLinkBudgetConfiguration(c, t), steady = privateLinkBudgetConfiguration(c, t, true);
   const expectedProject = atLeast(stage, 'set-project-steady-budget') ? steady.project : atLeast(stage, 'set-project-migration-budget')

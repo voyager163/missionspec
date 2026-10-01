@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
 import { closed, digest, fail, ids, json, ownerTags } from './definition.mjs';
+import { verifyPrivateLinkEnvironmentWire } from './private-link.mjs';
 
 export const PRIVATE_LINK_WHATIF_STAGES = Object.freeze({
   'create-network': 4, 'create-queue-endpoint': 5, 'create-environment': 6,
@@ -21,8 +22,9 @@ function staticTemplate(value) {
 /** This authorizes only a static, scope-bound what-if request, never the proposed mutation. */
 export function privateLinkWhatIfContext(c, phase) {
   closed(phase, ['version', 'kind', 'phase', 'stage', 'planSha256', 'contextSha256', 'request', 'resources',
-    'scope', 'deploymentId', 'template', 'rolloutMs']);
-  if (phase.version !== 1 || phase.kind !== 'fixed-private-link-control-phase' ||
+    'scope', 'deploymentId', 'template', 'rolloutMs', ...(phase.version === 2 ? ['wireProjection'] : [])]);
+  if (!(phase.version === 1 || phase.version === 2 && phase.stage === 'create-environment') ||
+      phase.kind !== 'fixed-private-link-control-phase' ||
       !Object.hasOwn(PRIVATE_LINK_WHATIF_STAGES, phase.stage) || phase.phase !== `private-link-${phase.stage}` ||
       !['planSha256', 'contextSha256'].every(key => /^[0-9a-f]{64}$/u.test(phase[key] ?? ''))) fail('FIXED_PRIVATE_LINK_WHATIF_REQUIRED');
   const r = ids(c), scope = phase.stage === 'create-queue-role' ? 'subscription' : 'group';
@@ -41,6 +43,10 @@ export function privateLinkWhatIfContext(c, phase) {
       phase.request.apiVersion !== '2022-09-01' || !isDeepStrictEqual(phase.request.body, requestBody) ||
       !Array.isArray(phase.resources) || phase.resources.length < 1 || phase.resources.length > 8 ||
       !isDeepStrictEqual(phase.template?.resources, phase.resources.map(value => value.expected))) fail('FIXED_PRIVATE_LINK_WHATIF_REQUIRED');
+  if (phase.version === 2) {
+    verifyPrivateLinkEnvironmentWire(phase);
+    if (phase.resources[0].expected.name !== `${c.namePrefix}-private-environment`) fail('FIXED_PRIVATE_LINK_WHATIF_REQUIRED');
+  }
   staticTemplate(phase.template);
   const body = JSON.stringify({ ...(scope === 'subscription' ? { location: c.location } : {}),
     properties: { mode: 'Incremental', parameters: {}, template: phase.template,

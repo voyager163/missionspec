@@ -147,6 +147,7 @@ export function privateSnapshotFixture(f, stage, at = f.at) {
   }
   if (privateLinkAtLeast(stage, 'create-environment')) {
     Object.assign(s.resources[n.environment].properties, { defaultDomain: 'unit.australiaeast.azurecontainerapps.io', staticIp: '203.0.113.15' });
+    s.resources[n.environment].properties.appLogsConfiguration = { destination: null, logAnalyticsConfiguration: null };
     s.resources[n.managedGroup] = { id: n.managedGroup, location: f.c.location, managedBy: n.environment, properties: { provisioningState: 'Succeeded' } };
     const ip = `${n.managedGroup}/providers/Microsoft.Network/publicIPAddresses/unit-ip`;
     const lb = `${n.managedGroup}/providers/Microsoft.Network/loadBalancers/unit`;

@@ -22,6 +22,18 @@ function control(stage) {
     resources: [{ id: `${r.group}/providers/Microsoft.Network/virtualNetworks/unit-private-network`,
       type: expected.type, apiVersion: expected.apiVersion, expected }], scope, deploymentId, template, rolloutMs: 120000 };
 }
+function noLogControl() {
+  const phase = control('create-environment');
+  const expected = { type: 'Microsoft.App/managedEnvironments', apiVersion: '2025-07-01',
+    name: `${f.c.namePrefix}-private-environment`, location: f.c.location,
+    properties: { appLogsConfiguration: { destination: 'none' } } };
+  phase.template.resources = [expected];
+  phase.resources = [{ id: `${r.group}/providers/Microsoft.App/managedEnvironments/${expected.name}`,
+    type: expected.type, apiVersion: expected.apiVersion, expected }];
+  const plannedRequestSha256 = digest(json(phase.request));
+  expected.properties.appLogsConfiguration = { destination: null, logAnalyticsConfiguration: null };
+  return { ...phase, version: 2, wireProjection: { version: 1, kind: 'aca-no-log-export-explicit-null', plannedRequestSha256 } };
+}
 function runtime(action) {
   const instance = '00000000-0000-4000-8000-000000000099';
   const publicProbe = action === 'create-public-probe';
@@ -79,6 +91,24 @@ test('Private Link what-if cannot spoof an old phase, another deployment, reques
   ]) {
     const phase = structuredClone(control('create-network')); change(phase);
     assert.throws(() => whatIfRequestContext(f.c, phase));
+  }
+});
+
+test('no-log execution-wire version is closed and bound to the unchanged planned request', () => {
+  const phase = noLogControl(), context = whatIfRequestContext(f.c, phase);
+  assert.equal(context.phaseSha256, digest(json(phase)));
+  assert.deepEqual(JSON.parse(context.body).properties.template.resources[0].properties.appLogsConfiguration,
+    { destination: null, logAnalyticsConfiguration: null });
+  for (const change of [
+    p => { p.version = 1; }, p => { p.version = 3; }, p => { p.stage = 'create-network'; },
+    p => { p.wireProjection.plannedRequestSha256 = 'a'.repeat(64); },
+    p => { p.wireProjection.extra = false; },
+    p => { p.resources[0].expected.properties.appLogsConfiguration.destination = 'azure-monitor'; },
+    p => { p.resources[0].expected.properties.appLogsConfiguration.logAnalyticsConfiguration = {}; },
+    p => { p.resources[0].expected.apiVersion = '2025-01-01'; },
+  ]) {
+    const changed = structuredClone(phase); change(changed);
+    assert.throws(() => whatIfRequestContext(f.c, changed));
   }
 });
 
@@ -146,6 +176,7 @@ test('public probe what-if cannot enable ingestion, modify the old app or select
 test('Python bridge version branches are closed, context-bound and reject cross-family requests before authentication', async () => {
   const cases = [
     ...Object.keys(PRIVATE_LINK_WHATIF_STAGES).map(stage => ({ version: 3, ...whatIfRequestContext(f.c, control(stage)) })),
+    { version: 3, ...whatIfRequestContext(f.c, noLogControl()) },
     ...Object.keys(PRIVATE_LINK_RUNTIME_SUFFIXES).map(action => ({ version: 4, ...whatIfRequestContext(f.c, runtime(action)) })),
   ].map(value => ({ ...value, action: 'start', pollUrl: null, initialResponseFile: null,
     timeoutMs: 15000, deadlineMs: 2000000000000 }));

@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
-import { BUDGET, budgetProperties, closed, digest, fail, ids, json, ownerTags, projectBudgetFilter, validateConfig } from './definition.mjs';
+import { BUDGET, budgetProperties, closed, digest, fail, ids, json, ownerTags, projectBudgetFilter, sameId, validateConfig } from './definition.mjs';
 import { durableQueueCost, QUEUE_PROFILE_KIND, QUEUE_RUNTIME, queueEnvironment, queueResources, verifyQueueTopology } from './durable-queue.mjs';
 import { verifyQueueAdoptionRecord } from './queue-adoption.mjs';
 import { queueDefenderInventory } from './queue-defender.mjs';
@@ -337,11 +337,12 @@ export function verifyPrivateLinkControlContext(c, context) {
   verifyPrivateLinkPlan(c, context.origin, context.plan, context.plan?.sourceSha256);
   return context;
 }
-export function privateLinkPhase(c, context, stage) {
+export function privateLinkPhase(c, context, stage, version = stage === 'create-environment' ? 2 : 1) {
   verifyPrivateLinkControlContext(c, context);
   if (!PRIVATE_LINK_CONTROL_STAGES.includes(stage)) fail('PRIVATE_LINK_CONTROL_STAGE_REQUIRED');
+  if (version !== 1 && !(version === 2 && stage === 'create-environment')) fail('PRIVATE_LINK_WIRE_VERSION_UNSUPPORTED');
   const selected = context.plan.stages.find(value => value.id === stage);
-  const request = selected.proposedRequest, resourceIds = [];
+  const request = structuredClone(selected.proposedRequest), resourceIds = [];
   if (request?.method === 'DELETE' || stage === 'disable-storage-public') resourceIds.push(request.id);
   const resources = structuredClone(selected.resources);
   for (const id of resourceIds) {
@@ -352,12 +353,44 @@ export function privateLinkPhase(c, context, stage) {
     if (isStorage) value.expected.properties.publicNetworkAccess = 'Disabled';
     resources.push(value);
   }
-  return { version: 1, kind: 'fixed-private-link-control-phase', phase: `private-link-${stage}`, stage,
+  if (version === 2) {
+    if (resources.length !== 1 || resources[0].id !== context.plan.topology.ids.environment ||
+        resources[0].type !== 'Microsoft.App/managedEnvironments' || resources[0].apiVersion !== PRIVATE_LINK_API.app ||
+        request?.method !== 'PUT' || request.apiVersion !== PRIVATE_LINK_API.deployment) fail('PRIVATE_LINK_NO_LOG_WIRE_TARGET_CHANGED');
+    equal(resources[0].expected.properties.appLogsConfiguration, { destination: 'none' }, 'PRIVATE_LINK_NO_LOG_INTENT_CHANGED');
+    equal(request.body.properties.template.resources, resources.map(value => value.expected), 'PRIVATE_LINK_NO_LOG_INTENT_CHANGED');
+    resources[0].expected.properties.appLogsConfiguration = { destination: null, logAnalyticsConfiguration: null };
+    request.body.properties.template.resources = resources.map(value => structuredClone(value.expected));
+  }
+  return { version, kind: 'fixed-private-link-control-phase', phase: `private-link-${stage}`, stage,
     planSha256: context.plan.planSha256, contextSha256: hash(context.origin), request,
     resources, scope: stage === 'create-queue-role' ? ids(c).sub : ids(c).group,
     deploymentId: request?.body?.properties?.template ? request.id : null,
     template: request?.body?.properties?.template ?? null,
-    rolloutMs: ['create-environment', 'retire-old-environment'].includes(stage) ? PRIVATE_LINK_LIMITS.environmentRolloutMs : PRIVATE_LINK_LIMITS.rolloutMs };
+    rolloutMs: ['create-environment', 'retire-old-environment'].includes(stage) ? PRIVATE_LINK_LIMITS.environmentRolloutMs : PRIVATE_LINK_LIMITS.rolloutMs,
+    ...(version === 2 ? { wireProjection: { version: 1, kind: 'aca-no-log-export-explicit-null',
+      plannedRequestSha256: hash(selected.proposedRequest) } } : {}) };
+}
+export function verifyPrivateLinkEnvironmentWire(phase) {
+  if (phase?.version !== 2 || phase.kind !== 'fixed-private-link-control-phase' ||
+      phase.stage !== 'create-environment' || phase.phase !== 'private-link-create-environment') fail('PRIVATE_LINK_NO_LOG_WIRE_VERSION_REQUIRED');
+  closed(phase.wireProjection, ['version', 'kind', 'plannedRequestSha256']);
+  if (phase.wireProjection.version !== 1 || phase.wireProjection.kind !== 'aca-no-log-export-explicit-null' ||
+      !sha(phase.wireProjection.plannedRequestSha256) || phase.resources?.length !== 1) fail('PRIVATE_LINK_NO_LOG_WIRE_PROJECTION_CHANGED');
+  const descriptor = phase.resources[0], expected = descriptor.expected;
+  if (descriptor.type !== 'Microsoft.App/managedEnvironments' || descriptor.apiVersion !== PRIVATE_LINK_API.app ||
+      expected?.type !== descriptor.type || expected.apiVersion !== descriptor.apiVersion ||
+      !sameId(descriptor.id, `${phase.scope}/providers/Microsoft.App/managedEnvironments/${expected.name}`) ||
+      !/^missionspec-[a-z0-9]{2,10}-private-environment$/u.test(expected.name ?? '') ||
+      phase.request?.method !== 'PUT' || phase.request.id !== phase.deploymentId ||
+      phase.request.apiVersion !== PRIVATE_LINK_API.deployment) fail('PRIVATE_LINK_NO_LOG_WIRE_TARGET_CHANGED');
+  equal(expected.properties?.appLogsConfiguration, { destination: null, logAnalyticsConfiguration: null }, 'PRIVATE_LINK_NO_LOG_WIRE_CONFIGURATION_CHANGED');
+  equal(phase.template?.resources, [expected], 'PRIVATE_LINK_NO_LOG_WIRE_TEMPLATE_CHANGED');
+  equal(phase.request.body, { properties: { mode: 'Incremental', template: phase.template } }, 'PRIVATE_LINK_NO_LOG_WIRE_REQUEST_CHANGED');
+  const planned = structuredClone(phase.request);
+  planned.body.properties.template.resources[0].properties.appLogsConfiguration = { destination: 'none' };
+  if (hash(planned) !== phase.wireProjection.plannedRequestSha256) fail('PRIVATE_LINK_NO_LOG_WIRE_INTENT_CHANGED');
+  return phase;
 }
 
 export function verifyPrivateLinkPlan(c, context, plan, sourceSha256) {

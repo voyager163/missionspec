@@ -185,6 +185,23 @@ Defender Event Grid resources may appear only as `Ignore`, and only after
 their existing full current-inventory validator proves the exact IDs and
 configuration. An unverified resource or any mutation of those resources
 still blocks the phase.
+The current environment execution phase is version 2: it projects the
+immutable plan's no-export intent to
+`appLogsConfiguration: { destination: null, logAnalyticsConfiguration: null }`,
+the wire representation used by the official Azure CLI. Its closed
+`wireProjection` binds the original planned request hash; original plans and
+version-1 phase records are not rewritten. Azure's native preview may omit
+that exact null bag, but actual GET must report an explicit null destination
+and absent-or-null analytics configuration. Missing actual configuration,
+logging destinations, customer IDs, keys and diagnostics remain blocking.
+
+Provider-added endpoint metadata is separately constrained: `purpose` may be
+`PrivateEndpoints` only on the endpoint subnet once that endpoint exists;
+IPv6 stays false. The NIC must point to the owned endpoint, with the exact
+reviewed feature defaults, no custom/applied DNS servers, no taps and no
+hosted workloads. Returned DNS configuration IDs/types and provisioning
+states are verified rather than discarded. Unknown fields, foreign owners
+or routes, and enabled unreviewed features still block reconciliation.
 Budget changes are separately enumerated: migration project/telemetry/state
 425/375/50 USD, then steady 375/325/50 after old-environment retirement, with
 exact notification/period preservation and the new managed group in coverage.
