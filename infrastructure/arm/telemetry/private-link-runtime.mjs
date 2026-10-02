@@ -7,7 +7,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { isDeepStrictEqual, promisify, types } from 'node:util';
 import { closed, digest, digestJson, fail, ids, json, sameId, SYNTHETIC_FIXTURES, SYNTHETIC_LIMITS } from './definition.mjs';
 import { admissionFlag, canonicalAppWrite, canonicalInstant, executionIdentity, verifySyntheticRows } from './policy.mjs';
-import { receiverDatabaseInstant, verifyReceiverCandidate, verifyReceiverInventory } from './receiver-upgrade.mjs';
+import { receiverDatabaseInstant, verifyReceiverProfile, verifyReceiverCandidate, verifyReceiverInventory } from './receiver-upgrade.mjs';
 import { QUEUE_RUNTIME, queueEnvironment } from './durable-queue.mjs';
 import { queueArmInstant } from './queue-adoption.mjs';
 import { privateLinkAcaCreationIdentity } from './private-link-readback.mjs';
@@ -47,34 +47,126 @@ function review(value, action, binding, at) {
   const selected = binding.runtimeReview;
   if (selected) {
     const revision = selected.policyRevision;
+    const image = selected.imageProfileRevision;
     if (value.sourceSha256 !== selected.costReview.sourceSha256 ||
-        revision && (value.sourceSha256 !== revision.sourceSha256 || value.policyCommitSha !== revision.publication.commitSha)) fail('PRIVATE_RUNTIME_REVIEW_SOURCE_CHANGED');
+        revision && (value.sourceSha256 !== revision.sourceSha256 || value.policyCommitSha !== revision.publication.commitSha) ||
+        image && (value.sourceSha256 !== image.sourceSha256 || value.policyCommitSha !== image.publication.commitSha)) fail('PRIVATE_RUNTIME_REVIEW_SOURCE_CHANGED');
     if (!['private-link-false-only-disable', 'private-link-delete-public-control'].includes(action)) {
       if (at < canonicalInstant(selected.costReview.approvedAt) || at >= canonicalInstant(selected.costReview.expiresAt) ||
           at - canonicalInstant(selected.costEvidence.retrievedAt) > 86400000 ||
-          revision && (at < canonicalInstant(revision.approvedAt) || at >= canonicalInstant(revision.expiresAt))) fail('PRIVATE_RUNTIME_CURRENT_REVIEW_EXPIRED');
+          revision && (at < canonicalInstant(revision.approvedAt) || at >= canonicalInstant(revision.expiresAt)) ||
+          image && (at < canonicalInstant(image.approvedAt) || at >= canonicalInstant(image.expiresAt))) fail('PRIVATE_RUNTIME_CURRENT_REVIEW_EXPIRED');
     }
   }
 }
+function imageRevisionReview(c, context, revision, source, at) {
+  closed(revision, ['version', 'action', 'configSha256', 'planSha256', 'originSha256', 'originalProfileSha256',
+    'profileSha256', 'manifestDigest', 'configDigest', 'sourceSha256', 'publication', 'approvedAt', 'expiresAt']);
+  closed(revision.publication, ['commitSha', 'sourceSha256']);
+  const original = context.origin.queueProfile;
+  if (revision.version !== 1 || revision.action !== 'review-same-image-private-link-scan-refresh' ||
+      revision.configSha256 !== hash(c) || revision.planSha256 !== context.plan.planSha256 ||
+      revision.originSha256 !== hash(context.origin) || revision.originalProfileSha256 !== hash(original) ||
+      !sha(revision.profileSha256) || revision.profileSha256 === revision.originalProfileSha256 ||
+      revision.manifestDigest !== original.manifestDigest || revision.configDigest !== original.configDigest ||
+      revision.sourceSha256 !== source || revision.publication.sourceSha256 !== source ||
+      !/^[a-f0-9]{40}$/u.test(revision.publication.commitSha ?? '')) fail('PRIVATE_IMAGE_PROFILE_REVISION_REQUIRED');
+  const approved = canonicalInstant(revision.approvedAt), expires = canonicalInstant(revision.expiresAt);
+  if (!Number.isSafeInteger(at) || approved > at || at >= expires || expires - approved > 3600000 || expires <= approved) {
+    fail('PRIVATE_IMAGE_PROFILE_REVISION_EXPIRED');
+  }
+}
+function profileQualification(profile) {
+  if (typeof profile.qualification?.reportJson !== 'string' ||
+      Buffer.byteLength(profile.qualification.reportJson) > 64 * 1024 * 1024) fail('PRIVATE_IMAGE_QUALIFICATION_INVALID');
+  try { return JSON.parse(profile.qualification.reportJson); } catch { fail('PRIVATE_IMAGE_QUALIFICATION_INVALID'); }
+}
+function scanReportInstant(value) {
+  const match = typeof value === 'string' && /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?(Z|([+-])(\d{2}):(\d{2}))$/u.exec(value);
+  if (!match || Number(match[5] ?? 0) > 14 || Number(match[6] ?? 0) > 59 ||
+      Number(match[5] ?? 0) === 14 && Number(match[6] ?? 0) !== 0) fail('PRIVATE_IMAGE_SCAN_REPORT_TIME_INVALID');
+  const local = receiverDatabaseInstant(`${match[1]}.${(match[2] ?? '').padEnd(3, '0')}Z`);
+  const offset = (Number(match[5] ?? 0) * 60 + Number(match[6] ?? 0)) * 60000;
+  return local + (match[4] === '-' ? offset : -offset);
+}
+export function verifyImageProfileRevision(c, context, profile, revision, at) {
+  imageRevisionReview(c, context, revision, revision.sourceSha256, at);
+  const original = context.origin.queueProfile;
+  verifyReceiverProfile(original);
+  verifyReceiverProfile(profile);
+  if (revision.profileSha256 !== hash(profile)) fail('PRIVATE_IMAGE_PROFILE_REVISION_CHANGED');
+  const { scan: oldScan, qualification: oldQualification, ...oldImage } = original;
+  const { scan, qualification, ...image } = profile;
+  equal(image, oldImage, 'PRIVATE_IMAGE_IMMUTABLE_BYTES_CHANGED');
+  const before = profileQualification(original), after = profileQualification(profile);
+  const { scanCounts: oldCounts, scanner: oldScanner, scanRefresh: priorRefresh, ...oldMeasurements } = before;
+  const { scanCounts, scanner, scanRefresh, ...measurements } = after;
+  equal(measurements, oldMeasurements, 'PRIVATE_IMAGE_QUALIFICATION_MEASUREMENTS_CHANGED');
+  closed(scanner, Object.keys(oldScanner));
+  const { dbSha256: oldDb, dbMetadata: oldMetadata, ...oldScannerIdentity } = oldScanner;
+  const { dbSha256: newDb, dbMetadata, ...scannerIdentity } = scanner;
+  equal(scannerIdentity, oldScannerIdentity, 'PRIVATE_IMAGE_SCANNER_CHANGED');
+  closed(dbMetadata, [...new Set([...Object.keys(oldMetadata), 'UpdatedAt', 'NextUpdate', 'DownloadedAt'])]);
+  const { UpdatedAt: oldUpdated, NextUpdate: oldNext, DownloadedAt: oldDownloaded, ...oldDbIdentity } = oldMetadata;
+  const { UpdatedAt, NextUpdate, DownloadedAt, ...dbIdentity } = dbMetadata;
+  equal(dbIdentity, oldDbIdentity, 'PRIVATE_IMAGE_SCANNER_DATABASE_CHANGED');
+  closed(scanRefresh, ['version', 'kind', 'startedAt', 'completedAt', 'previousProfileSha256', 'previousRefreshSha256',
+    'imageUnchanged', 'archiveSha256', 'runtimeMeasurementsRepeated', 'historicalProfileModified']);
+  const started = canonicalInstant(scanRefresh.startedAt), completed = canonicalInstant(scanRefresh.completedAt);
+  const approved = canonicalInstant(revision.approvedAt), expires = canonicalInstant(revision.expiresAt);
+  const updated = receiverDatabaseInstant(UpdatedAt), next = receiverDatabaseInstant(NextUpdate);
+  const downloaded = receiverDatabaseInstant(DownloadedAt);
+  if (scanRefresh.version !== 1 || scanRefresh.kind !== 'same-image-scan-refresh' ||
+      scanRefresh.previousProfileSha256 !== hash(original) ||
+      scanRefresh.previousRefreshSha256 !== (priorRefresh === undefined ? null : hash(priorRefresh)) ||
+      scanRefresh.archiveSha256 !== (priorRefresh?.archiveSha256 ?? null) ||
+      scanRefresh.imageUnchanged !== true || scanRefresh.runtimeMeasurementsRepeated !== false ||
+      scanRefresh.historicalProfileModified !== false || completed < started || completed - started > 3600000 ||
+      completed > approved || updated > started || updated <= receiverDatabaseInstant(oldScan.databaseUpdatedAt) ||
+      next <= receiverDatabaseInstant(oldScan.databaseNextUpdate) || downloaded < updated || downloaded > completed ||
+      next <= completed || at < updated || at >= next || expires > next) fail('PRIVATE_IMAGE_SCAN_REFRESH_INVALID');
+  // The full profile validator owns severity/count/provenance checks; a refreshed report
+  // additionally cannot carry a conflicting content-addressed image identity.
+  const report = JSON.parse(scan.reportJson);
+  const scanned = scanReportInstant(report.CreatedAt);
+  if (scanned < started || scanned > completed) fail('PRIVATE_IMAGE_SCAN_REPORT_TIME_INVALID');
+  if (report.Metadata?.ImageID !== undefined && report.Metadata.ImageID !== profile.configDigest ||
+      typeof report.ArtifactName === 'string' && report.ArtifactName.startsWith('sha256:') &&
+        report.ArtifactName !== profile.manifestDigest) fail('PRIVATE_IMAGE_SCAN_TARGET_CHANGED');
+  return revision.sourceSha256;
+}
 export function verifyRuntimeReview(c, context, value, at) {
-  closed(value, ['policyRevision', 'costReview', 'costEvidence']);
+  closed(value, ['policyRevision', 'costReview', 'costEvidence',
+    ...(Object.hasOwn(value ?? {}, 'imageProfileRevision') ? ['imageProfileRevision'] : [])]);
   const source = verifyPrivateLinkPolicyRevision(c, context, value.policyRevision, at);
   verifyPrivateLinkCostReview(c, context, value.costReview, value.costEvidence, source, at);
+  if (Object.hasOwn(value, 'imageProfileRevision')) {
+    imageRevisionReview(c, context, value.imageProfileRevision, source, at);
+    if (value.policyRevision) equal(value.imageProfileRevision.publication, value.policyRevision.publication, 'PRIVATE_IMAGE_REVISION_SOURCE_CHANGED');
+  }
   return source;
+}
+function runtimeReviewTime(runtimeReview) {
+  return Math.max(canonicalInstant(runtimeReview.costReview.approvedAt),
+    runtimeReview.policyRevision === null ? 0 : canonicalInstant(runtimeReview.policyRevision.approvedAt),
+    runtimeReview.imageProfileRevision === undefined ? 0 : canonicalInstant(runtimeReview.imageProfileRevision.approvedAt));
 }
 function runtimeBinding(c, context, evidence, candidate, runtimeReview = null) {
   closed(context, ['plan', 'origin']);
   if (candidate?.version !== 2) fail('PRIVATE_RUNTIME_QUEUED_CANDIDATE_REQUIRED');
-  if (runtimeReview !== null) verifyRuntimeReview(c, context, runtimeReview,
-    Math.max(canonicalInstant(runtimeReview.costReview.approvedAt),
-      runtimeReview.policyRevision === null ? 0 : canonicalInstant(runtimeReview.policyRevision.approvedAt)));
+  if (runtimeReview !== null) verifyRuntimeReview(c, context, runtimeReview, runtimeReviewTime(runtimeReview));
+  planCandidate(c, context, candidate, runtimeReview);
   return { version: 1, configSha256: hash(c), planSha256: hash(context.plan), originSha256: hash(context.origin),
     controlEvidenceSha256: hash(evidence), candidateSha256: hash(candidate),
     ...(runtimeReview === null ? {} : { runtimeReview: structuredClone(runtimeReview) }) };
 }
-function planCandidate(context, candidate) {
-  equal(candidate.profile, context.origin.queueProfile, 'PRIVATE_PLAN_QUEUE_PROFILE_CHANGED');
+function planCandidate(c, context, candidate, runtimeReview = null, at) {
   equal(candidate.priorCandidate, context.origin.receiver.candidate, 'PRIVATE_PLAN_PRIOR_CANDIDATE_CHANGED');
+  if (runtimeReview?.imageProfileRevision !== undefined) {
+    const checkedAt = at ?? runtimeReviewTime(runtimeReview);
+    verifyRuntimeReview(c, context, runtimeReview, checkedAt);
+    verifyImageProfileRevision(c, context, candidate.profile, runtimeReview.imageProfileRevision, checkedAt);
+  } else equal(candidate.profile, context.origin.queueProfile, 'PRIVATE_PLAN_QUEUE_PROFILE_CHANGED');
 }
 export function privateRuntimeIncarnation(app) {
   const creation = privateLinkAcaCreationIdentity(app, app?.id);
@@ -304,7 +396,7 @@ export async function publishPrivateLinkImage(c, context, evidence, candidate, a
   const bound = { ...binding, local };
   const until = Math.min(io.now() + PRIVATE_RUNTIME_LIMITS.publicationMs, canonicalInstant(approval.expiresAt));
   const guard = () => {
-    planCandidate(context, candidate);
+    planCandidate(c, context, candidate, options.runtimeReview ?? null, io.now());
     review(approval, 'private-link-publish-one-queued-image', bound, io.now());
     verifyReceiverCandidate(c, candidate, io.now(), false);
     if (candidate.review.sourceSha256 !== approval.sourceSha256 ||
@@ -409,9 +501,9 @@ export async function publishPrivateLinkImage(c, context, evidence, candidate, a
   return { ...candidate, publication: completed };
 }
 
-export function privateLinkRuntimeTarget(c, context, candidate, prerequisites) {
+export function privateLinkRuntimeTarget(c, context, candidate, prerequisites, runtimeReview = null) {
   verifyReceiverCandidate(c, candidate);
-  planCandidate(context, candidate);
+  planCandidate(c, context, candidate, runtimeReview);
   const n = context.plan.topology?.ids ?? context.plan.ids;
   const stage = context.plan.stages?.find(value => value.id === 'create-disabled-receiver');
   if (!n || !stage?.resources?.length || stage.resources.length !== 1) fail('PRIVATE_REPLACEMENT_DESCRIPTOR_REQUIRED');
@@ -557,7 +649,7 @@ async function ready(c, target, candidate, io, flag, until) {
 export async function createPrivateLinkReceiver(c, context, evidence, candidate, instanceId, approval, directory, options = {}) {
   const io = options.io ?? await privateLinkRuntimeIO(c, context, evidence, directory, options);
   freshImage(c, candidate, io.now());
-  const prerequisites = io.verifyPrerequisites(), target = privateLinkRuntimeTarget(c, context, candidate, prerequisites);
+  const prerequisites = io.verifyPrerequisites(), target = privateLinkRuntimeTarget(c, context, candidate, prerequisites, options.runtimeReview ?? null);
   const phase = privateRuntimePhase(c, target, instanceId, 'create-disabled', hash(evidence));
   const binding = { ...runtimeBinding(c, context, evidence, candidate, options.runtimeReview ?? null), targetSha256: hash(target), phaseSha256: hash(phase) };
   const cap = canonicalInstant(approval.expiresAt);
@@ -648,7 +740,7 @@ export function verifyCreateIntent(c, context, evidence, intent) {
     'controlEvidence', 'intentAt', 'effectDeadline', 'outcome']);
   if (intent.version !== 2 || intent.kind !== 'private-link-receiver-create-intent' || intent.outcome !== 'write-possible') fail('PRIVATE_CREATE_INTENT_CHANGED');
   equal(intent.controlEvidence, evidence, 'PRIVATE_CONTROL_EVIDENCE_CHANGED');
-  planCandidate(context, intent.candidate);
+  planCandidate(c, context, intent.candidate, intent.binding.runtimeReview ?? null, canonicalInstant(intent.intentAt));
   const phase = privateRuntimePhase(c, intent.target, intent.phase.windowInstanceId, 'create-disabled', hash(evidence));
   equal(intent.phase, phase, 'PRIVATE_CREATE_PHASE_CHANGED');
   const binding = { ...runtimeBinding(c, context, evidence, intent.candidate, intent.binding.runtimeReview ?? null), targetSha256: hash(intent.target), phaseSha256: hash(phase) };
@@ -957,7 +1049,7 @@ export async function qualifyPrivateLinkDelivery(c, context, evidence, candidate
   freshImage(c, candidate, io.now());
   const prerequisites = io.verifyPrerequisites();
   verifyDisabledReceiver(c, context, evidence, candidate, disabled);
-  const target = privateLinkRuntimeTarget(c, context, candidate, prerequisites);
+  const target = privateLinkRuntimeTarget(c, context, candidate, prerequisites, options.runtimeReview ?? null);
   equal(target, disabled.target, 'PRIVATE_RUNTIME_TARGET_CHANGED');
   const binding = windowBinding(c, context, evidence, candidate, disabled, instanceId, transport, options.runtimeReview ?? null);
   closed(approvals, ['enable', 'disable', 'publicCreate', 'publicDelete']);
@@ -1699,7 +1791,7 @@ export async function runPrivateLinkRuntime(c, context, evidence, operation, dir
     closed(inputs, operation === 'prepare-receiver' ? ['candidate', 'instanceId'] : ['candidate', 'instanceId', 'approval']);
     if (operation === 'create-receiver') return createPrivateLinkReceiver(c, context, evidence, inputs.candidate,
       inputs.instanceId, inputs.approval, directory, effects);
-    const target = privateLinkRuntimeTarget(c, context, inputs.candidate, io.verifyPrerequisites());
+    const target = privateLinkRuntimeTarget(c, context, inputs.candidate, io.verifyPrerequisites(), runtimeReview);
     const phase = privateRuntimePhase(c, target, inputs.instanceId, 'create-disabled', hash(evidence));
     const binding = { ...runtimeBinding(c, context, evidence, inputs.candidate, runtimeReview), targetSha256: hash(target), phaseSha256: hash(phase) };
     const prepared = { version: 1, kind: 'private-link-runtime-preparation', operation, target, phase,

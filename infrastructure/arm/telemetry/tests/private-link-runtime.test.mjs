@@ -11,19 +11,20 @@ import { PRIVATE_RUNTIME_LIMITS, privateLinkRuntimeTarget, privateRuntimePhase, 
   recoverPrivateLinkDisabled, reconcilePrivateLinkReceiver, privateWindowFence, verifyPrivateRuntimePreview,
   privateLinkWindowBinding, runPrivateLinkRuntime, preparePublicControlCleanup, recoverPublicControlCleanup,
   reconcilePublicControl, privateRuntimeIncarnation, verifyCreationDeployment, verifyRuntimeReview,
-  privateLinkRuntimeBinding } from '../private-link-runtime.mjs';
+  privateLinkRuntimeBinding, verifyImageProfileRevision, verifyCreateIntent, verifyWindowIntent } from '../private-link-runtime.mjs';
 import { QUEUE_RUNTIME } from '../durable-queue.mjs';
 import { privateLinkCost } from '../private-link.mjs';
+import { verifyReceiverProfile, verifyReceiverCandidate } from '../receiver-upgrade.mjs';
+import { createPrivateLinkArtifactStore } from '../private-link-artifacts.mjs';
 import { privateCostFixture } from './private-link.fixture.mjs';
 import { runtimeFixture, runtimeProbeFixture } from './private-link-runtime.fixture.mjs';
 
 const hash = value => digest(json(value));
-function windowFixture() {
-  const f = runtimeFixture();
+function windowFixture(f = runtimeFixture(), runtimeReview = null) {
   let now = f.at, flag = 'false', posted = 0, publicPresent = false, publicCreatedAt = f.at;
   const events = [], files = new Map();
   const transport = { pythonPath: '/fixed/python', pythonSha256: 'd'.repeat(64), bridgeSha256: 'e'.repeat(64) };
-  const binding = privateLinkWindowBinding(f.c, f.context, f.evidence, f.candidate, f.disabled, f.instanceId, transport);
+  const binding = privateLinkWindowBinding(f.c, f.context, f.evidence, f.candidate, f.disabled, f.instanceId, transport, runtimeReview);
   const approvals = { enable: f.approval('private-link-bounded-enable', binding),
     disable: f.approval('private-link-false-only-disable', binding),
     publicCreate: f.approval('private-link-create-public-control', binding),
@@ -76,9 +77,65 @@ function windowFixture() {
             ({ id, properties: { approximateMessageCount: 0 } }),
   };
   const run = () => qualifyPrivateLinkDelivery(f.c, f.context, f.evidence, f.candidate, f.disabled, f.instanceId,
-    approvals, transport, '/UNIT/inert', { io });
+    approvals, transport, '/UNIT/inert', { io, runtimeReview });
   return { ...f, io, approvals, events, files, transport, run, advance: ms => { now += ms; },
     setFlag: value => { flag = value; }, setPublic: value => { publicPresent = value; }, get posted() { return posted; } };
+}
+
+// A synthetic newer scan of exactly the same image. No fresh measurement or scan is claimed.
+function sameImageProfile(original, at) {
+  const profile = structuredClone(original), before = JSON.parse(original.qualification.reportJson);
+  profile.scan.databaseSha256 = digest('UNIT later scanner database');
+  profile.scan.databaseUpdatedAt = new Date(at - 60000).toISOString();
+  profile.scan.databaseNextUpdate = new Date(at + 86400000).toISOString();
+  const report = JSON.parse(profile.scan.reportJson);
+  report.CreatedAt = new Date(at - 20000).toISOString();
+  profile.scan.reportJson = json(report); profile.scan.reportSha256 = digest(profile.scan.reportJson);
+  const qualification = JSON.parse(profile.qualification.reportJson);
+  qualification.scanner.dbSha256 = profile.scan.databaseSha256;
+  Object.assign(qualification.scanner.dbMetadata, { UpdatedAt: profile.scan.databaseUpdatedAt,
+    NextUpdate: profile.scan.databaseNextUpdate, DownloadedAt: new Date(at - 50000).toISOString() });
+  qualification.scanCounts = profile.scan.counts;
+  qualification.scanRefresh = { version: 1, kind: 'same-image-scan-refresh',
+    startedAt: new Date(at - 40000).toISOString(), completedAt: new Date(at - 10000).toISOString(),
+    previousProfileSha256: hash(original), previousRefreshSha256: before.scanRefresh === undefined ? null : hash(before.scanRefresh),
+    imageUnchanged: true, archiveSha256: before.scanRefresh?.archiveSha256 ?? null,
+    runtimeMeasurementsRepeated: false, historicalProfileModified: false };
+  profile.qualification = { reportJson: json(qualification), reportSha256: digest(json(qualification)) };
+  return profile;
+}
+
+function sameImageRevisionFixture() {
+  const f = runtimeReviewFixture(), at = f.at + 86400000;
+  const candidate = structuredClone(f.candidate);
+  candidate.profile = sameImageProfile(f.context.origin.queueProfile, at);
+  f.at = at;
+  f.approval = (action, binding) => ({ version: 1, action, bindingSha256: hash(binding), sourceSha256: f.source,
+    policyCommitSha: 'c'.repeat(40), approvedAt: new Date(at - 1000).toISOString(), expiresAt: new Date(at + 1800000).toISOString() });
+  const cost = privateCostFixture(f, at);
+  Object.assign(f.runtimeReview, { costReview: cost.review, costEvidence: cost.evidence });
+  Object.assign(f.runtimeReview.policyRevision, { approvedAt: new Date(at - 1000).toISOString(), expiresAt: new Date(at + 1800000).toISOString() });
+  f.runtimeReview.imageProfileRevision = { version: 1, action: 'review-same-image-private-link-scan-refresh',
+    configSha256: hash(f.c), planSha256: f.context.plan.planSha256, originSha256: hash(f.context.origin),
+    originalProfileSha256: hash(f.context.origin.queueProfile), profileSha256: hash(candidate.profile),
+    manifestDigest: candidate.profile.manifestDigest, configDigest: candidate.profile.configDigest, sourceSha256: f.source,
+    publication: { commitSha: 'c'.repeat(40), sourceSha256: f.source },
+    approvedAt: new Date(at - 1000).toISOString(), expiresAt: new Date(at + 1800000).toISOString() };
+  Object.assign(candidate.review, { profileSha256: hash(candidate.profile), sourceSha256: f.source,
+    policyCommitSha: 'c'.repeat(40), approvedAt: new Date(at - 1000).toISOString(), expiresAt: new Date(at + 1800000).toISOString() });
+  Object.assign(candidate.publication, { profileSha256: hash(candidate.profile), reviewSha256: hash(candidate.review),
+    intentAt: new Date(at).toISOString(), completedAt: new Date(at).toISOString() });
+  f.candidate = candidate;
+  const disabled = structuredClone(f.disabled);
+  disabled.candidate = candidate;
+  disabled.binding = { ...privateLinkRuntimeBinding(f.c, f.context, f.evidence, candidate, f.runtimeReview),
+    targetSha256: hash(disabled.target), phaseSha256: hash(disabled.phase) };
+  disabled.approval = f.approval('private-link-create-disabled-receiver', disabled.binding);
+  disabled.intent = { ...disabled.intent, binding: disabled.binding, candidate, approval: disabled.approval,
+    intentAt: new Date(at).toISOString(), effectDeadline: at + 120000 };
+  disabled.completedAt = new Date(at).toISOString();
+  f.disabled = disabled;
+  return f;
 }
 
 test('Private Link replacement retains original config and runtime while binding only new app/environment/FQDN', () => {
@@ -1116,4 +1173,325 @@ test('normal cleanup accepts 100ns ARM timestamps and exact opaque ACA generatio
   assert.equal(result.publicCleanup.creation.app.systemData.createdAt, opaque);
   assert.equal(result.publicCleanup.absence.app, null);
   verifyPrivateLinkRuntimeCompletion(f.c, f.context, result, f.io.now());
+});
+
+test('reviewed same-image scan revision accepts a fresh scan after the frozen plan scan expired without changing any original bytes', () => {
+  const f = sameImageRevisionFixture(), contextBytes = json(f.context), priorBytes = json(f.context.origin.receiver.candidate);
+  assert(Date.parse(f.context.origin.queueProfile.scan.databaseNextUpdate) < f.at);
+  verifyReceiverProfile(f.candidate.profile);
+  verifyReceiverCandidate(f.c, f.candidate, f.at);
+  const revision = f.runtimeReview.imageProfileRevision;
+  assert.equal(verifyImageProfileRevision(f.c, f.context, f.candidate.profile, revision, f.at), f.source);
+  assert.deepEqual(privateLinkRuntimeTarget(f.c, f.context, f.candidate, f.prerequisites, f.runtimeReview), f.target);
+  assert.equal(f.candidate.profile.manifestJson, f.context.origin.queueProfile.manifestJson);
+  assert.equal(f.candidate.profile.configJson, f.context.origin.queueProfile.configJson);
+  assert.deepEqual(f.candidate.profile.source, f.context.origin.queueProfile.source);
+  assert.deepEqual(f.candidate.profile.notices, f.context.origin.queueProfile.notices);
+  assert.equal(json(f.context), contextBytes);
+  assert.equal(json(f.candidate.priorCandidate), priorBytes);
+  assert.equal(json(f.context.origin.receiver.candidate), priorBytes);
+  assert.throws(() => privateLinkRuntimeTarget(f.c, f.context, f.candidate, f.prerequisites), /PROFILE_CHANGED/);
+  const noRevision = structuredClone(f.runtimeReview); delete noRevision.imageProfileRevision;
+  assert.throws(() => privateLinkRuntimeBinding(f.c, f.context, f.evidence, f.candidate, noRevision), /PROFILE_CHANGED/);
+});
+
+test('scan refresh cannot use a fresh review to change image, source, notices, native clearance or original runtime measurements', () => {
+  const f = sameImageRevisionFixture(), frozen = json(f.context);
+  const qualificationChanges = [
+    value => { value.buildTests.passed++; },
+    value => { value.runtimeConstraints.memoryMaxBytes *= 2; },
+    value => { value.durableQueue.producerElapsedMs++; },
+    value => { value.durableQueue.fixtures['single-worker'].passed++; },
+    value => { value.artifact.noticeFiles++; },
+    value => { value.nativeCoverage = 'all native code patched'; },
+    value => { value.runtimeSecurityOverlay = { nodePatched: true }; },
+    value => { value.runtimeCompatibility = { measured: true }; },
+    value => { value.result = 'FULLY_QUALIFIED'; },
+    value => { value.productionAzureQualification = true; },
+    value => { value.unknownProof = 'not allowed'; },
+    value => { value.scanner.unreviewed = 'scanner replacement'; },
+    value => { value.scanner.dbMetadata.NewVersion = 3; },
+  ];
+  const profileChanges = [
+    value => { value.manifestJson += '\n'; value.manifestDigest = `sha256:${digest(value.manifestJson)}`; },
+    value => { value.source.files['services/telemetry-ingest/src/main.ts'] = digest('other source'); },
+    value => { value.notices.bytes += ' '; value.notices.sha256 = digest(value.notices.bytes); },
+    value => { value.priorUnknownGlibcCaveatWaived = true; },
+    value => { value.runtime.storageTimeoutMs = 1000; },
+    value => { value.extra = 'unknown'; },
+  ];
+  for (const mutate of [...profileChanges, ...qualificationChanges.map(change => profile => {
+    const qualification = JSON.parse(profile.qualification.reportJson);
+    change(qualification);
+    profile.qualification = { reportJson: json(qualification), reportSha256: digest(json(qualification)) };
+  })]) {
+    const profile = structuredClone(f.candidate.profile); mutate(profile);
+    const revision = { ...f.runtimeReview.imageProfileRevision, profileSha256: hash(profile) };
+    assert.throws(() => verifyImageProfileRevision(f.c, f.context, profile, revision, f.at));
+  }
+  assert.equal(json(f.context), frozen);
+});
+
+test('scan-only differences retain severity gates, complete findings and exact scanner/chain/time bindings', () => {
+  const f = sameImageRevisionFixture();
+  const changes = [
+    profile => { profile.scan.suppressedFindings = 1; },
+    profile => {
+      const report = JSON.parse(profile.scan.reportJson);
+      report.Results[0].Vulnerabilities.push({ Severity: 'HIGH', VulnerabilityID: 'UNIT-CVE-HIGH' });
+      profile.scan.reportJson = json(report); profile.scan.reportSha256 = digest(profile.scan.reportJson);
+      profile.scan.counts.HIGH = 1;
+    },
+    profile => {
+      const report = JSON.parse(profile.scan.reportJson);
+      report.Results[0].Vulnerabilities.push({ Severity: 'CRITICAL', VulnerabilityID: 'UNIT-CVE-CRITICAL' });
+      profile.scan.reportJson = json(report); profile.scan.reportSha256 = digest(profile.scan.reportJson);
+      profile.scan.counts.CRITICAL = 1;
+    },
+    profile => {
+      const report = JSON.parse(profile.scan.reportJson);
+      report.Results[0].SuppressedFindings = [{ Severity: 'HIGH', VulnerabilityID: 'UNIT-hidden' }];
+      profile.scan.reportJson = json(report); profile.scan.reportSha256 = digest(profile.scan.reportJson);
+    },
+    profile => {
+      const report = JSON.parse(profile.scan.reportJson); report.Metadata = { ImageID: `sha256:${'f'.repeat(64)}` };
+      profile.scan.reportJson = json(report); profile.scan.reportSha256 = digest(profile.scan.reportJson);
+    },
+    ...['2026-02-30T08:00:00.000Z', '2026-09-24T08:09:40', '2026-09-24T08:09:40.000+24:00',
+      new Date(f.at - 50000).toISOString(), new Date(f.at + 1).toISOString()].map(CreatedAt => profile => {
+      const report = JSON.parse(profile.scan.reportJson); report.CreatedAt = CreatedAt;
+      profile.scan.reportJson = json(report); profile.scan.reportSha256 = digest(profile.scan.reportJson);
+    }),
+  ];
+  for (const mutate of changes) {
+    const profile = structuredClone(f.candidate.profile); mutate(profile);
+    const qualification = JSON.parse(profile.qualification.reportJson);
+    qualification.scanCounts = profile.scan.counts;
+    profile.qualification = { reportJson: json(qualification), reportSha256: digest(json(qualification)) };
+    assert.throws(() => verifyImageProfileRevision(f.c, f.context, profile,
+      { ...f.runtimeReview.imageProfileRevision, profileSha256: hash(profile) }, f.at));
+  }
+  for (const mutate of [
+    value => { value.previousProfileSha256 = 'a'.repeat(64); },
+    value => { value.previousRefreshSha256 = 'b'.repeat(64); },
+    value => { value.archiveSha256 = 'c'.repeat(64); },
+    value => { value.runtimeMeasurementsRepeated = true; },
+    value => { value.historicalProfileModified = true; },
+    value => { value.completedAt = new Date(f.at + 1).toISOString(); },
+    value => { value.startedAt = new Date(f.at - 4_000_000).toISOString(); },
+    value => { value.hiddenApproval = true; },
+  ]) {
+    const profile = structuredClone(f.candidate.profile), qualification = JSON.parse(profile.qualification.reportJson);
+    mutate(qualification.scanRefresh);
+    profile.qualification = { reportJson: json(qualification), reportSha256: digest(json(qualification)) };
+    assert.throws(() => verifyImageProfileRevision(f.c, f.context, profile,
+      { ...f.runtimeReview.imageProfileRevision, profileSha256: hash(profile) }, f.at));
+  }
+  for (const change of [
+    { sourceSha256: '0'.repeat(64) }, { originalProfileSha256: '0'.repeat(64) },
+    { manifestDigest: f.candidate.priorCandidate.profile.manifestDigest }, { configSha256: '0'.repeat(64) },
+    { expiresAt: new Date(f.at + 3600001).toISOString() }, { publication: { commitSha: 'd'.repeat(40), sourceSha256: f.source } },
+    { hidden: true },
+  ]) {
+    const data = structuredClone(f.runtimeReview); Object.assign(data.imageProfileRevision, change);
+    assert.throws(() => verifyRuntimeReview(f.c, f.context, data, f.at));
+  }
+  assert.throws(() => verifyImageProfileRevision(f.c, f.context, f.candidate.profile, f.runtimeReview.imageProfileRevision, f.at + 1800001),
+    /REVISION_EXPIRED/);
+  const offsetProfile = structuredClone(f.candidate.profile), report = JSON.parse(offsetProfile.scan.reportJson);
+  report.CreatedAt = new Date(Date.parse(report.CreatedAt) + 8 * 3600000).toISOString().replace('Z', '+08:00');
+  offsetProfile.scan.reportJson = json(report); offsetProfile.scan.reportSha256 = digest(offsetProfile.scan.reportJson);
+  verifyImageProfileRevision(f.c, f.context, offsetProfile,
+    { ...f.runtimeReview.imageProfileRevision, profileSha256: hash(offsetProfile) }, f.at);
+});
+
+test('fresh scan revision remains bound through real runtime window, JSON reload and completion while old plan bytes stay frozen', async () => {
+  const seed = sameImageRevisionFixture(), frozen = json(seed.context), f = windowFixture(seed, seed.runtimeReview);
+  const result = await f.run();
+  assert.equal(result.outcome, 'qualified-private-delivery-disabled', JSON.stringify(result.failure));
+  const reloaded = JSON.parse(JSON.stringify(result));
+  verifyCreateIntent(f.c, f.context, f.evidence, reloaded.disabled.intent);
+  verifyWindowIntent(f.c, f.context, f.evidence, reloaded.intent);
+  verifyPrivateLinkRuntimeCompletion(f.c, f.context, reloaded, f.io.now());
+  verifyPrivateLinkRuntimeCompletion(f.c, f.context, reloaded, f.io.now() + 86400001);
+  assert.equal(json(f.context), frozen);
+  assert.equal(reloaded.candidate.profile.manifestDigest, f.context.origin.queueProfile.manifestDigest);
+  assert.deepEqual(reloaded.binding.runtimeReview.imageProfileRevision, seed.runtimeReview.imageProfileRevision);
+  for (const mutate of [
+    value => { delete value.binding.runtimeReview.imageProfileRevision; },
+    value => { value.candidate.profile.scan.reportJson += ' '; },
+    value => { value.intent.binding.runtimeReview.imageProfileRevision.profileSha256 = hash(f.context.origin.queueProfile); },
+    value => { value.approvals.enable.policyCommitSha = 'd'.repeat(40); },
+  ]) {
+    const bad = structuredClone(reloaded); mutate(bad);
+    assert.throws(() => verifyPrivateLinkRuntimeCompletion(f.c, f.context, bad, f.io.now()));
+  }
+});
+
+test('expired or swapped scan revision and late source/cost expiry stop before publication, probe or enable', async () => {
+  for (const mode of ['expired', 'profile-swap', 'late-cost', 'late-source', 'late-image-review']) {
+    const seed = sameImageRevisionFixture(), f = windowFixture(seed, seed.runtimeReview);
+    if (mode === 'expired') f.advance(1800001);
+    if (mode === 'profile-swap') f.candidate.profile = structuredClone(f.context.origin.queueProfile);
+    if (mode === 'late-cost') {
+      seed.runtimeReview.costReview.expiresAt = new Date(seed.at + 1).toISOString();
+      f.io.published = async () => { f.advance(2); };
+    }
+    if (mode === 'late-source') f.io.published = async () => { throw new Error('PRIVATE_RUNTIME_UNPUBLISHED_SOURCE'); };
+    if (mode === 'late-image-review') {
+      seed.runtimeReview.imageProfileRevision.expiresAt = new Date(seed.at + 1).toISOString();
+      f.io.published = async () => { f.advance(2); };
+    }
+    await assert.rejects(f.run());
+    assert.deepEqual(f.events, []);
+  }
+});
+
+test('frozen false-only and cleanup recovery retain the legitimately admitted refreshed profile after revision and scan expiry', async () => {
+  const seed = sameImageRevisionFixture(), f = windowFixture(seed, seed.runtimeReview);
+  const beforePlan = json(f.context), deploy = f.io.deploy, remove = f.io.deletePublic;
+  f.io.deploy = async (...args) => {
+    if (args[0].id.endsWith('-d')) throw new Error('UNIT_PROCESS_INTERRUPTED');
+    return deploy(...args);
+  };
+  f.io.deletePublic = async () => { throw new Error('UNIT_PROCESS_INTERRUPTED'); };
+  const result = await f.run();
+  assert.equal(result.outcome, 'held-terminal-state-unproven');
+  const original = json(result), immutableIntent = json(f.files.get('private-window-intent.json'));
+  f.advance(86400001);
+  f.io.current = async () => { throw new Error('UNIT_BACKEND_UNHEALTHY'); };
+  f.io.verifyPrerequisites = () => { throw new Error('UNIT_NO_NEW_ADMISSION'); };
+  f.io.published = async (_approval, frozen) => assert.equal(frozen, true);
+  f.io.deploy = deploy; f.io.deletePublic = remove;
+  const approval = (action, binding) => ({ ...f.approval(action, binding), approvedAt: new Date(f.io.now() - 1).toISOString(),
+    expiresAt: new Date(f.io.now() + 600000).toISOString() });
+  const disableId = '00000000-0000-4000-8000-000000000091';
+  const disable = await preparePrivateLinkDisableRecovery(f.c, f.context, f.evidence, disableId, '/UNIT', { io: f.io });
+  const recovered = await recoverPrivateLinkDisabled(f.c, f.context, f.evidence, disableId,
+    approval('private-link-recover-frozen-false', disable.binding), '/UNIT', { io: f.io });
+  assert.equal(recovered.outcome, 'recovered-disabled-original-outcome-retained');
+  const cleanupId = '00000000-0000-4000-8000-000000000092';
+  const cleanup = await preparePublicControlCleanup(f.c, f.context, f.evidence, cleanupId, '/UNIT', { io: f.io });
+  const absent = await recoverPublicControlCleanup(f.c, f.context, f.evidence, cleanupId,
+    approval('private-link-recover-public-cleanup', cleanup.binding), '/UNIT', { io: f.io });
+  assert.equal(absent.receipt.absent, true);
+  assert.equal(json(result), original);
+  assert.equal(json(f.files.get('private-window-intent.json')), immutableIntent);
+  assert.equal(json(f.context), beforePlan);
+  assert.equal(f.events.filter(value => value === 'write:true').length, 1);
+});
+
+test('unchanged artifact codec round-trips a refreshed candidate and its typed revision without relaxing its closed reference schema', async () => {
+  const f = sameImageRevisionFixture(), values = new Map();
+  const store = createPrivateLinkArtifactStore({ root: '/UNIT',
+    read: async (_directory, name) => values.get(name),
+    immutable: async (_directory, name, value) => values.set(name, JSON.parse(value)),
+    update: async (_directory, name, value) => values.set(name, JSON.parse(value)) });
+  const record = { version: 1, kind: 'private-link-receiver-create-intent', candidate: f.candidate,
+    binding: privateLinkRuntimeBinding(f.c, f.context, f.evidence, f.candidate, f.runtimeReview) };
+  await store.immutable('/UNIT', 'record.json', record);
+  const loaded = await store.load('/UNIT', 'record.json');
+  assert.deepEqual(loaded, record);
+  privateLinkRuntimeBinding(f.c, f.context, f.evidence, loaded.candidate, loaded.binding.runtimeReview);
+  assert(Object.isFrozen(loaded.candidate));
+  assert.equal(values.get('record.json').referenceCount, 1);
+});
+
+test('reviewed fresh scan publishes exactly the same third image once while retaining both original images and frozen plan', async context => {
+  const f = await publicationFixture(context);
+  // Preserve the fixture's original profile before substituting only its scanner observations.
+  f.context.origin.queueProfile = structuredClone(f.candidate.profile);
+  f.context.plan.sourceSha256 = digest('UNIT frozen publication policy');
+  f.context.plan.input.overlapDays = 7;
+  f.context.plan.topology.ids.managedGroup = `${ids(f.c).sub}/resourceGroups/${f.c.namePrefix}-private-managed`;
+  f.context.plan.topology.cost = privateLinkCost(7, true);
+  f.context.plan.planSha256 = hash(f.context.plan);
+  const frozenPlan = json(f.context), prior = json(f.candidate.priorCandidate);
+  f.advance(86400000);
+  const at = f.io.now(), profile = sameImageProfile(f.context.origin.queueProfile, at);
+  Object.assign(f.candidate.profile, profile);
+  Object.assign(f.candidate.review, { profileSha256: hash(profile),
+    approvedAt: new Date(at - 1000).toISOString(), expiresAt: new Date(at + 1800000).toISOString() });
+  const source = f.candidate.review.sourceSha256, cost = privateCostFixture({ ...f, source }, at);
+  const revision = { version: 1, action: 'review-same-image-private-link-scan-refresh',
+    configSha256: hash(f.c), planSha256: f.context.plan.planSha256, originSha256: hash(f.context.origin),
+    originalProfileSha256: hash(f.context.origin.queueProfile), profileSha256: hash(profile),
+    manifestDigest: profile.manifestDigest, configDigest: profile.configDigest, sourceSha256: source,
+    publication: { commitSha: f.candidate.review.policyCommitSha, sourceSha256: source },
+    approvedAt: new Date(at - 1000).toISOString(), expiresAt: new Date(at + 1800000).toISOString() };
+  const policyRevision = { version: 1, action: 'review-identical-private-link-plan-under-new-policy-source',
+    configSha256: hash(f.c), planSha256: f.context.plan.planSha256, originSha256: hash(f.context.origin),
+    originalSourceSha256: f.context.plan.sourceSha256, sourceSha256: source, publication: revision.publication,
+    userInstruction: 'UNIT reviewed refresh', userInstructionSha256: digest('UNIT reviewed refresh'),
+    approvedAt: revision.approvedAt, expiresAt: revision.expiresAt };
+  const runtimeReview = { policyRevision, costReview: cost.review, costEvidence: cost.evidence, imageProfileRevision: revision };
+  const binding = { ...privateLinkRuntimeBinding(f.c, f.context, f.evidence, f.candidate, runtimeReview), local: f.local };
+  const approval = { version: 1, action: 'private-link-publish-one-queued-image', bindingSha256: hash(binding), sourceSha256: source,
+    policyCommitSha: revision.publication.commitSha, approvedAt: revision.approvedAt, expiresAt: revision.expiresAt };
+  const candidate = await publishPrivateLinkImage(f.c, f.context, f.evidence, f.candidate, approval, f.local, f.directory,
+    { io: f.io, runtimeReview });
+  assert.equal(candidate.publication.copyInvocations, 1);
+  assert.equal(candidate.publication.profileSha256, hash(profile));
+  assert.equal(candidate.publication.manifests.length, 3);
+  assert.equal(candidate.profile.manifestDigest, f.context.origin.queueProfile.manifestDigest);
+  assert.equal(candidate.publication.manifestJson, f.context.origin.queueProfile.manifestJson);
+  assert.equal(json(f.context), frozenPlan);
+  assert.equal(json(f.candidate.priorCandidate), prior);
+  await assert.rejects(publishPrivateLinkImage(f.c, f.context, f.evidence, f.candidate, approval, f.local, f.directory,
+    { io: f.io, runtimeReview }), /HISTORY_NO_RETRY/);
+});
+
+test('prepare and create receiver keep the refreshed profile review explicit and reject stale approval bindings', async context => {
+  const seed = sameImageRevisionFixture(), f = windowFixture(seed, seed.runtimeReview);
+  let created = false;
+  const deploy = f.io.deploy;
+  f.io.read = async id => id === f.target.appId ? created ? f.observation('false').app : null : {};
+  f.io.preview = async phase => ({ validation: { properties: { provisioningState: 'Succeeded' } },
+    whatIf: { status: 'Succeeded', changes: [{ resourceId: f.target.appId, changeType: 'Create',
+      after: phase.request.body.properties.template.resources[0] }] } });
+  f.io.deploy = async (...args) => { await deploy(...args); created = true; };
+  const relative = `infrastructure/arm/telemetry/.operator-private/revision-20261003-scan-${randomUUID().slice(0, 8)}`;
+  context.after(() => rm(path.resolve(relative), { recursive: true, force: true }));
+  const before = json(f.context);
+  const prepared = await runPrivateLinkRuntime(f.c, f.context, f.evidence, 'prepare-receiver', relative,
+    { candidate: f.candidate, instanceId: f.instanceId, runtimeReview: seed.runtimeReview }, { io: f.io });
+  assert.deepEqual(prepared.binding.runtimeReview, seed.runtimeReview);
+  const bad = { ...f.disabled.approval, bindingSha256: hash({ ...prepared.binding, runtimeReview: undefined }) };
+  await assert.rejects(createPrivateLinkReceiver(f.c, f.context, f.evidence, f.candidate, f.instanceId, bad, '/UNIT',
+    { io: f.io, runtimeReview: seed.runtimeReview }));
+  assert.deepEqual(f.events, []);
+  const receipt = await createPrivateLinkReceiver(f.c, f.context, f.evidence, f.candidate, f.instanceId,
+    f.disabled.approval, '/UNIT', { io: f.io, runtimeReview: seed.runtimeReview });
+  verifyCreateIntent(f.c, f.context, f.evidence, JSON.parse(JSON.stringify(receipt.intent)));
+  assert.equal(receipt.candidate.profile.scan.databaseSha256, f.candidate.profile.scan.databaseSha256);
+  assert.equal(json(f.context), before);
+});
+
+test('scan refresh chains the frozen prior refresh and accepts changed nonblocking findings without waiving any qualifier', () => {
+  const f = sameImageRevisionFixture();
+  const original = structuredClone(f.context.origin.queueProfile), qualification = JSON.parse(original.qualification.reportJson);
+  qualification.scanRefresh = { startedAt: '2026-09-23T08:00:00.000Z', completedAt: '2026-09-23T08:00:01.000Z',
+    previousProfileSha256: digest('UNIT still-earlier profile'), imageUnchanged: true, archiveSha256: digest('UNIT unchanged OCI archive'),
+    runtimeMeasurementsRepeated: false, historicalProfileModified: false };
+  original.qualification = { reportJson: json(qualification), reportSha256: digest(json(qualification)) };
+  const context = structuredClone(f.context); context.origin.queueProfile = original;
+  const profile = sameImageProfile(original, f.at), report = JSON.parse(profile.scan.reportJson);
+  report.Results[0].Vulnerabilities.push({ Severity: 'MEDIUM', VulnerabilityID: 'UNIT-new-nonblocking-finding' });
+  profile.scan.counts.MEDIUM++;
+  profile.scan.reportJson = json(report); profile.scan.reportSha256 = digest(profile.scan.reportJson);
+  const refreshed = JSON.parse(profile.qualification.reportJson); refreshed.scanCounts = profile.scan.counts;
+  profile.qualification = { reportJson: json(refreshed), reportSha256: digest(json(refreshed)) };
+  const revision = { ...f.runtimeReview.imageProfileRevision, originalProfileSha256: hash(original),
+    originSha256: hash(context.origin), profileSha256: hash(profile) };
+  const bytes = json(context);
+  verifyImageProfileRevision(f.c, context, profile, revision, f.at);
+  assert.equal(refreshed.scanRefresh.previousRefreshSha256, hash(qualification.scanRefresh));
+  assert.equal(refreshed.scanRefresh.archiveSha256, qualification.scanRefresh.archiveSha256);
+  assert.equal(profile.scan.counts.HIGH, 0); assert.equal(profile.scan.counts.CRITICAL, 0);
+  assert.equal(refreshed.nativeCoverage, qualification.nativeCoverage);
+  assert.equal(json(context), bytes);
+  refreshed.scanRefresh.previousRefreshSha256 = null;
+  profile.qualification = { reportJson: json(refreshed), reportSha256: digest(json(refreshed)) };
+  assert.throws(() => verifyImageProfileRevision(f.c, context, profile, { ...revision, profileSha256: hash(profile) }, f.at),
+    /SCAN_REFRESH_INVALID/);
 });

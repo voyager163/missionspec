@@ -195,7 +195,8 @@ the returned third-image candidate as `private-link-published-candidate.json`.
 Preparation never implies publication, deployment or enabled ingestion.
 
 The six forward runtime commands accept an optional `runtimeReview` containing
-exactly `policyRevision`, `costReview`, and `costEvidence`. This supports a
+`policyRevision`, `costReview`, and `costEvidence`, plus the optional typed
+`imageProfileRevision` described below. This supports a
 freshly reviewed policy source or renewed cost evidence without rewriting the
 original plan, candidate, successful control records, or failed attempts.
 `policyRevision` is null only when retaining the original policy source;
@@ -205,6 +206,24 @@ must echo it exactly and all forward-dispatch source, price and review-expiry
 checks still apply. Recovery and reconciliation commands reject `runtimeReview`
 and retain their frozen-source, backend-independent scope. Arbitrary `options`,
 IO adapters and transport replacements are never accepted from JSON.
+
+When the frozen plan's scan expires, a separately reviewed
+`review-same-image-private-link-scan-refresh` revision may bind a new scan
+profile for the exact same manifest, config, source and notice bytes. Only
+the scan, scan counts, scanner database metadata and a closed
+`same-image-scan-refresh` chain entry may change. Scanner identity, runtime
+measurements, SDK fixtures, native-overlay evidence and caveats stay exact.
+The new record binds the original profile and previous refresh hashes;
+neither historical profile nor the plan is overwritten.
+
+The revision is included in the full runtime approval binding, expires within
+one hour and no later than the new database deadline, and must match the
+current published policy source. Its scan must still report zero Critical
+and High findings with no suppression, and its actual report timestamp must
+fall within the recorded scan window. Wrong image/source, changed qualifiers,
+unknown fields and expired reviews fail before effects. Frozen false-only
+disable and public cleanup retain their original admission-time checks, so
+safe cleanup is not vetoed by a subsequently expired scan.
 
 Versioned native what-if contexts distinguish the new fixed control phases
 and UUID-bound replacement-app phases from historical collector requests.
