@@ -125,9 +125,10 @@ known-not-submitted resolution records no phase success and does not itself
 authorize another attempt.
 
 An adopted history may reuse fully verified history and proof bindings only
-within one check or execution, using private immutable copies and a separate
-unforgeable in-memory token for each operation. This includes ordinary phases
-following an earlier continuation. Each candidate is fully verified before
+within one check, execution, read-only recovery or runtime-prerequisite
+verification, using private immutable copies and a separate unforgeable
+in-memory token for each operation. This includes ordinary phases following
+an earlier continuation. Each candidate is fully verified before
 current reads or reservation; caller and adapter inputs are compared again
 after awaited work. Tokens are discarded when their operation settles and
 cannot be supplied through JSON or reused by another operation.
@@ -138,6 +139,17 @@ Current source/head, NSG/privacy, policy, permissions, cost, expiry and
 cancellation checks still run. The 120-second preflight/final-check deadlines
 and 300-second proof-age limit are unchanged; local validation time does not
 renew any budget.
+
+Read-only reconciliation and recovery also include adapter setup,
+`originalDirectory` verification and result persistence in their original
+120-second budget. They recheck the original journal, physical head, source,
+current reviews, input bindings and cancellation after awaited work. A
+no-submission resolution still preserves the failed journal and physical fence;
+it records no successful phase and grants no replay authority.
+Runtime prerequisites require the actual assigned-queue prefix. Synthetic
+13-stage coverage cannot establish that a future live prefix and its fresh
+reads meet the runtime deadline; that measurement remains a separate gate
+before runtime effects.
 
 Provider metadata stays byte-preserved. An explicit `+00:00` UTC suffix, as
 returned by ACR, is equivalent to `Z` for 100ns identity comparisons; other
