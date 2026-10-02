@@ -124,6 +124,16 @@ alone cannot downgrade either kind of unknown outcome. A reviewed
 known-not-submitted resolution records no phase success and does not itself
 authorize another attempt.
 
+An adopted continuation may reuse fully verified history and proof bindings
+only within that single execution, using private immutable copies and an
+unforgeable in-memory token. Its candidate phase is fully verified before
+reservation; caller and adapter inputs are compared again after awaited work.
+The token is discarded when the attempt settles and cannot be supplied through
+JSON or reused by another operation. Current source/head, NSG/privacy, policy,
+permissions, cost, expiry and cancellation checks still run. The 120-second
+final-check deadline and 300-second proof-age limit are unchanged; local
+validation time does not renew either budget.
+
 Provider metadata stays byte-preserved. An explicit `+00:00` UTC suffix, as
 returned by ACR, is equivalent to `Z` for 100ns identity comparisons; other
 offsets or an absent zone are not inferred to be UTC. The separately scoped

@@ -3,8 +3,8 @@ import { mkdir, rm, readdir, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { digest, digestJson, json } from '../definition.mjs';
-import { privateDirectory, load, MAX_PRIVATE_ARTIFACT_BYTES } from '../controller.mjs';
-import { createPrivateLinkArtifactStore, loadPrivateLinkArtifact } from '../private-link-artifacts.mjs';
+import { load, MAX_PRIVATE_ARTIFACT_BYTES } from '../controller.mjs';
+import { createPrivateLinkArtifactStore } from '../private-link-artifacts.mjs';
 import { privateLinkPhase, PRIVATE_LINK_CONTROL_STAGES as STAGES } from '../private-link.mjs';
 import { privateLinkReadRequests } from '../private-link-readback.mjs';
 import { preparePrivateLinkPhase, checkPrivateLinkPhase, executePrivateLinkPhase, reconcilePrivateLinkPhase,
@@ -179,11 +179,6 @@ export async function verifyNsgRuntimeCase(t, scenario) {
     [`private-link-intent-${hash({ target: targetKey, stage: final.stage })}.json`, { phase: final.phase, intent: final.intent }],
     [`private-link-nsg-adoption-${targetKey}.json`, x.adoption],
   ]) await artifactStore.immutable(directory, name, value);
-  const blobRoot = await privateDirectory('infrastructure/arm/telemetry/.operator-private');
-  for (const [prefix, value] of [['evidence', runtime.completion.controlEvidence], ['candidate', runtime.completion.candidate]]) {
-    const blobName = `private-link-${prefix}-${hash(value)}.json`;
-    if (await load(blobRoot, blobName, true) === null) t.after(() => rm(resolve(blobRoot, blobName), { force: true }));
-  }
   const appendIO = privateLinkAzureIO(f.c, f.context, prior, final.phase, directory, { publication: final.publication,
     costReview: final.preflight.costReview, costEvidence: final.preflight.costEvidence, migrationReview: final.preflight.migrationReview },
   async () => assert.fail('No cloud invocation in persistence qualification'), {
@@ -191,7 +186,7 @@ export async function verifyNsgRuntimeCase(t, scenario) {
     store: { root: directory, read: artifactStore.load, save: artifactStore.update, saveImmutable: artifactStore.immutable },
   });
   await appendIO.append(finalPending, final, privateLinkHead(f.context, chain));
-  assert.equal(hash(await loadPrivateLinkArtifact(directory, 'private-link-record-migration-record.json')), hash(final));
+  assert.equal(hash(await artifactStore.load(directory, 'private-link-record-migration-record.json')), hash(final));
   assert.equal(hash((await artifactStore.load(directory, `private-link-resolution-${hash(finalPending)}.json`)).record), hash(final));
   assert.deepEqual(await readPrivateLinkHead(f.context, chain, { root: directory, read: artifactStore.load }), privateLinkHead(f.context, chain));
   const persisted = {};
