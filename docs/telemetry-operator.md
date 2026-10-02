@@ -244,6 +244,16 @@ reviewed feature defaults, no custom/applied DNS servers, no taps and no
 hosted workloads. Returned DNS configuration IDs/types and provisioning
 states are verified rather than discarded. Unknown fields, foreign owners
 or routes, and enabled unreviewed features still block reconciliation.
+The provisioned ACA environment may expose explicit null Application Insights,
+OpenTelemetry and custom ingress configurations and `enableFips: false` on
+its Consumption profile. Non-null or enabled variants are not inferred safe.
+Its `legionservicelink` is admitted only on the exact Apps subnet, with the
+returned subnet-form link, exact provider flags, and an independently
+succeeded environment bound to that subnet. The managed ingress IP's
+`FirstPartyUsage: /Unprivileged` marker is permitted only on the fixed ACA
+public IP with its exact environment tag, ingress address and frontend
+reference. These checks preserve raw readbacks and do not authorize unrelated
+subnet associations, platform features or public IPs.
 Budget changes are separately enumerated: migration project/telemetry/state
 425/375/50 USD, then steady 375/325/50 after old-environment retirement, with
 exact notification/period preservation and the new managed group in coverage.

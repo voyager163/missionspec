@@ -39,6 +39,7 @@ test('provider-created queue endpoint metadata stays exact and cannot add routes
   Object.assign(snapshot.resources[n.endpoint].properties, {
     isIPv6EnabledPrivateEndpoint: false, customNetworkInterfaceName: '', customDnsConfigs: [],
   });
+
   Object.assign(snapshot.nic, { kind: 'Regular', managedBy: n.endpoint });
   Object.assign(snapshot.nic.properties, {
     allowPort25Out: true, auxiliaryMode: 'None', auxiliarySku: 'None',
@@ -79,4 +80,78 @@ test('provider-created queue endpoint metadata stays exact and cannot add routes
   const absent = privateSnapshotFixture(f, 'create-network');
   absent.resources[n.endpointSubnet].properties.purpose = 'PrivateEndpoints';
   assert.throws(() => verifyPrivateLinkSnapshot(f.c, f.context, absent, 'create-network'), /PURPOSE_UNVERIFIED/);
+});
+
+test('actual ACA subnet association and disabled optional features bind only the owned ready environment', async () => {
+  const f = await privateLinkFixture({ ...privateInput, version: 2 });
+  const snapshot = privateSnapshotFixture(f, 'create-environment'), n = f.context.plan.topology.ids;
+  const properties = snapshot.resources[n.environment].properties;
+  Object.assign(properties, { appInsightsConfiguration: null, openTelemetryConfiguration: null, ingressConfiguration: null });
+  properties.workloadProfiles[0].enableFips = false;
+  const group = n.vnet.split('/providers/')[0];
+  const association = { id: `${n.appsSubnet}/serviceAssociationLinks/legionservicelink`, name: 'legionservicelink',
+    type: 'Microsoft.Network/virtualNetworks/subnets/serviceAssociationLinks', properties: {
+      linkedResourceType: 'Microsoft.App/environments',
+      link: `${group}/virtualnetworks/${n.vnet.split('/').at(-1)}/subnets/apps`,
+      allowDelete: false, enabledForArmDeployments: false, locations: [], provisioningState: 'Succeeded',
+      subnetId: '00000000-0000-4000-8000-000000000123',
+    } };
+  snapshot.resources[n.appsSubnet].properties.serviceAssociationLinks = [association];
+  const original = structuredClone(snapshot);
+  assert.equal(verifyPrivateLinkSnapshot(f.c, f.context, snapshot, 'create-environment').stage, 'create-environment');
+  assert.deepEqual(snapshot, original);
+  for (const change of [
+    s => { s.resources[n.appsSubnet].properties.serviceAssociationLinks[0].properties.link += '-foreign'; },
+    s => { s.resources[n.appsSubnet].properties.serviceAssociationLinks[0].id += '-foreign'; },
+    s => { s.resources[n.appsSubnet].properties.serviceAssociationLinks[0].properties.allowDelete = true; },
+    s => { s.resources[n.appsSubnet].properties.serviceAssociationLinks[0].properties.enabledForArmDeployments = true; },
+    s => { s.resources[n.appsSubnet].properties.serviceAssociationLinks[0].properties.locations = ['foreign']; },
+    s => { s.resources[n.appsSubnet].properties.serviceAssociationLinks[0].properties.subnetId = 'unbound'; },
+    s => { s.resources[n.appsSubnet].properties.serviceAssociationLinks[0].properties.extra = false; },
+    s => { s.resources[n.appsSubnet].properties.serviceAssociationLinks.push(structuredClone(association)); },
+    s => { s.resources[n.endpointSubnet].properties.serviceAssociationLinks = [structuredClone(association)]; },
+    s => { s.resources[n.environment].properties.vnetConfiguration.infrastructureSubnetId = n.endpointSubnet; },
+    s => { s.resources[n.environment].properties.appInsightsConfiguration = {}; },
+    s => { s.resources[n.environment].properties.openTelemetryConfiguration = {}; },
+    s => { s.resources[n.environment].properties.ingressConfiguration = {}; },
+    s => { s.resources[n.environment].properties.workloadProfiles[0].enableFips = true; },
+    s => { s.resources[n.environment].properties.workloadProfiles[0].enableFips = null; },
+  ]) {
+    const altered = structuredClone(snapshot); change(altered);
+    assert.throws(() => verifyPrivateLinkSnapshot(f.c, f.context, altered, 'create-environment'));
+  }
+  const before = privateSnapshotFixture(f, 'create-queue-endpoint');
+  before.resources[n.appsSubnet].properties.serviceAssociationLinks = [association];
+  assert.throws(() => verifyPrivateLinkSnapshot(f.c, f.context, before, 'create-queue-endpoint'), /SUBNET_LINK_UNVERIFIED/);
+});
+
+test('the first-party public-IP marker requires the exact managed ACA ingress resource and frontend', async () => {
+  const f = await privateLinkFixture({ ...privateInput, version: 2 });
+  const snapshot = privateSnapshotFixture(f, 'create-environment'), n = f.context.plan.topology.ids;
+  const oldId = Object.keys(snapshot.managed).find(id => id.includes('/publicIPAddresses/'));
+  const id = `${n.managedGroup}/providers/Microsoft.Network/publicIPAddresses/capp-svc-lb-ip`;
+  const ip = snapshot.managed[oldId];
+  delete snapshot.managed[oldId]; snapshot.managed[id] = ip;
+  ip.id = id; ip.name = 'capp-svc-lb-ip'; ip.tags = { 'aca-managed-env-id': n.environment };
+  ip.properties.ipTags = [{ ipTagType: 'FirstPartyUsage', tag: '/Unprivileged' }];
+  ip.properties.ipConfiguration = {
+    id: `${n.managedGroup}/providers/Microsoft.Network/loadBalancers/capp-svc-lb/frontendIPConfigurations/capp-svc-lbfe`,
+  };
+  snapshot.lists.managedResources.value.find(value => value.id === oldId).id = id;
+  const balancer = Object.values(snapshot.managed).find(value => value.type === 'Microsoft.Network/loadBalancers');
+  balancer.properties.frontendIPConfigurations[0].properties.publicIPAddress.id = id;
+  const original = structuredClone(snapshot);
+  verifyPrivateLinkSnapshot(f.c, f.context, snapshot, 'create-environment');
+  assert.deepEqual(snapshot, original);
+  for (const change of [
+    value => { value.properties.ipTags[0].tag = '/Other'; },
+    value => { value.properties.ipTags[0].ipTagType = 'Other'; },
+    value => { value.properties.ipTags.push({ ipTagType: 'FirstPartyUsage', tag: '/Unprivileged' }); },
+    value => { value.tags['aca-managed-env-id'] += '-foreign'; },
+    value => { value.properties.ipConfiguration.id += '-foreign'; },
+    value => { value.properties.ipAddress = '203.0.113.16'; },
+  ]) {
+    const altered = structuredClone(snapshot); change(altered.managed[id]);
+    assert.throws(() => verifyPrivateLinkSnapshot(f.c, f.context, altered, 'create-environment'), /PUBLIC_IP_DRIFT/);
+  }
 });

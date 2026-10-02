@@ -193,6 +193,24 @@ function verifyNetwork(c, context, s, externalAdoption) {
     for (const key of ['serviceAssociationLinks', 'resourceNavigationLinks']) {
       if (a[key] !== undefined) for (const link of a[key]) {
         plOnly(link, ['id', 'name', 'type', 'etag', 'properties']);
+        if (key === 'serviceAssociationLinks' && link.name === 'legionservicelink') {
+          const environment = r[n.environment];
+          const expectedLink = `${ids(c).group}/virtualnetworks/${n.vnet.split('/').at(-1)}/subnets/apps`;
+          plOnly(link.properties, ['linkedResourceType', 'link', 'allowDelete', 'enabledForArmDeployments',
+            'locations', 'provisioningState', 'subnetId']);
+          if (!isApps || a[key].length !== 1 || !sameId(link.id, `${n.appsSubnet}/serviceAssociationLinks/legionservicelink`) ||
+              !sameId(link.type, 'Microsoft.Network/virtualNetworks/subnets/serviceAssociationLinks') ||
+              !sameId(link.properties.linkedResourceType, 'Microsoft.App/environments') ||
+              !sameId(link.properties.link, expectedLink) || link.properties.allowDelete !== false ||
+              link.properties.enabledForArmDeployments !== false || link.properties.provisioningState !== 'Succeeded' ||
+              !isDeepStrictEqual(link.properties.locations, []) ||
+              !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/iu.test(link.properties.subnetId ?? '') ||
+              !sameId(environment?.id, n.environment) || environment.properties?.provisioningState !== 'Succeeded' ||
+              !sameId(environment.properties.vnetConfiguration?.infrastructureSubnetId, n.appsSubnet)) {
+            fail('PRIVATE_LINK_SUBNET_LINK_UNVERIFIED');
+          }
+          continue;
+        }
         if (!isApps || !sameId(link.properties?.linkedResourceType, 'Microsoft.App/environments') ||
             (link.properties?.link && !sameId(link.properties.link, n.environment))) fail('PRIVATE_LINK_SUBNET_LINK_UNVERIFIED');
       }
@@ -329,6 +347,7 @@ function verifyEnvironment(c, context, s, environmentWireVersion) {
     'publicNetworkAccess', 'workloadProfiles', 'zoneRedundant', 'vnetConfiguration', 'appLogsConfiguration',
     'daprAIInstrumentationKey', 'daprAIConnectionString', 'customDomainConfiguration', 'eventStreamEndpoint',
     'peerAuthentication', 'peerTrafficConfiguration', 'kedaConfiguration', 'daprConfiguration', 'infrastructureSubnetId',
+    'appInsightsConfiguration', 'openTelemetryConfiguration', 'ingressConfiguration',
   ]);
   succeeded(p);
   if (p.deploymentErrors || p.publicNetworkAccess !== 'Enabled' || p.zoneRedundant !== false ||
@@ -339,10 +358,14 @@ function verifyEnvironment(c, context, s, environmentWireVersion) {
   if (!sameId(p.vnetConfiguration.infrastructureSubnetId, n.appsSubnet) || p.vnetConfiguration.internal !== false ||
       p.vnetConfiguration.dockerBridgeCidr || p.vnetConfiguration.platformReservedCidr || p.vnetConfiguration.platformReservedDnsIP) fail('PRIVATE_LINK_ENVIRONMENT_NETWORK_DRIFT');
   if (!Array.isArray(p.workloadProfiles) || p.workloadProfiles.length !== 1) fail('PRIVATE_LINK_CONSUMPTION_REQUIRED');
-  plOnly(p.workloadProfiles[0], ['name', 'workloadProfileType', 'minimumCount', 'maximumCount']);
+  plOnly(p.workloadProfiles[0], ['name', 'workloadProfileType', 'minimumCount', 'maximumCount', 'enableFips']);
   if (p.workloadProfiles[0].name !== 'Consumption' || p.workloadProfiles[0].workloadProfileType !== 'Consumption' ||
-      p.workloadProfiles[0].minimumCount != null || p.workloadProfiles[0].maximumCount != null) fail('PRIVATE_LINK_CONSUMPTION_REQUIRED');
+      p.workloadProfiles[0].minimumCount != null || p.workloadProfiles[0].maximumCount != null ||
+      p.workloadProfiles[0].enableFips !== undefined && p.workloadProfiles[0].enableFips !== false) fail('PRIVATE_LINK_CONSUMPTION_REQUIRED');
   verifyPrivateLinkEnvironmentNoLogs(p.appLogsConfiguration, environmentWireVersion);
+  for (const key of ['appInsightsConfiguration', 'openTelemetryConfiguration', 'ingressConfiguration']) {
+    if (p[key] !== undefined && p[key] !== null) fail('PRIVATE_LINK_ENVIRONMENT_LOGGING_OR_DOMAIN_DRIFT');
+  }
   if (p.daprAIInstrumentationKey || p.daprAIConnectionString ||
       p.customDomainConfiguration?.dnsSuffix || p.customDomainConfiguration?.certificateValue ||
       p.customDomainConfiguration?.certificateKeyVaultProperties) fail('PRIVATE_LINK_ENVIRONMENT_LOGGING_OR_DOMAIN_DRIFT');
@@ -371,8 +394,16 @@ function verifyEnvironment(c, context, s, environmentWireVersion) {
       if (value.sku?.name !== 'Standard' || props.publicIPAllocationMethod !== 'Static' ||
           props.publicIPAddressVersion !== 'IPv4' || typeof props.ipAddress !== 'string' ||
           !/^(?:\d{1,3}\.){3}\d{1,3}$/u.test(props.ipAddress) ||
-          props.ipAddress.split('.').some(part => Number(part) > 255) ||
-          (props.ipTags !== undefined && !isDeepStrictEqual(props.ipTags, []))) fail('PRIVATE_LINK_PLATFORM_PUBLIC_IP_DRIFT');
+          props.ipAddress.split('.').some(part => Number(part) > 255)) fail('PRIVATE_LINK_PLATFORM_PUBLIC_IP_DRIFT');
+      if (props.ipTags !== undefined && !isDeepStrictEqual(props.ipTags, [])) {
+        if (!isDeepStrictEqual(props.ipTags, [{ ipTagType: 'FirstPartyUsage', tag: '/Unprivileged' }]) ||
+            !sameId(value.id, `${n.managedGroup}/providers/Microsoft.Network/publicIPAddresses/capp-svc-lb-ip`) ||
+            !sameId(value.tags?.['aca-managed-env-id'], n.environment) || props.ipAddress !== p.staticIp ||
+            !sameId(props.ipConfiguration?.id,
+              `${n.managedGroup}/providers/Microsoft.Network/loadBalancers/capp-svc-lb/frontendIPConfigurations/capp-svc-lbfe`)) {
+          fail('PRIVATE_LINK_PLATFORM_PUBLIC_IP_DRIFT');
+        }
+      }
       addresses.add(props.ipAddress);
     } else if (sameId(value.type, 'Microsoft.Network/loadBalancers')) {
       const props = resource(value, value.id, value.type, API.network, [
