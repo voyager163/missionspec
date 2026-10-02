@@ -8,8 +8,8 @@ import { privateLinkAzureIO, privateLinkTargetKey, preparePrivateLinkPhase, chec
   executePrivateLinkPhase, reconcilePrivateLinkPhase, recoverPrivateLinkPhase, runPrivateLinkControl } from '../private-link-controller.mjs';
 import { verifyPrivateLinkControlEvidence } from '../private-link-controller.mjs';
 import { privateLinkReadRequests } from '../private-link-readback.mjs';
-import { nsgAdoptionFixture, adoptedSnapshot } from './private-link-nsg-adoption.fixture.mjs';
-import { privateSnapshotFixture } from './private-link.fixture.mjs';
+import { nsgAdoptionFixture, adoptedSnapshot, adoptedIO } from './private-link-nsg-adoption.fixture.mjs';
+import { privateSnapshotFixture, privateControlHarness } from './private-link.fixture.mjs';
 
 const x = await nsgAdoptionFixture(() => {}, true), { f } = x, stage = 'create-environment', at = x.io.now();
 const proposal = await reconcilePrivateLinkPhase(f.c, f.context, x.adoptedEvidence, x.original, x.io);
@@ -91,7 +91,7 @@ test('forged or serialized validation tokens never admit an unchecked phase/body
   }
 });
 
-test('successful adopted continuation fully verifies and appends its new record after operation-local reuse', async t => {
+test('successful adopted continuation and ordinary successor independently verify and append new records', async t => {
   const q = await harness(t), after = privateSnapshotFixture(f, stage, at), n = f.context.plan.topology.ids;
   for (const [id, value] of Object.entries(x.current.resources)) if (value && after.resources[id]) {
     if (value.systemData) after.resources[id].systemData = structuredClone(value.systemData);
@@ -127,6 +127,36 @@ test('successful adopted continuation fully verifies and appends its new record 
   const bad = structuredClone(completed);
   bad.records.at(-1).preflight.policy.qualified = false;
   assert.throws(() => verifyPrivateLinkControlEvidence(f.c, f.context, bad, at));
+  const successor = async () => privateControlHarness({ ...f, at: at + 1000 }, completed, 'disable-storage-public', {
+    snapshot: value => adoptedSnapshot(x, value), configureIO: io => adoptedIO(x, io),
+  });
+  const next = await successor();
+  assert.equal(next.phase.continuation, undefined);
+  let proofToken;
+  const write = next.io.write;
+  next.io.write = async (...args) => { proofToken = args[5]; return write(...args); };
+  const appended = await next.execute();
+  assert.equal(next.writes, 1); assert(proofToken);
+  assert.equal(verifyPrivateLinkControlEvidence(f.c, f.context, { ...completed,
+    records: [...completed.records, appended] }, at + 1000).stage, 'disable-storage-public');
+  for (const [name, mutate] of [
+    ['ordinary caller body substitution', h => { h.phase.request.body.properties.publicNetworkAccess = 'Enabled'; }],
+    ['ordinary caller proof substitution', h => { h.proof.binding.policySha256 = digest('UNIT changed'); }],
+    ['ordinary caller approval substitution', h => { h.approval.sourceSha256 = digest('UNIT changed'); }],
+  ]) await t.test(name, async () => {
+    const h = await successor(), reserve = h.io.reserve;
+    h.io.reserve = async (...args) => { const pending = await reserve(...args); await Promise.resolve(); mutate(h); return pending; };
+    await assert.rejects(h.execute(), /STOPPED_ORIGINAL_INTENT_PRESERVED/);
+    assert.equal(h.writes, 0); assert.equal(h.journal.dispatchAttempted, false);
+    assert.equal(h.journal.failure.code, 'PRIVATE_LINK_DISPATCH_VALIDATION_CHANGED');
+  });
+  const corrupt = structuredClone(completed);
+  corrupt.records.at(-1).phase.continuation.resolution.original.journal.dispatchAttempted = null;
+  const h = await successor();
+  const ports = { ...h.io, read: async () => assert.fail('Invalid continued predecessor must fail before reads'),
+    reserve: async () => assert.fail('Invalid continued predecessor must fail before reservation') };
+  await assert.rejects(checkPrivateLinkPhase(f.c, f.context, corrupt, h.phase, ports));
+  await assert.rejects(executePrivateLinkPhase(f.c, f.context, corrupt, h.phase, h.proof, h.approval, ports));
 });
 
 test('operation-local validation rejects input/adapter substitution after await before any dispatch', async t => {
@@ -207,4 +237,110 @@ test('public dispatch candidate construction still rejects invalid continuation 
     { continuation: bad, publication: x.io.publication, proof, approval, costReview: proof.costReview,
       costEvidence: proof.costEvidence, migrationReview: proof.migrationReview },
     { now: () => at, invoke: async () => assert.fail('Invalid continuation must not invoke') }));
+});
+
+test('check validation settles before reads and never grants an execute token or cross-operation trust', async t => {
+  const q = await harness(t), calls = [], source = q.io.verifySources, read = q.io.read;
+  let validation, settled = false, finalized = false;
+  q.io.verifySources = async (deadline, token) => {
+    validation = token; calls.push('source-start');
+    await assert.rejects(q.adapter.write(q.phase, () => {}, async () => {}, async () => {}, at + 120000, token));
+    assert.equal(q.writes, 0);
+    await source(deadline, token); await Promise.resolve();
+    settled = true; calls.push('source-end');
+  };
+  q.io.read = (...args) => { assert(settled); calls.push('read'); return read(...args); };
+  q.io.retain = async () => { finalized = true; };
+  const checked = await checkPrivateLinkPhase(f.c, f.context, q.evidence, q.phase, q.io);
+  assert(finalized); assert.deepEqual(calls.slice(0, 2), ['source-start', 'source-end']);
+  assert.equal(q.writes, 0);
+  await assert.rejects(q.adapter.write(q.phase, () => {}, async () => {}, async () => {}, at + 120000, validation));
+  assert.equal(q.writes, 0);
+  q.input.proof = checked; q.phase.continuation.resolution.original.journal.dispatchAttempted = null;
+  await assert.rejects(executePrivateLinkPhase(f.c, f.context, q.evidence, q.phase, checked, q.approval, q.io));
+  assert.equal(q.writes, 0);
+});
+
+test('nested continuation resolution is independently checked in both preflight and execute', async t => {
+  const q = await harness(t);
+  q.io.write = async () => { throw new Error('UNIT_SECOND_CAUGHT_BEFORE_ARM'); };
+  await assert.rejects(q.execute(), /STOPPED_ORIGINAL_INTENT_PRESERVED/);
+  assert.equal(q.journal.dispatchAttempted, false);
+  const intent = q.files.get(`private-link-fence-${q.target}.json`).intent;
+  const original = { phase: q.phase, publication: q.input.publication, approval: q.approval,
+    preflight: q.proof, intent, journal: q.journal };
+  const io = { ...q.io, verifyOriginal: async value => assert.deepEqual(value, original), resolveNoSubmission: async () => {} };
+  const p = await reconcilePrivateLinkPhase(f.c, f.context, q.evidence, original, io);
+  const reviewed = { version: 1, action: 'record-exact-private-link-no-submission-without-replay',
+    proposalSha256: hash(p), pendingHeadSha256: hash(p.pendingHead), sourceSha256: f.source,
+    approvedAt: new Date(at).toISOString(), expiresAt: new Date(at + 600000).toISOString() };
+  const resolved = await recoverPrivateLinkPhase(f.c, f.context, q.evidence, original, p, reviewed, io);
+  const id = randomUUID(), next = { ...continuation, attemptId: id, resolution: resolved, review: {
+    ...continuation.review, attemptId: id, resolutionSha256: hash(resolved), priorIntentSha256: hash(intent), pendingHeadSha256: hash(p.pendingHead) } };
+  const nextPhase = preparePrivateLinkPhase(f.c, f.context, q.evidence, stage, null, next);
+  const nextIO = { ...q.io, head: async () => p.pendingHead };
+  const checked = await checkPrivateLinkPhase(f.c, f.context, q.evidence, nextPhase, nextIO);
+  assert.equal(checked.head.intentSha256, hash(intent));
+  const approved = { ...approval, phaseSha256: hash(nextPhase), bindingSha256: hash(checked.binding) };
+  for (const [name, mutate] of [
+    ['inner unknown marker', value => { value.continuation.resolution.original.phase.continuation.resolution.original.journal.dispatchAttempted = null; }],
+    ['inner changed policy approval', value => { value.continuation.resolution.original.phase.continuation.review.sourceSha256 = digest('UNIT changed'); }],
+    ['outer unknown marker', value => { value.continuation.resolution.original.journal.dispatchAttempted = null; }],
+    ['outer changed request', value => { value.continuation.resolution.original.phase.request.body.properties.mode = 'Complete'; }],
+  ]) await t.test(name, async () => {
+    const changed = structuredClone(nextPhase); mutate(changed);
+    const ports = { ...nextIO, reserve: async () => assert.fail('Invalid nested history must not reserve'),
+      read: async () => assert.fail('Invalid nested history must not start fresh reads') };
+    await assert.rejects(checkPrivateLinkPhase(f.c, f.context, q.evidence, changed, ports));
+    await assert.rejects(executePrivateLinkPhase(f.c, f.context, q.evidence, changed, checked, approved, ports));
+  });
+});
+
+test('continued check rejects source/head/input/expiry drift after awaits without reserving an attempt', async t => {
+  for (const [name, mutate] of [
+    ['caller phase changed during source verification', q => {
+      q.io.verifySources = async () => { await Promise.resolve(); q.phase.request.body.properties.mode = 'Complete'; };
+    }],
+    ['caller history wrapper changed during reads', q => {
+      const read = q.io.read; q.io.read = async (...args) => { const value = await read(...args);
+        q.evidence.originSha256 = digest('UNIT changed'); return value; };
+    }],
+    ['source changed during reads', q => {
+      const read = q.io.read; q.io.read = async (...args) => { const value = await read(...args);
+        q.setSource(digest('UNIT source drift')); return value; };
+    }],
+    ['physical head changed before return', q => {
+      const read = q.io.read; q.io.read = async (...args) => { const value = await read(...args);
+        q.files.set(`private-link-head-${q.target}.json`, { ...proposal.pendingHead, intentSha256: digest('UNIT changed') }); return value; };
+    }],
+    ['expired during source await', q => { q.io.verifySources = async () => { await Promise.resolve(); q.setNow(at + 120000); }; }],
+    ['expired after retained preflight await', q => { q.io.retain = async () => { await Promise.resolve(); q.setNow(at + 120000); }; }],
+    ['cost changed after retained preflight await', q => { q.io.retain = async () => {
+      await Promise.resolve(); q.io.costReview.budgetTargets.migration.project = 999;
+    }; q.io.costReview = structuredClone(q.io.costReview); }],
+    ['source changed after retained preflight await', q => { q.io.retain = async () => {
+      await Promise.resolve(); q.setSource(digest('UNIT source after retain'));
+    }; }],
+    ['head changed after retained preflight await', q => { q.io.retain = async () => {
+      await Promise.resolve(); q.files.set(`private-link-head-${q.target}.json`, { ...proposal.pendingHead, intentSha256: digest('UNIT later head') });
+    }; }],
+    ['cancelled after source await', q => { q.io.verifySources = async () => { await Promise.resolve(); q.io.cancelled = () => true; }; }],
+  ]) await t.test(name, async t => {
+    const q = await harness(t); mutate(q);
+    await assert.rejects(checkPrivateLinkPhase(f.c, f.context, q.evidence, q.phase, q.io));
+    assert.equal(q.writes, 0); assert.equal(q.journal, null);
+    assert(!q.files.has(`private-link-intent-${hash({ target: q.target, stage, attemptId })}.json`));
+  });
+
+});
+
+test('public check includes candidate and adapter CPU in its original preflight deadline', async t => {
+  const directory = `infrastructure/arm/telemetry/.operator-private/revision-20261003-check-start-${randomUUID().slice(0, 8)}`;
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  let calls = 0;
+  await assert.rejects(runPrivateLinkControl(f.c, f.context, x.adoptedEvidence, stage, 'check', directory,
+    { continuation, publication: x.io.publication, costReview: proof.costReview,
+      costEvidence: proof.costEvidence, migrationReview: proof.migrationReview },
+    { now: () => calls++ === 0 ? at : at + 120000, sourceDigest: async () => f.source,
+      invoke: async () => assert.fail('Expired public check must not spawn a bounded read') }), /CHECK_EXPIRED/);
 });

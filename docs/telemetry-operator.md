@@ -124,15 +124,20 @@ alone cannot downgrade either kind of unknown outcome. A reviewed
 known-not-submitted resolution records no phase success and does not itself
 authorize another attempt.
 
-An adopted continuation may reuse fully verified history and proof bindings
-only within that single execution, using private immutable copies and an
-unforgeable in-memory token. Its candidate phase is fully verified before
-reservation; caller and adapter inputs are compared again after awaited work.
-The token is discarded when the attempt settles and cannot be supplied through
-JSON or reused by another operation. Current source/head, NSG/privacy, policy,
-permissions, cost, expiry and cancellation checks still run. The 120-second
-final-check deadline and 300-second proof-age limit are unchanged; local
-validation time does not renew either budget.
+An adopted history may reuse fully verified history and proof bindings only
+within one check or execution, using private immutable copies and a separate
+unforgeable in-memory token for each operation. This includes ordinary phases
+following an earlier continuation. Each candidate is fully verified before
+current reads or reservation; caller and adapter inputs are compared again
+after awaited work. Tokens are discarded when their operation settles and
+cannot be supplied through JSON or reused by another operation.
+Synchronous source/history verification finishes before bounded read processes
+start. Public preflight timing includes candidate construction, adapter setup
+and final proof persistence; it does not begin a new budget at collection.
+Current source/head, NSG/privacy, policy, permissions, cost, expiry and
+cancellation checks still run. The 120-second preflight/final-check deadlines
+and 300-second proof-age limit are unchanged; local validation time does not
+renew any budget.
 
 Provider metadata stays byte-preserved. An explicit `+00:00` UTC suffix, as
 returned by ACR, is equivalent to `Z` for 100ns identity comparisons; other
