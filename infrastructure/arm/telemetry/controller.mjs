@@ -24,9 +24,10 @@ import { NspController, nspTransport, collectNspObservation, checkNspReadOnly, c
 import { collectNspReconciliation, qualifyNspReconciliation, verifyNspStoppedAttempt } from './nsp-reconciliation.mjs';
 import { buildPrivateLinkPlan, verifyPrivateLinkPlan, verifyPrivateLinkContext, PRIVATE_LINK_CONTROL_STAGES } from './private-link.mjs';
 import { privateLinkWhatIfContext, privateLinkRuntimeWhatIfContext } from './private-link-whatif.mjs';
-import { runPrivateLinkControl } from './private-link-controller.mjs';
+import { runPrivateLinkControl, runPrivateLinkNsgAdoption } from './private-link-controller.mjs';
 import { runPrivateLinkRuntime } from './private-link-runtime.mjs';
-import { PHASES, buildPhase, deploymentName, validateConfig, ids, digest, json, fail, sameId, storageContract, firstReleaseCost, assertOwned, RECEIVER_COMMAND,
+import { loadPrivateLinkArtifact, savePrivateLinkArtifact } from './private-link-artifacts.mjs';
+import { PHASES, buildPhase, deploymentName, validateConfig, ids, digest, digestJson, json, fail, sameId, storageContract, firstReleaseCost, assertOwned, RECEIVER_COMMAND,
   closed, budgetConfiguration, projectBudgetFilter, verifyFoundationBudgets, reconciliationBinding, assignmentRoleTargets,
   TOGGLE_PHASES, SYNTHETIC_LIMITS, SYNTHETIC_FIXTURES, requireAccess, validateWindowInstance } from './definition.mjs';
 import { assertBudget, verifyWhatIf, verifyResource, verifyApproval, verifyFreshReview, sourceContractsSummary, permitFirstPush,
@@ -163,7 +164,7 @@ export async function sourceDigest() {
   const names = ['definition.mjs', 'policy.mjs', 'controller.mjs', 'arm-whatif.py', 'receiver-upgrade.mjs', 'durable-queue.mjs', 'effective-policy.mjs',
     'queue-adoption.mjs', 'nsp.mjs', 'nsp-controller.mjs', 'nsp-reconciliation.mjs', 'queue-defender.mjs',
     'private-link.mjs', 'private-link-whatif.mjs', 'private-link-controller.mjs', 'private-link-readback.mjs',
-    'private-link-runtime.mjs', 'private-link-exec.py'];
+    'private-link-runtime.mjs', 'private-link-exec.py', 'private-link-artifacts.mjs', 'private-link-nsg-adoption.mjs'];
   const hash = createHash('sha256');
   for (const name of names) hash.update(name).update(await readFile(resolve(here, name)));
   const contract = await storageContract(); hash.update(json(contract));
@@ -609,14 +610,26 @@ export async function publishedSourceDigest(commitSha, run = execute) {
     if (controller.includes("from './effective-policy.mjs'")) {
       hash.update('effective-policy.mjs').update(await file('infrastructure/arm/telemetry/effective-policy.mjs'));
     }
+    let privateLinkController;
     for (const name of ['queue-adoption.mjs', 'nsp.mjs', 'nsp-controller.mjs', 'nsp-reconciliation.mjs', 'queue-defender.mjs',
       'private-link.mjs', 'private-link-whatif.mjs', 'private-link-controller.mjs', 'private-link-readback.mjs',
       'private-link-runtime.mjs']) {
       const dependency = name === 'private-link-readback.mjs' ? 'private-link-controller.mjs' : name;
-      if (controller.includes(`from './${dependency}'`)) hash.update(name).update(await file(`infrastructure/arm/telemetry/${name}`));
+      if (controller.includes(`from './${dependency}'`)) {
+        const bytes = await file(`infrastructure/arm/telemetry/${name}`);
+        if (name === 'private-link-controller.mjs') privateLinkController = bytes.toString();
+        hash.update(name).update(bytes);
+      }
     }
     if (controller.includes("from './private-link-runtime.mjs'")) {
       hash.update('private-link-exec.py').update(await file('infrastructure/arm/telemetry/private-link-exec.py'));
+    }
+    if (controller.includes("from './private-link-artifacts.mjs'")) {
+      hash.update('private-link-artifacts.mjs').update(await file('infrastructure/arm/telemetry/private-link-artifacts.mjs'));
+    }
+    if (controller.includes("from './private-link-nsg-adoption.mjs'") ||
+        privateLinkController?.includes("from './private-link-nsg-adoption.mjs'")) {
+      hash.update('private-link-nsg-adoption.mjs').update(await file('infrastructure/arm/telemetry/private-link-nsg-adoption.mjs'));
     }
     const schema = JSON.parse(await file('assets/schemas/telemetry-event.schema.json'));
     const columns = JSON.parse(await file('services/telemetry-ingest/schema/storage-columns.json'));
@@ -2599,18 +2612,31 @@ export const PRIVATE_LINK_RUNTIME_COMMANDS = Object.freeze({
   'recover-private-link-public-cleanup': 'recover-public-cleanup',
   'reconcile-private-link-public-probe': 'reconcile-public-probe',
 });
+export const PRIVATE_LINK_NSG_COMMANDS = Object.freeze({
+  'observe-private-link-nsg-adoption': 'observe-nsg-adoption', 'adopt-private-link-nsg': 'adopt-nsg',
+});
 
 export async function dispatchPrivateLinkOperation(c, operation, stage, directoryArg, io = {
-  directory: privateDirectory, read: load, immutable: saveImmutable, control: runPrivateLinkControl, runtime: runPrivateLinkRuntime,
+  directory: privateDirectory, read: loadPrivateLinkArtifact, immutable: savePrivateLinkArtifact,
+  control: runPrivateLinkControl, runtime: runPrivateLinkRuntime, nsg: runPrivateLinkNsgAdoption,
 }) {
   const control = Object.hasOwn(PRIVATE_LINK_CONTROL_COMMANDS, operation);
   const runtime = Object.hasOwn(PRIVATE_LINK_RUNTIME_COMMANDS, operation);
-  if (control ? !PRIVATE_LINK_CONTROL_STAGES.includes(stage) : !runtime || stage !== 'private-link-runtime') {
+  const nsg = Object.hasOwn(PRIVATE_LINK_NSG_COMMANDS, operation);
+  if (control ? !PRIVATE_LINK_CONTROL_STAGES.includes(stage) : nsg ? stage !== 'private-link-nsg-adoption'
+    : !runtime || stage !== 'private-link-runtime') {
     fail('FIXED_PHASE_COMMAND_REQUIRED');
   }
   const directory = await io.directory(directoryArg);
   const context = await io.read(directory, 'private-link-control-context.json');
   const evidence = await io.read(directory, 'private-link-control-evidence.json');
+  if (nsg) {
+    const action = PRIVATE_LINK_NSG_COMMANDS[operation];
+    const inputs = await io.read(directory, 'private-link-nsg-adoption-inputs.json');
+    closed(inputs, ['original', 'originalDirectory', 'publication', 'policyRevision',
+      'costReview', 'costEvidence', 'migrationReview', ...(action === 'observe-nsg-adoption' ? ['provenance'] : ['proposal', 'review'])]);
+    return io.nsg(c, context, evidence, action, directoryArg, inputs);
+  }
   if (control) {
     const action = PRIVATE_LINK_CONTROL_COMMANDS[operation];
     const keys = ['publication', 'costReview', 'costEvidence', 'migrationReview'];
@@ -2624,6 +2650,7 @@ export async function dispatchPrivateLinkOperation(c, operation, stage, director
     if (inputs && Object.hasOwn(inputs, 'policyRevision')) fields.push('policyRevision');
     if (['prepare', 'check', 'execute', 'retire'].includes(action) &&
         inputs && Object.hasOwn(inputs, 'continuation')) fields.push('continuation');
+    if (evidence.version === 2 && ['reconcile', 'recover'].includes(action)) fields.push('originalDirectory');
     closed(inputs, fields);
     return io.control(c, context, evidence, stage, action, directoryArg, inputs);
   }
@@ -2639,15 +2666,17 @@ export async function dispatchPrivateLinkOperation(c, operation, stage, director
 
 async function main() {
   const [operation, phaseName, directoryArg, ...extra] = process.argv.slice(2);
-  if (Object.hasOwn(PRIVATE_LINK_CONTROL_COMMANDS, operation) || Object.hasOwn(PRIVATE_LINK_RUNTIME_COMMANDS, operation)) {
+  if (Object.hasOwn(PRIVATE_LINK_CONTROL_COMMANDS, operation) || Object.hasOwn(PRIVATE_LINK_RUNTIME_COMMANDS, operation) ||
+      Object.hasOwn(PRIVATE_LINK_NSG_COMMANDS, operation)) {
     if (!directoryArg || extra.length ||
         (Object.hasOwn(PRIVATE_LINK_CONTROL_COMMANDS, operation) ? !PRIVATE_LINK_CONTROL_STAGES.includes(phaseName)
-          : phaseName !== 'private-link-runtime')) fail('FIXED_PHASE_COMMAND_REQUIRED');
+          : Object.hasOwn(PRIVATE_LINK_NSG_COMMANDS, operation) ? phaseName !== 'private-link-nsg-adoption'
+            : phaseName !== 'private-link-runtime')) fail('FIXED_PHASE_COMMAND_REQUIRED');
     if (Object.entries(process.env).some(([key, value]) => value && /^(CI$|GITHUB_|ACTIONS_|RUNNER_)/u.test(key))) fail('UNTRUSTED_RUNNER_FORBIDDEN');
     const directory = await privateDirectory(directoryArg), c = validateConfig(await load(directory, 'config.json'));
     const result = await dispatchPrivateLinkOperation(c, operation, phaseName, directoryArg);
     console.log(json({ operation, stage: phaseName, resultKind: result?.kind ?? null,
-      resultSha256: digest(json(result)), outcome: result?.outcome ?? null }));
+      resultSha256: digestJson(result), outcome: result?.outcome ?? null }));
     return;
   }
   const privateLinkOperation = ['preview-private-link', 'check-private-link-plan'].includes(operation);

@@ -10,19 +10,44 @@ import { verifyQueueAdoptionSources, queueArmInstant } from './queue-adoption.mj
 import { queueDefenderInventory } from './queue-defender.mjs';
 import { nspTargetKey } from './nsp.mjs';
 import { az, sourceDigest, publishedSourceDigest, save, saveImmutable, load, readBatch, limitReadConcurrency,
-  asyncWhatIf, authenticatedWhatIfRequest, whatIfRequestContext, safeOperationFailure, verifyReceiverSource, readNspHead, privateDirectory } from './controller.mjs';
+  asyncWhatIf, authenticatedWhatIfRequest, whatIfRequestContext, safeOperationFailure, verifyReceiverSource, readNspHead, privateDirectory,
+  MAX_PRIVATE_ARTIFACT_BYTES } from './controller.mjs';
 import { PRIVATE_LINK_API as API, PRIVATE_LINK_CONTROL_STAGES as STAGES, PRIVATE_LINK_LIMITS as LIMITS,
   PRIVATE_LINK_RUNTIME_STAGES, privateLinkAtLeast, privateLinkCost, privateLinkPhase,
-  verifyPrivateLinkControlContext, verifyPrivateLinkEnvironmentWire } from './private-link.mjs';
+  verifyPrivateLinkControlContext, verifyPrivateLinkEnvironmentWire, withPrivateLinkControlValidation } from './private-link.mjs';
 import { collectPrivateLinkSnapshot, privateLinkGeneration, privateLinkHash as hash, privateLinkReadRequests,
   privateLinkResourceDescriptors, privateLinkResourceState, verifyPrivateLinkSnapshot, verifyPrivateLinkEndpoint,
   plEqual as equal, plList, plOnly } from './private-link-readback.mjs';
 import { verifyPrivateLinkRuntimeCompletion } from './private-link-runtime.mjs';
+import { privateLinkNsgTarget, privateLinkNsgTargets, privateLinkNsgReadRequests, privateLinkNsgRegionalWatchers,
+  verifyPrivateLinkNsgAdoption, verifyPrivateLinkNsgCurrent, verifyPrivateLinkNsgEvidenceBinding,
+  privateLinkNsgOriginalBaseline, observePrivateLinkNsgAdoption, adoptPrivateLinkNsg, withPrivateLinkNsgValidation,
+  privateLinkNsgValidatedRecord, privateLinkNsgValidatedAnchor, privateLinkNsgValidationFor,
+  privateLinkNsgMembers } from './private-link-nsg-adoption.mjs';
+import { loadPrivateLinkArtifact, savePrivateLinkArtifact, updatePrivateLinkArtifact } from './private-link-artifacts.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url)), sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const sha = value => typeof value === 'string' && /^[0-9a-f]{64}$/u.test(value);
 const stamp = at => new Date(at).toISOString();
+export function privateLinkArtifactBytes(value) {
+  const encoded = JSON.stringify(value);
+  if (encoded === undefined) fail('PRIVATE_LINK_JSON_ARTIFACT_REQUIRED');
+  const bytes = encoded + '\n';
+  if (Buffer.byteLength(bytes) > MAX_PRIVATE_ARTIFACT_BYTES) fail('PRIVATE_FILE_TOO_LARGE');
+  return bytes;
+}
 const originalState = evidence => evidence.records.at(-1)?.stage ?? 'initial';
+function originalEvidence(evidence, phase) {
+  return evidence.version === 2 && phase.externalAdoptionSha256 === undefined
+    ? { version: 1, kind: evidence.kind, planSha256: evidence.planSha256, originSha256: evidence.originSha256, records: evidence.records }
+    : evidence;
+}
+const externalNsg = evidence => evidence.version === 2 ? evidence.externalAdoption : null;
+function phaseExternalNsg(evidence, phase) {
+  const adoption = externalNsg(evidence);
+  if (phase.externalAdoptionSha256 !== undefined && (!adoption || hash(adoption) !== phase.externalAdoptionSha256)) fail('PRIVATE_LINK_NSG_PHASE_BINDING_CHANGED');
+  return phase.externalAdoptionSha256 === undefined ? null : adoption;
+}
 const environmentWireVersion = evidence => evidence.records.find(record => record.stage === 'create-environment')?.phase.version ?? 2;
 const authority = Object.freeze({ originalNspExecutionQualified: false, originalHistoryModified: false,
   originalIntentReplayAuthorized: false, ingestionAuthorized: false, publicationAuthorized: false, clientActivationAuthorized: false });
@@ -76,17 +101,26 @@ export function emptyPrivateLinkControlEvidence(context) {
 export function privateLinkHead(context, evidence) {
   return { version: 1, kind: 'private-link-terminal-head', targetKey: privateLinkTargetKey(context),
     planSha256: context.plan.planSha256, originSha256: hash(context.origin), records: evidence.records.length,
-    stage: originalState(evidence), recordSha256: evidence.records.length ? hash(evidence.records.at(-1)) : null };
+    stage: originalState(evidence), recordSha256: evidence.records.length ? hash(evidence.records.at(-1)) : null,
+    ...(evidence.records.at(-1)?.phase.externalAdoptionSha256 ? { externalAdoptionSha256: hash(evidence.externalAdoption) } : {}) };
 }
 const headName = context => `private-link-head-${privateLinkTargetKey(context)}.json`;
 const fenceName = context => `private-link-fence-${privateLinkTargetKey(context)}.json`;
 const intentName = (context, stage, attemptId = null) =>
   `private-link-intent-${hash({ target: privateLinkTargetKey(context), stage, ...(attemptId ? { attemptId } : {}) })}.json`;
+async function verifyOriginalArtifacts(context, original, directory, root, read) {
+  const archived = await read(root, intentName(context, original.phase.stage, original.phase.continuation?.attemptId));
+  equal(archived, { phase: original.phase, intent: original.intent }, 'PRIVATE_LINK_ORIGINAL_INTENT_ARCHIVE_CHANGED');
+  equal(await load(directory, `private-link-${original.phase.stage}-journal.json`), original.journal,
+    'PRIVATE_LINK_ORIGINAL_DURABLE_JOURNAL_CHANGED');
+}
 const pendingHead = (context, evidence, intent, phase = null) => ({ version: 1, kind: 'private-link-pending-head',
   targetKey: privateLinkTargetKey(context), previous: phase?.expectedHead ?? privateLinkHead(context, evidence), intentSha256: hash(intent) });
 export async function readPrivateLinkHead(context, evidence, options = {}) {
-  const root = options.root ?? resolve(here, '.operator-private'), read = options.read ?? load;
+  const root = options.root ?? resolve(here, '.operator-private'), read = options.read ?? loadPrivateLinkArtifact;
   const actual = await read(root, headName(context), true), expected = privateLinkHead(context, evidence);
+  if (externalNsg(evidence)) equal(await read(root, `private-link-nsg-adoption-${privateLinkTargetKey(context)}.json`, true),
+    evidence.externalAdoption, 'PRIVATE_LINK_NSG_CANONICAL_ADOPTION_REQUIRED');
   const fence = await read(root, fenceName(context), true);
   if (actual === null && evidence.records.length === 0 && fence === null) {
     if (await read(root, intentName(context, 'review-migration'), true) !== null) fail('PRIVATE_LINK_ORPHANED_INTENT');
@@ -178,16 +212,21 @@ function order(evidence, stage) {
 }
 export function preparePrivateLinkPhase(c, context, evidence, stage, policyRevision = null, continuation = null,
   version = stage === 'create-environment' ? 2 : 1) {
-  verifyPrivateLinkControlEvidence(c, context, evidence);
+  return withPrivateLinkNsgValidation(c, context, externalNsg(evidence), evidence, validation =>
+    preparePhase(c, context, evidence, stage, policyRevision, continuation, version, validation));
+}
+function preparePhase(c, context, evidence, stage, policyRevision, continuation, version, validation) {
+  verifyControlEvidence(c, context, evidence, undefined, validation);
   order(evidence, stage);
   const source = policyRevision === null ? context.plan.sourceSha256 :
     verifyPrivateLinkPolicyRevision(c, context, policyRevision, canonicalInstant(policyRevision.approvedAt));
   if (continuation && continuation.resolution?.original?.phase?.version !== version) fail('PRIVATE_LINK_CONTINUATION_WIRE_CHANGED');
-  if (continuation) verifyPrivateLinkContinuation(c, context, evidence, stage, source, continuation, canonicalInstant(continuation.review.approvedAt));
+  if (continuation) verifyPrivateLinkContinuation(c, context, evidence, stage, source, continuation, canonicalInstant(continuation.review.approvedAt), validation);
   return { ...privateLinkPhase(c, context, stage, version), predecessorSha256: evidence.records.length ? hash(evidence.records.at(-1)) : null,
     expectedHead: continuation ? continuation.resolution.proposal.pendingHead : privateLinkHead(context, evidence), sourceSha256: source,
     ...(policyRevision === null ? {} : { policyRevision: structuredClone(policyRevision) }),
-    ...(continuation ? { continuation: structuredClone(continuation) } : {}) };
+    ...(continuation ? { continuation: structuredClone(continuation) } : {}),
+    ...(externalNsg(evidence) ? { externalAdoptionSha256: hash(evidence.externalAdoption) } : {}) };
 }
 function snapshotState(s) {
   return { resources: Object.fromEntries(Object.entries(s.resources).map(([id, value]) => {
@@ -197,7 +236,8 @@ function snapshotState(s) {
     }
     return [id, privateLinkResourceState(value)];
   })), lists: s.lists, diagnostics: s.diagnostics, nic: s.nic ? privateLinkResourceState(s.nic) : null,
-    effective: s.effective ? privateLinkResourceState(s.effective) : null, defender: s.defender, images: s.images, managed: s.managed };
+    effective: s.effective ? privateLinkResourceState(s.effective) : null, defender: s.defender, images: s.images, managed: s.managed,
+    ...(s.externalNsg ? { externalNsg: { ...s.externalNsg, startedAt: null, completedAt: null } } : {}) };
 }
 export function privateLinkPermissions(c, context, phase) {
   const r = ids(c), n = context.plan.topology.ids, list = [
@@ -258,7 +298,7 @@ function verifyProviders(context, catalogs, phase) {
         (d.expected.location && d.expected.location !== 'global' && !rows[0].locations?.some(value => value.replaceAll(' ', '').toLowerCase() === context.plan.topology.location))) fail('PRIVATE_LINK_PINNED_API_UNVERIFIED');
   }
 }
-export function privateLinkPreservedIds(c, context, snapshot) {
+export function privateLinkPreservedIds(c, context, snapshot, adoption = null, evidence = null) {
   const ids = Object.keys(snapshot.resources).filter(id => snapshot.resources[id] !== null);
   if (snapshot.nic !== null && snapshot.nic !== undefined) {
     verifyPrivateLinkEndpoint(c, context, snapshot);
@@ -267,6 +307,11 @@ export function privateLinkPreservedIds(c, context, snapshot) {
   if (context.origin.adoption.version === 3) {
     ids.push(...Object.keys(queueDefenderInventory(c, context.origin.adoption.origin,
       context.origin.adoption.proposal.defender, snapshot.defender)));
+  }
+  if (adoption) {
+    adoption = privateLinkNsgValidatedRecord(c, context, adoption, evidence);
+    verifyPrivateLinkNsgCurrent(c, context, snapshot.externalNsg, adoption.proposal.current.externalNsg);
+    ids.push(...Object.values(privateLinkNsgTargets(c, context)).map(value => value.id));
   }
   return [...new Set(ids)];
 }
@@ -347,21 +392,22 @@ function verifyCostScope(c, context, evidence, snapshot, at) {
     if (spend.amount > ceiling) fail('PRIVATE_LINK_SPEND_REVIEW_REQUIRED');
   }
 }
-function verifyProof(c, context, evidence, phase, proof, at) {
+function verifyProof(c, context, evidence, phase, proof, at, validation = null) {
   closed(proof, ['version', 'kind', 'startedAt', 'completedAt', 'sourceSha256', 'phaseSha256', 'planSha256',
     'contextSha256', 'head', 'before', 'policy', 'permissions', 'providers', 'costReview', 'costEvidence',
     'migrationReview', 'preview', 'validation', 'runtimeCompletion', 'binding',
     ...(phase.continuation ? ['deploymentBefore'] : [])]);
   fresh(proof, at); fresh(proof.before, at);
   const source = phaseSource(c, context, phase, at);
-  if (phase.continuation) verifyPrivateLinkContinuation(c, context, evidence, phase.stage, source, phase.continuation, at);
+  if (phase.continuation) verifyPrivateLinkContinuation(c, context, evidence, phase.stage, source, phase.continuation, at, validation);
   if (phase.continuation && proof.deploymentBefore !== null) fail('PRIVATE_LINK_CONTINUATION_DEPLOYMENT_PRESENT');
   if (proof.version !== 1 || proof.kind !== 'checked-private-link-phase' || proof.sourceSha256 !== source ||
       proof.phaseSha256 !== hash(phase) || proof.planSha256 !== context.plan.planSha256 ||
       proof.contextSha256 !== hash(context.origin)) fail('PRIVATE_LINK_PREFLIGHT_BINDING_CHANGED');
   equal(proof.binding, proofBindings(proof), 'PRIVATE_LINK_PREFLIGHT_BINDING_CHANGED');
   equal(proof.head, phase.expectedHead, 'PRIVATE_LINK_PREFLIGHT_HEAD_CHANGED');
-  verifyPrivateLinkSnapshot(c, context, proof.before, originalState(evidence), environmentWireVersion(evidence));
+  const adoption = phaseExternalNsg(evidence, phase), checked = privateLinkNsgValidationFor(c, context, adoption, validation);
+  verifyPrivateLinkSnapshot(c, context, proof.before, originalState(evidence), environmentWireVersion(evidence), checked, evidence);
   verifyCostScope(c, context, evidence, proof.before, at);
   verifyPrivateLinkCostReview(c, context, proof.costReview, proof.costEvidence, proof.sourceSha256, at);
   verifyPrivateLinkMigrationReview(c, context, proof.migrationReview, at, source);
@@ -369,13 +415,14 @@ function verifyProof(c, context, evidence, phase, proof, at) {
   verifyPermissions(c, context, phase, proof.permissions); verifyProviders(context, proof.providers, phase);
   const policyPhase = policyTargetPhase(c, context, phase, proof.before);
   verifyEffectivePolicyEvidence(policyPhase, proof.policy);
-  verifyPrivateLinkPreview(phase, proof.preview, proof.before, privateLinkPreservedIds(c, context, proof.before));
+  verifyPrivateLinkPreview(phase, proof.preview, proof.before, privateLinkPreservedIds(c, context, proof.before, checked, evidence));
   if (privateLinkAtLeast(phase.stage, 'retire-old-receiver')) {
     verifyPrivateLinkRuntimeCompletion(c, context, proof.runtimeCompletion, at);
     const runtimeEvidence = proof.runtimeCompletion.controlEvidence;
-    closed(runtimeEvidence, ['version', 'kind', 'planSha256', 'originSha256', 'records']);
-    if (runtimeEvidence.version !== 1 || runtimeEvidence.kind !== evidence.kind ||
+    closed(runtimeEvidence, ['version', 'kind', 'planSha256', 'originSha256', 'records', ...(adoption ? ['externalAdoption'] : [])]);
+    if (runtimeEvidence.version !== (adoption ? 2 : 1) || runtimeEvidence.kind !== evidence.kind ||
         runtimeEvidence.planSha256 !== evidence.planSha256 || runtimeEvidence.originSha256 !== evidence.originSha256) fail('PRIVATE_LINK_RUNTIME_CONTROL_LINEAGE_CHANGED');
+    if (adoption) equal(runtimeEvidence.externalAdoption, adoption, 'PRIVATE_LINK_NSG_RUNTIME_ADOPTION_CHANGED');
     const prefix = evidence.records.slice(0, STAGES.indexOf('assign-queue-role') + 1);
     equal(runtimeEvidence.records, prefix, 'PRIVATE_LINK_RUNTIME_CONTROL_LINEAGE_CHANGED');
     if (prefix.at(-1)?.stage !== 'assign-queue-role') fail('PRIVATE_LINK_RUNTIME_PREREQUISITES_REQUIRED');
@@ -396,6 +443,10 @@ function policyTargetPhase(c, context, phase, snapshot) {
     ...structuredClone(snapshot.resources[phase.request.id]),
     properties: { ...structuredClone(snapshot.resources[phase.request.id].properties), publicNetworkAccess: 'Disabled' },
   };
+  if (phase.externalAdoptionSha256 && snapshot?.externalNsg) {
+    for (const value of Object.values(privateLinkNsgMembers(snapshot.externalNsg))) resources.push({ id: value.id,
+      type: 'Microsoft.Network/networkSecurityGroups', apiVersion: API.network, expected: structuredClone(value) });
+  }
   return { ...phase, resources };
 }
 async function governance(c, context, phase, snapshot, io, deadline) {
@@ -407,7 +458,7 @@ async function governance(c, context, phase, snapshot, io, deadline) {
     Object.fromEntries(await io.batch([['permissions', 'permissions'], ['denies', 'denyAssignments']], async ([key, suffix]) => [key,
       await io.read({ id: `${scope}/providers/Microsoft.Authorization/${suffix}`, apiVersion: API.authorization, filter: null }, deadline, true)]))]);
   const policyTask = (async () => {
-    const independent = phase.resources.length && phase.request?.method !== 'DELETE' && phase.stage !== 'disable-storage-public';
+    const independent = !phase.externalAdoptionSha256 && phase.resources.length && phase.request?.method !== 'DELETE' && phase.stage !== 'disable-storage-public';
     const targets = independent ? null : await snapshot;
     const evaluation = collectEffectivePolicies(policyTargetPhase(c, context, phase, targets), async (id, apiVersion, filter) => {
       const request = { id, apiVersion, filter: filter ?? null };
@@ -419,24 +470,30 @@ async function governance(c, context, phase, snapshot, io, deadline) {
   const [providers, permissions, policy] = await Promise.all([providerTask, permissionTask, policyTask]);
   return { providers: Object.fromEntries(providers), permissions: Object.fromEntries(permissions), policy };
 }
-function snapshotWithTargets(c, context, io, deadline) {
+function snapshotWithTargets(c, context, io, deadline, adoption = null) {
   let ready, failed;
   const targets = new Promise((resolve, reject) => { ready = resolve; failed = reject; });
-  const snapshot = collectPrivateLinkSnapshot(c, context, io, deadline, ready);
+  const snapshot = collectPrivateLinkSnapshot(c, context, io, deadline, ready, adoption);
   snapshot.catch(failed);
   return { snapshot, targets };
 }
 export async function checkPrivateLinkPhase(c, context, evidence, phase, io) {
-  const startedAt = io.now(), deadline = startedAt + LIMITS.checkMs, source = await io.sourceDigest();
-  equal(phase, preparePrivateLinkPhase(c, context, evidence, phase.stage, phase.policyRevision ?? null, phase.continuation ?? null), 'PRIVATE_LINK_PREPARED_PHASE_CHANGED');
+  const startedAt = io.now();
+  return withPrivateLinkNsgValidation(c, context, externalNsg(evidence), evidence, validation => checkPhase(c, context, evidence, phase, io, startedAt, validation));
+}
+async function checkPhase(c, context, evidence, phase, io, startedAt, validation) {
+  const deadline = startedAt + LIMITS.checkMs, source = await io.sourceDigest();
+  equal(phase, preparePhase(c, context, evidence, phase.stage, phase.policyRevision ?? null, phase.continuation ?? null,
+    phase.stage === 'create-environment' ? 2 : 1, validation), 'PRIVATE_LINK_PREPARED_PHASE_CHANGED');
   if (source !== phaseSource(c, context, phase, io.now())) fail('PRIVATE_LINK_SOURCE_CHANGED');
-  const collection = snapshotWithTargets(c, context, io, deadline);
+  const collection = snapshotWithTargets(c, context, io, deadline, externalNsg(evidence));
   const [head, before, controls, sourceCheck, deploymentPreview, deploymentBefore] = await Promise.all([
     io.head(evidence), collection.snapshot, governance(c, context, phase, collection.targets, io, deadline),
-    io.verifySources(deadline), phase.deploymentId ? io.preview(phase, deadline) : null,
+    io.verifySources(deadline, validation), phase.deploymentId ? io.preview(phase, deadline) : null,
     phase.continuation && phase.deploymentId ? io.read({ id: phase.deploymentId, apiVersion: API.deployment, filter: null }, deadline) : null,
   ]);
-  verifyPrivateLinkSnapshot(c, context, before, originalState(evidence), environmentWireVersion(evidence));
+  verifyPrivateLinkSnapshot(c, context, before, originalState(evidence), environmentWireVersion(evidence),
+    privateLinkNsgValidationFor(c, context, externalNsg(evidence), validation));
   if (phase.stage === 'review-migration') equal(await io.nspHead(), context.origin.pendingHead, 'PRIVATE_LINK_ORIGINAL_PENDING_HEAD_CHANGED');
   const preview = phase.deploymentId ? deploymentPreview : { validation: null, preview: {
     version: 1, kind: 'exact-private-link-request-preimage', request: phase.request,
@@ -451,7 +508,8 @@ export async function checkPrivateLinkPhase(c, context, evidence, phase, io) {
     ...(phase.continuation ? { deploymentBefore } : {}) };
   proof.binding = proofBindings(proof);
   if (await io.sourceDigest() !== source || io.now() >= deadline) fail('PRIVATE_LINK_CHECK_EXPIRED');
-  verifyProof(c, context, evidence, phase, proof, io.now());
+  verifyProof(c, context, evidence, phase, proof, io.now(), validation);
+  if (io.now() >= deadline) fail('PRIVATE_LINK_CHECK_EXPIRED');
   await io.retain('preflight', proof);
   return proof;
 }
@@ -465,9 +523,10 @@ export function verifyPrivateLinkApproval(c, context, phase, proof, approval, at
       approval.sourceSha256 !== phaseSource(c, context, phase, at) || approval.requestSha256 !== hash(phase.request)) fail('PRIVATE_LINK_EXACT_APPROVAL_REQUIRED');
   if (phase.continuation) boundedReview(phase.continuation.review, at);
 }
-function verifyTransition(c, context, phase, before, after, evidence) {
+function verifyTransition(c, context, phase, before, after, evidence, validation = null) {
   verifyPrivateLinkSnapshot(c, context, after, phase.stage,
-    phase.stage === 'create-environment' ? phase.version : environmentWireVersion(evidence));
+    phase.stage === 'create-environment' ? phase.version : environmentWireVersion(evidence),
+    privateLinkNsgValidationFor(c, context, phaseExternalNsg(evidence, phase), validation));
   const n = context.plan.topology.ids, q = context.origin.adoption.topology.ids;
   for (const [id, previous] of Object.entries(before.resources)) if (previous && after.resources[id]) {
     equal(privateLinkGeneration(previous), privateLinkGeneration(after.resources[id]), 'PRIVATE_LINK_GENERATION_CHANGED');
@@ -527,13 +586,33 @@ function verifyDeploymentOperations(phase, deployment, operations) {
   if (seen.size !== phase.resources.length) fail('PRIVATE_LINK_DEPLOYMENT_OPERATIONS_INCOMPLETE');
 }
 export function verifyPrivateLinkControlEvidence(c, context, evidence, at) {
+  return withPrivateLinkNsgValidation(c, context, externalNsg(evidence), evidence, validation =>
+    verifyControlEvidence(c, context, evidence, at, validation));
+}
+function verifyControlEvidence(c, context, evidence, at, validation) {
+  if (externalNsg(evidence) && !validation) return withPrivateLinkNsgValidation(c, context, externalNsg(evidence), evidence,
+    proof => verifyControlEvidence(c, context, evidence, at, proof));
+  return withPrivateLinkControlValidation(c, context, () => verifyControlRecords(c, context, evidence, at, validation));
+}
+function verifyControlRecords(c, context, evidence, at, validation) {
   verifyPrivateLinkControlContext(c, context);
-  closed(evidence, ['version', 'kind', 'planSha256', 'originSha256', 'records']);
-  if (evidence.version !== 1 || evidence.kind !== 'reviewed-private-link-control-chain' ||
+  closed(evidence, ['version', 'kind', 'planSha256', 'originSha256', 'records', ...(evidence.version === 2 ? ['externalAdoption'] : [])]);
+  if (![1, 2].includes(evidence.version) || evidence.kind !== 'reviewed-private-link-control-chain' ||
       evidence.planSha256 !== context.plan.planSha256 || evidence.originSha256 !== hash(context.origin) ||
       !Array.isArray(evidence.records) || evidence.records.length > STAGES.length) fail('PRIVATE_LINK_CHAIN_INVALID');
   const prior = emptyPrivateLinkControlEvidence(context);
-  for (const record of evidence.records) {
+  const adoption = validation ? privateLinkNsgValidatedRecord(c, context,
+    privateLinkNsgValidationFor(c, context, externalNsg(evidence), validation)) : verifyPrivateLinkNsgEvidenceBinding(c, context, evidence);
+  if (adoption) {
+    const anchor = privateLinkNsgValidatedAnchor(c, context, validation);
+    equal(evidence.records.slice(0, 6), anchor.records, 'PRIVATE_LINK_NSG_ANCHOR_CHANGED');
+    if (at !== undefined && canonicalInstant(adoption.adoptedAt) > at) fail('PRIVATE_LINK_NSG_ADOPTION_FROM_FUTURE');
+    prior.records.push(...anchor.records);
+  }
+  for (const record of evidence.records.slice(prior.records.length)) {
+    if (adoption && prior.records.length === adoption.proposal.anchor.records) {
+      prior.version = 2; prior.externalAdoption = adoption;
+    }
     closed(record, ['version', 'kind', 'stage', 'phase', 'publication', 'approval', 'preflight', 'intent',
       'intentSha256', 'journal', 'after', 'deployment', 'operations', 'completedAt', 'authority', 'recovery']);
     order(prior, record.stage);
@@ -541,7 +620,8 @@ export function verifyPrivateLinkControlEvidence(c, context, evidence, at) {
       expectedHead: record.phase.continuation?.resolution.proposal.pendingHead ?? privateLinkHead(context, prior),
       sourceSha256: record.phase.policyRevision?.sourceSha256 ?? context.plan.sourceSha256,
       ...(record.phase.policyRevision ? { policyRevision: record.phase.policyRevision } : {}),
-      ...(record.phase.continuation ? { continuation: record.phase.continuation } : {}) };
+      ...(record.phase.continuation ? { continuation: record.phase.continuation } : {}),
+      ...(externalNsg(prior) ? { externalAdoptionSha256: hash(prior.externalAdoption) } : {}) };
     equal(record.phase, expected, 'PRIVATE_LINK_PHASE_CHANGED');
     const intentAt = canonicalInstant(record.intent.at), completedAt = canonicalInstant(record.completedAt);
     const modern = record.intent.version === 2;
@@ -561,7 +641,7 @@ export function verifyPrivateLinkControlEvidence(c, context, evidence, at) {
         (record.phase.continuation && record.intent.attemptId !== record.phase.continuation.attemptId) ||
         (at !== undefined && completedAt > at)) fail('PRIVATE_LINK_RECORD_INVALID');
     if (prior.records.length && intentAt < canonicalInstant(prior.records.at(-1).completedAt)) fail('PRIVATE_LINK_PREDECESSOR_TIME_CHANGED');
-    verifyProof(c, context, prior, record.phase, record.preflight, intentAt);
+    verifyProof(c, context, prior, record.phase, record.preflight, intentAt, validation);
     verifyPrivateLinkApproval(c, context, record.phase, record.preflight, record.approval, intentAt);
     equal(record.authority, authority, 'PRIVATE_LINK_AUTHORITY_CHANGED');
     if (record.kind === 'reviewed-private-link-phase') {
@@ -578,11 +658,11 @@ export function verifyPrivateLinkControlEvidence(c, context, evidence, at) {
               record.journal.version === 3 ? canonicalInstant(record.journal.dispatchAt) < rolloutAt ||
                 canonicalInstant(record.journal.dispatchAt) >= record.journal.rolloutDeadline :
                 record.journal.dispatchAt !== record.journal.rolloutStartedAt)) fail('PRIVATE_LINK_EXECUTION_CLOCK_INVALID');
-        verifyProof(c, context, prior, record.phase, record.preflight, rolloutAt);
+        verifyProof(c, context, prior, record.phase, record.preflight, rolloutAt, validation);
         verifyPrivateLinkApproval(c, context, record.phase, record.preflight, record.approval, rolloutAt);
         if (record.journal.dispatchAt !== null) {
           const dispatchedAt = canonicalInstant(record.journal.dispatchAt);
-          verifyProof(c, context, prior, record.phase, record.preflight, dispatchedAt);
+          verifyProof(c, context, prior, record.phase, record.preflight, dispatchedAt, validation);
           verifyPrivateLinkApproval(c, context, record.phase, record.preflight, record.approval, dispatchedAt);
         }
       }
@@ -591,8 +671,8 @@ export function verifyPrivateLinkControlEvidence(c, context, evidence, at) {
           record.journal.intentSha256 !== record.intentSha256 || record.journal.dispatchAttempted !== (record.phase.request !== null) ||
           completedAt > (modern ? record.journal.rolloutDeadline : intentAt + record.phase.rolloutMs) ||
           record.after.startedAt < rolloutAt || record.after.completedAt > completedAt) fail('PRIVATE_LINK_EXECUTION_RECORD_INVALID');
-    } else verifyRecovery(c, context, prior, record);
-    verifyTransition(c, context, record.phase, record.preflight.before, record.after, prior);
+    } else verifyRecovery(c, context, prior, record, validation);
+    verifyTransition(c, context, record.phase, record.preflight.before, record.after, prior, validation);
     verifyDeploymentOperations(record.phase, record.deployment, record.operations);
     if (record.phase.deploymentId) {
       const templateHash = record.preflight.validation?.properties?.templateHash;
@@ -614,14 +694,15 @@ export function verifyPrivateLinkControlEvidence(c, context, evidence, at) {
   }
   return evidence.records.at(-1) ?? null;
 }
-async function verifyCurrent(c, context, evidence, phase, proof, io, deadline, pending) {
+async function verifyCurrent(c, context, evidence, phase, proof, io, deadline, pending, validation) {
   if (await io.sourceDigest() !== phaseSource(c, context, phase, io.now())) fail('PRIVATE_LINK_SOURCE_CHANGED');
   await io.head(evidence, pending);
-  const collection = snapshotWithTargets(c, context, io, deadline);
+  const collection = snapshotWithTargets(c, context, io, deadline, externalNsg(evidence));
   const [current, controls, deploymentBefore] = await Promise.all([collection.snapshot, governance(c, context, phase, collection.targets, io, deadline),
     phase.continuation && phase.deploymentId ? io.read({ id: phase.deploymentId, apiVersion: API.deployment, filter: null }, deadline) : null]);
   if (phase.continuation && deploymentBefore !== null) fail('PRIVATE_LINK_CONTINUATION_DEPLOYMENT_PRESENT');
-  verifyPrivateLinkSnapshot(c, context, current, originalState(evidence), environmentWireVersion(evidence));
+  verifyPrivateLinkSnapshot(c, context, current, originalState(evidence), environmentWireVersion(evidence),
+    privateLinkNsgValidationFor(c, context, externalNsg(evidence), validation));
   verifyCostScope(c, context, evidence, current, io.now());
   equal(snapshotState(current), snapshotState(proof.before), 'PRIVATE_LINK_DISPATCH_PREIMAGE_CHANGED');
   for (const key of ['providers', 'permissions', 'policy']) equal(controls[key], proof[key], 'PRIVATE_LINK_DISPATCH_GOVERNANCE_CHANGED');
@@ -636,10 +717,15 @@ async function verifyCurrent(c, context, evidence, phase, proof, io, deadline, p
     sameId(value.properties?.managedEnvironmentId, context.plan.topology.ids.oldEnvironment))) fail('PRIVATE_LINK_OLD_ENVIRONMENT_NOT_EMPTY');
 }
 export async function executePrivateLinkPhase(c, context, evidence, phase, proof, approval, io) {
-  equal(phase, preparePrivateLinkPhase(c, context, evidence, phase.stage, phase.policyRevision ?? null, phase.continuation ?? null), 'PRIVATE_LINK_PREPARED_PHASE_CHANGED');
-  verifyProof(c, context, evidence, phase, proof, io.now());
+  return withPrivateLinkNsgValidation(c, context, externalNsg(evidence), evidence, validation =>
+    executePhase(c, context, evidence, phase, proof, approval, io, validation));
+}
+async function executePhase(c, context, evidence, phase, proof, approval, io, validation) {
+  equal(phase, preparePhase(c, context, evidence, phase.stage, phase.policyRevision ?? null, phase.continuation ?? null,
+    phase.stage === 'create-environment' ? 2 : 1, validation), 'PRIVATE_LINK_PREPARED_PHASE_CHANGED');
+  verifyProof(c, context, evidence, phase, proof, io.now(), validation);
   verifyPrivateLinkApproval(c, context, phase, proof, approval, io.now());
-  await io.verifySources(io.now() + LIMITS.checkMs);
+  await io.verifySources(io.now() + LIMITS.checkMs, validation);
   if (await io.journal()) fail('PRIVATE_LINK_INTENT_REPLAY_FORBIDDEN');
   const at = io.now(), reviewDeadline = Math.min(canonicalInstant(approval.expiresAt),
     canonicalInstant(proof.costReview.expiresAt), canonicalInstant(proof.migrationReview.expiresAt),
@@ -651,7 +737,7 @@ export async function executePrivateLinkPhase(c, context, evidence, phase, proof
     requestSha256: hash(phase.request), previousHeadSha256: hash(phase.expectedHead), at: stamp(at),
     finalCheckDeadline, maximumRolloutMs: phase.rolloutMs,
     ...(phase.continuation ? { attemptId: phase.continuation.attemptId } : {}) };
-  const pending = await io.reserve(evidence, phase, intent);
+  const pending = await io.reserve(evidence, phase, intent, validation);
   const journal = { version: 3, intentSha256: hash(intent), outcome: 'submission-possible', dispatchAttempted: false,
     dispatchAt: null, rolloutStartedAt: null, rolloutDeadline: null, failure: null };
   await io.saveJournal(journal);
@@ -671,7 +757,7 @@ export async function executePrivateLinkPhase(c, context, evidence, phase, proof
   };
   try {
     if (phase.request) await io.write(phase, guard, async () => {
-      await verifyCurrent(c, context, evidence, phase, proof, io, finalCheckDeadline, pending);
+      await verifyCurrent(c, context, evidence, phase, proof, io, finalCheckDeadline, pending, validation);
       guard();
     }, async () => {
       beginRollout(true);
@@ -680,9 +766,9 @@ export async function executePrivateLinkPhase(c, context, evidence, phase, proof
       return { rolloutDeadline: deadline, beforeInvoke: () => {
         journal.dispatchAttempted = true; journal.dispatchAt = stamp(io.now());
       } };
-    }, finalCheckDeadline);
+    }, finalCheckDeadline, validation);
     else {
-      await verifyCurrent(c, context, evidence, phase, proof, io, finalCheckDeadline, pending);
+      await verifyCurrent(c, context, evidence, phase, proof, io, finalCheckDeadline, pending, validation);
       beginRollout(false);
     }
     const maximum = Math.ceil(phase.rolloutMs / LIMITS.pollMs);
@@ -690,12 +776,12 @@ export async function executePrivateLinkPhase(c, context, evidence, phase, proof
       guard();
       const deployment = phase.deploymentId ? await io.read({ id: phase.deploymentId, apiVersion: API.deployment, filter: null }, deadline) : null;
       if (deployment && ['Failed', 'Canceled'].includes(deployment.properties?.provisioningState)) fail('PRIVATE_LINK_DEPLOYMENT_FAILED');
-      const after = await collectPrivateLinkSnapshot(c, context, io, Math.min(deadline, io.now() + LIMITS.checkMs));
+      const after = await collectPrivateLinkSnapshot(c, context, io, Math.min(deadline, io.now() + LIMITS.checkMs), null, externalNsg(evidence));
       await io.retain(`readback-${poll}`, { deployment, after });
       guard();
       let pendingState = phase.deploymentId && deployment?.properties?.provisioningState !== 'Succeeded';
       if (!pendingState) {
-        try { verifyTransition(c, context, phase, proof.before, after, evidence); }
+        try { verifyTransition(c, context, phase, proof.before, after, evidence, validation); }
         catch (error) {
           if (['PRIVATE_LINK_PROPAGATION_PENDING', 'PRIVATE_LINK_NSP_PROPAGATION_PENDING', 'PRIVATE_LINK_NSP_RULE_COPY_PRESENT',
             'PRIVATE_LINK_NSP_EFFECTIVE_COPY_PRESENT', 'PRIVATE_LINK_STAGE_RESOURCE_MISMATCH', 'PRIVATE_LINK_RETIREMENT_UNVERIFIED',
@@ -712,7 +798,7 @@ export async function executePrivateLinkPhase(c, context, evidence, phase, proof
           publication: io.publication, approval, preflight: proof, intent, intentSha256: hash(intent),
           journal: structuredClone(journal), after, deployment, operations, completedAt: stamp(io.now()), authority, recovery: null };
         const result = { ...evidence, records: [...evidence.records, record] };
-        verifyPrivateLinkControlEvidence(c, context, result, io.now());
+        verifyControlEvidence(c, context, result, io.now(), validation);
         guard();
         await io.append(pending, record, privateLinkHead(context, result));
         await io.saveJournal(journal);
@@ -755,7 +841,7 @@ export function privateLinkSubmissionState(original) {
   if (j.dispatchAttempted !== true) fail('PRIVATE_LINK_DISPATCH_MARKER_INVALID');
   return 'dispatch-attempted';
 }
-function verifyRecovery(c, context, prior, record) {
+function verifyRecovery(c, context, prior, record, validation) {
   const recovery = record.recovery;
   closed(recovery, ['original', 'proposal', 'review', 'costReview', 'costEvidence', 'migrationReview', 'currentPublication', 'policyRevision']);
   const { original, proposal, review } = recovery, at = canonicalInstant(record.completedAt);
@@ -770,15 +856,17 @@ function verifyRecovery(c, context, prior, record) {
   verifyPrivateLinkMigrationReview(c, context, recovery.migrationReview, at, source);
   closed(proposal, ['version', 'kind', 'sourceSha256', 'originalSha256', 'pendingHead', 'after', 'deployment',
     'operations', 'originalExecutionQualified', 'replayAuthorized', 'policyRevision',
-    ...(proposal.version === 3 ? ['submissionState'] : [])]);
+    ...([3, 4].includes(proposal.version) ? ['submissionState'] : []),
+    ...(proposal.version === 4 ? ['externalAdoptionSha256'] : [])]);
   const submissionState = privateLinkSubmissionState(original);
   if (review.version !== 1 || review.action !== 'adopt-exact-private-link-late-state-without-replay' ||
       review.proposalSha256 !== hash(proposal) || review.sourceSha256 !== source ||
       review.pendingHeadSha256 !== hash(proposal.pendingHead) || submissionState === 'known-not-submitted' ||
       proposal.originalSha256 !== hash(original) || proposal.sourceSha256 !== source ||
-      ![2, 3].includes(proposal.version) || proposal.kind !== 'private-link-late-state-proposal' ||
-      (proposal.version === 3 && proposal.submissionState !== submissionState) ||
+      ![2, 3, 4].includes(proposal.version) || proposal.kind !== 'private-link-late-state-proposal' ||
+      ([3, 4].includes(proposal.version) && proposal.submissionState !== submissionState) ||
       proposal.originalExecutionQualified !== false || proposal.replayAuthorized !== false) fail('PRIVATE_LINK_RECONCILIATION_REVIEW_REQUIRED');
+  if (proposal.version === 4 && (!externalNsg(prior) || proposal.externalAdoptionSha256 !== hash(prior.externalAdoption))) fail('PRIVATE_LINK_NSG_RECOVERY_BINDING_CHANGED');
   equal(original.phase, record.phase, 'PRIVATE_LINK_ORIGINAL_PHASE_CHANGED');
   equal(original.publication, record.publication, 'PRIVATE_LINK_ORIGINAL_PUBLICATION_CHANGED');
   equal(proposal.policyRevision, recovery.policyRevision, 'PRIVATE_LINK_RECOVERY_POLICY_CHANGED');
@@ -792,40 +880,72 @@ function verifyRecovery(c, context, prior, record) {
   equal(record.deployment, proposal.deployment, 'PRIVATE_LINK_RECOVERY_DEPLOYMENT_CHANGED');
   equal(record.operations, proposal.operations, 'PRIVATE_LINK_RECOVERY_OPERATIONS_CHANGED');
   equal(proposal.pendingHead, pendingHead(context, prior, record.intent, record.phase), 'PRIVATE_LINK_PENDING_HEAD_CHANGED');
-  verifyTransition(c, context, record.phase, record.preflight.before, record.after, prior);
+  verifyTransition(c, context, record.phase, record.preflight.before, record.after, prior, validation);
+}
+export function verifyPrivateLinkOriginalNoSubmission(c, context, evidence, original, validation = null) {
+  if (externalNsg(evidence) && !validation) return withPrivateLinkNsgValidation(c, context, externalNsg(evidence), evidence,
+    proof => verifyPrivateLinkOriginalNoSubmission(c, context, evidence, original, proof));
+  closed(original, ['phase', 'publication', 'approval', 'preflight', 'journal', 'intent']);
+  if (validation) {
+    const adoption = privateLinkNsgValidatedRecord(c, context, privateLinkNsgValidationFor(c, context, externalNsg(evidence), validation));
+    if (isDeepStrictEqual(original, adoption.proposal.original)) {
+      verifyControlEvidence(c, context, evidence, undefined, validation);
+      equal(evidence.records, privateLinkNsgValidatedAnchor(c, context, validation).records, 'PRIVATE_LINK_NSG_ANCHOR_CHANGED');
+      return original;
+    }
+  }
+  const historical = originalEvidence(evidence, original.phase);
+  equal(original.phase, preparePhase(c, context, historical, original.phase.stage, original.phase.policyRevision ?? null,
+    original.phase.continuation ?? null, original.phase.version, validation), 'PRIVATE_LINK_ORIGINAL_PHASE_CHANGED');
+  closed(original.publication, ['commitSha', 'sourceSha256']);
+  if (original.publication.sourceSha256 !== original.phase.sourceSha256 || !/^[0-9a-f]{40}$/u.test(original.publication.commitSha ?? '')) fail('PRIVATE_LINK_ORIGINAL_PUBLICATION_CHANGED');
+  verifyProof(c, context, historical, original.phase, original.preflight, canonicalInstant(original.intent.at), validation);
+  verifyPrivateLinkApproval(c, context, original.phase, original.preflight, original.approval, canonicalInstant(original.intent.at));
+  if (original.intent.phaseSha256 !== hash(original.phase) || original.intent.requestSha256 !== hash(original.phase.request) ||
+      original.intent.approvalSha256 !== hash(original.approval) || original.intent.previousHeadSha256 !== hash(original.phase.expectedHead)) fail('PRIVATE_LINK_ORIGINAL_INTENT_CHANGED');
+  return original;
+}
+function verifyNoSubmissionCurrent(c, context, evidence, original, after, validation = null) {
+  const adoption = privateLinkNsgValidationFor(c, context, externalNsg(evidence), validation);
+  verifyPrivateLinkSnapshot(c, context, after, originalState(evidence), environmentWireVersion(evidence), adoption);
+  if (adoption && original.phase.externalAdoptionSha256 === undefined) {
+    privateLinkNsgOriginalBaseline(c, context, adoption, after, original);
+  } else equal(snapshotState(after), snapshotState(original.preflight.before), 'PRIVATE_LINK_NOT_SUBMITTED_STATE_CONFLICT');
 }
 export async function reconcilePrivateLinkPhase(c, context, evidence, original, io) {
-  closed(original, ['phase', 'publication', 'approval', 'preflight', 'journal', 'intent']);
-  equal(original.phase, preparePrivateLinkPhase(c, context, evidence, original.phase.stage, original.phase.policyRevision ?? null,
-    original.phase.continuation ?? null, original.phase.version), 'PRIVATE_LINK_ORIGINAL_PHASE_CHANGED');
+  const startedAt = io.now();
+  return withPrivateLinkNsgValidation(c, context, externalNsg(evidence), evidence, validation =>
+    reconcilePhase(c, context, evidence, original, io, validation, startedAt));
+}
+async function reconcilePhase(c, context, evidence, original, io, validation, startedAt) {
+  verifyPrivateLinkOriginalNoSubmission(c, context, evidence, original, validation);
   const submissionState = privateLinkSubmissionState(original);
   await io.verifyOriginal(original);
-  verifyProof(c, context, evidence, original.phase, original.preflight, canonicalInstant(original.intent.at));
-  verifyPrivateLinkApproval(c, context, original.phase, original.preflight, original.approval, canonicalInstant(original.intent.at));
-  const deadline = io.now() + LIMITS.checkMs, pending = pendingHead(context, evidence, original.intent, original.phase);
+  if (externalNsg(evidence) && original.phase.externalAdoptionSha256 === undefined && submissionState !== 'known-not-submitted') fail('PRIVATE_LINK_NSG_UNKNOWN_OUTCOME_FORBIDDEN');
+  const deadline = startedAt + LIMITS.checkMs, pending = pendingHead(context, evidence, original.intent, original.phase);
   const revision = io.policyRevision ?? original.phase.policyRevision ?? null;
   const source = verifyPrivateLinkPolicyRevision(c, context, revision, io.now());
-  await io.verifySources(deadline);
+  await io.verifySources(deadline, validation);
   if (await io.sourceDigest() !== source) fail('PRIVATE_LINK_SOURCE_CHANGED');
   verifyPrivateLinkCostReview(c, context, io.costReview, io.costEvidence, source, io.now());
   verifyPrivateLinkMigrationReview(c, context, io.migrationReview, io.now(), source);
   await io.head(evidence, pending);
-  const after = await collectPrivateLinkSnapshot(c, context, io, deadline);
+  const after = await collectPrivateLinkSnapshot(c, context, io, deadline, null, externalNsg(evidence));
   const deployment = original.phase.deploymentId ? await io.read({ id: original.phase.deploymentId, apiVersion: API.deployment, filter: null }, deadline) : null;
   const operations = original.phase.deploymentId && deployment ? await io.read({ id: `${original.phase.deploymentId}/operations`,
     apiVersion: API.deployment, filter: null }, deadline, true) : null;
   if (submissionState === 'known-not-submitted') {
-    verifyPrivateLinkSnapshot(c, context, after, originalState(evidence), environmentWireVersion(evidence));
-    equal(snapshotState(after), snapshotState(original.preflight.before), 'PRIVATE_LINK_NOT_SUBMITTED_STATE_CONFLICT');
+    verifyNoSubmissionCurrent(c, context, evidence, original, after, validation);
     if (deployment !== null || operations !== null) fail('PRIVATE_LINK_NOT_SUBMITTED_DEPLOYMENT_EXISTS');
   } else {
-    verifyTransition(c, context, original.phase, original.preflight.before, after, evidence);
+    verifyTransition(c, context, original.phase, original.preflight.before, after, evidence, validation);
     verifyDeploymentOperations(original.phase, deployment, operations);
   }
-  const proposal = { version: 3, kind: submissionState === 'known-not-submitted'
+  const proposal = { version: externalNsg(evidence) ? 4 : 3, kind: submissionState === 'known-not-submitted'
     ? 'private-link-not-submitted-proposal' : 'private-link-late-state-proposal', sourceSha256: source,
     originalSha256: hash(original), pendingHead: pending, after, deployment, operations, policyRevision: revision,
-    submissionState, originalExecutionQualified: false, replayAuthorized: false };
+    submissionState, originalExecutionQualified: false, replayAuthorized: false,
+    ...(externalNsg(evidence) ? { externalAdoptionSha256: hash(evidence.externalAdoption) } : {}) };
   await io.retain('reconciliation-proposal', proposal);
   await io.head(evidence, pending);
   if (io.now() >= deadline || await io.sourceDigest() !== source) fail('PRIVATE_LINK_RECOVERY_EXPIRED');
@@ -834,8 +954,13 @@ export async function reconcilePrivateLinkPhase(c, context, evidence, original, 
   return proposal;
 }
 export async function recoverPrivateLinkPhase(c, context, evidence, original, proposal, review, io) {
+  const startedAt = io.now();
+  return withPrivateLinkNsgValidation(c, context, externalNsg(evidence), evidence, validation =>
+    recoverPhase(c, context, evidence, original, proposal, review, io, validation, startedAt));
+}
+async function recoverPhase(c, context, evidence, original, proposal, review, io, validation, startedAt) {
   if (proposal.kind === 'private-link-not-submitted-proposal') {
-    return resolvePrivateLinkNoSubmission(c, context, evidence, original, proposal, review, io);
+    return resolveNoSubmission(c, context, evidence, original, proposal, review, io, validation, startedAt);
   }
   const pending = pendingHead(context, evidence, original.intent, original.phase);
   await io.head(evidence, pending);
@@ -844,7 +969,7 @@ export async function recoverPrivateLinkPhase(c, context, evidence, original, pr
   const source = verifyPrivateLinkPolicyRevision(c, context, io.policyRevision ?? original.phase.policyRevision ?? null, io.now());
   verifyPrivateLinkCostReview(c, context, io.costReview, io.costEvidence, source, io.now());
   verifyPrivateLinkMigrationReview(c, context, io.migrationReview, io.now(), source);
-  const freshProposal = await reconcilePrivateLinkPhase(c, context, evidence, original, io);
+  const freshProposal = await reconcilePhase(c, context, evidence, original, io, validation, startedAt);
   equal(snapshotState(freshProposal.after), snapshotState(proposal.after), 'PRIVATE_LINK_RECONCILIATION_STATE_CHANGED');
   equal(freshProposal.deployment, proposal.deployment, 'PRIVATE_LINK_RECOVERY_DEPLOYMENT_CHANGED');
   equal(freshProposal.operations, proposal.operations, 'PRIVATE_LINK_RECOVERY_OPERATIONS_CHANGED');
@@ -856,7 +981,7 @@ export async function recoverPrivateLinkPhase(c, context, evidence, original, pr
       costReview: io.costReview, costEvidence: io.costEvidence, migrationReview: io.migrationReview,
       currentPublication: io.publication, policyRevision: io.policyRevision ?? original.phase.policyRevision ?? null } };
   const next = { ...evidence, records: [...evidence.records, record] };
-  verifyPrivateLinkControlEvidence(c, context, next, io.now());
+  verifyControlEvidence(c, context, next, io.now(), validation);
   if (await io.sourceDigest() !== source) fail('PRIVATE_LINK_SOURCE_CHANGED');
   await io.head(evidence, pending);
   boundedReview(review, io.now());
@@ -866,48 +991,51 @@ export async function recoverPrivateLinkPhase(c, context, evidence, original, pr
   return record;
 }
 export async function resolvePrivateLinkNoSubmission(c, context, evidence, original, proposal, review, io) {
+  const startedAt = io.now();
+  return withPrivateLinkNsgValidation(c, context, externalNsg(evidence), evidence, validation =>
+    resolveNoSubmission(c, context, evidence, original, proposal, review, io, validation, startedAt));
+}
+async function resolveNoSubmission(c, context, evidence, original, proposal, review, io, validation, startedAt) {
   closed(review, ['version', 'action', 'proposalSha256', 'sourceSha256', 'pendingHeadSha256', 'approvedAt', 'expiresAt']);
   boundedReview(review, io.now());
   if (review.version !== 1 || review.action !== 'record-exact-private-link-no-submission-without-replay' ||
       review.proposalSha256 !== hash(proposal) || review.pendingHeadSha256 !== hash(proposal.pendingHead) ||
       proposal.originalSha256 !== hash(original) || proposal.submissionState !== 'known-not-submitted' ||
       review.sourceSha256 !== proposal.sourceSha256 || privateLinkSubmissionState(original) !== 'known-not-submitted') fail('PRIVATE_LINK_NO_SUBMISSION_REVIEW_REQUIRED');
-  const freshProposal = await reconcilePrivateLinkPhase(c, context, evidence, original, io);
+  const freshProposal = await reconcilePhase(c, context, evidence, original, io, validation, startedAt);
   if (freshProposal.kind !== proposal.kind || freshProposal.sourceSha256 !== proposal.sourceSha256) fail('PRIVATE_LINK_NO_SUBMISSION_CHANGED');
   equal(snapshotState(freshProposal.after), snapshotState(proposal.after), 'PRIVATE_LINK_NO_SUBMISSION_CHANGED');
   equal(freshProposal.pendingHead, proposal.pendingHead, 'PRIVATE_LINK_PENDING_HEAD_CHANGED');
   boundedReview(review, io.now());
-  const record = { version: 1, kind: 'reviewed-private-link-no-submission', original, proposal, review,
+  const record = { version: externalNsg(evidence) ? 2 : 1, kind: 'reviewed-private-link-no-submission', original, proposal, review,
     observed: freshProposal, publication: io.publication, costReview: io.costReview, costEvidence: io.costEvidence,
     migrationReview: io.migrationReview, policyRevision: io.policyRevision ?? original.phase.policyRevision ?? null,
     completedAt: stamp(io.now()), qualified: false, successfulChainUnchanged: true, replayAuthorized: false,
-    physicalFenceRetained: true, originalHistoryModified: false, resolution: 'terminal-abandoned', resumable: false };
-  verifyPrivateLinkNoSubmissionResolution(c, context, evidence, record);
+    physicalFenceRetained: true, originalHistoryModified: false, resolution: 'terminal-abandoned', resumable: false,
+    ...(externalNsg(evidence) ? { externalAdoptionSha256: hash(evidence.externalAdoption) } : {}) };
+  verifyPrivateLinkNoSubmissionResolution(c, context, evidence, record, validation);
   await io.head(evidence, proposal.pendingHead);
   if (await io.sourceDigest() !== review.sourceSha256) fail('PRIVATE_LINK_SOURCE_CHANGED');
   await io.resolveNoSubmission(proposal.pendingHead, record);
   return record;
 }
-export function verifyPrivateLinkNoSubmissionResolution(c, context, evidence, resolution) {
+export function verifyPrivateLinkNoSubmissionResolution(c, context, evidence, resolution, validation = null) {
+  if (externalNsg(evidence) && !validation) return withPrivateLinkNsgValidation(c, context, externalNsg(evidence), evidence,
+    proof => verifyPrivateLinkNoSubmissionResolution(c, context, evidence, resolution, proof));
   closed(resolution, ['version', 'kind', 'original', 'proposal', 'review', 'observed', 'publication', 'costReview',
     'costEvidence', 'migrationReview', 'policyRevision', 'completedAt', 'qualified', 'successfulChainUnchanged',
-    'replayAuthorized', 'physicalFenceRetained', 'originalHistoryModified', 'resolution', 'resumable']);
+    'replayAuthorized', 'physicalFenceRetained', 'originalHistoryModified', 'resolution', 'resumable',
+    ...(resolution.version === 2 ? ['externalAdoptionSha256'] : [])]);
   const { original, proposal, review, observed } = resolution, at = canonicalInstant(resolution.completedAt);
   closed(original, ['phase', 'publication', 'approval', 'preflight', 'journal', 'intent']);
-  if (resolution.version !== 1 || resolution.kind !== 'reviewed-private-link-no-submission' ||
+  if (![1, 2].includes(resolution.version) || resolution.kind !== 'reviewed-private-link-no-submission' ||
       resolution.qualified !== false || resolution.successfulChainUnchanged !== true || resolution.replayAuthorized !== false ||
       resolution.physicalFenceRetained !== true || resolution.originalHistoryModified !== false ||
       resolution.resolution !== 'terminal-abandoned' || resolution.resumable !== false ||
       original.journal.version !== 3 || original.journal.outcome !== 'reconciliation-required' ||
       original.phase.request === null || privateLinkSubmissionState(original) !== 'known-not-submitted') fail('PRIVATE_LINK_PROVEN_NO_SUBMISSION_REQUIRED');
-  const expected = preparePrivateLinkPhase(c, context, evidence, original.phase.stage,
-    original.phase.policyRevision ?? null, original.phase.continuation ?? null, original.phase.version);
-  equal(original.phase, expected, 'PRIVATE_LINK_ORIGINAL_PHASE_CHANGED');
-  closed(original.publication, ['commitSha', 'sourceSha256']);
-  if (original.publication.sourceSha256 !== original.phase.sourceSha256 ||
-      !/^[0-9a-f]{40}$/u.test(original.publication.commitSha ?? '')) fail('PRIVATE_LINK_ORIGINAL_PUBLICATION_CHANGED');
-  verifyProof(c, context, evidence, original.phase, original.preflight, canonicalInstant(original.intent.at));
-  verifyPrivateLinkApproval(c, context, original.phase, original.preflight, original.approval, canonicalInstant(original.intent.at));
+  if (resolution.version === 2 && (!externalNsg(evidence) || resolution.externalAdoptionSha256 !== hash(evidence.externalAdoption))) fail('PRIVATE_LINK_NSG_RESOLUTION_BINDING_CHANGED');
+  verifyPrivateLinkOriginalNoSubmission(c, context, evidence, original, validation);
   const source = verifyPrivateLinkPolicyRevision(c, context, resolution.policyRevision, at);
   closed(resolution.publication, ['commitSha', 'sourceSha256']);
   if (resolution.publication.sourceSha256 !== source || !/^[0-9a-f]{40}$/u.test(resolution.publication.commitSha ?? '')) fail('PRIVATE_LINK_NO_SUBMISSION_PUBLICATION_CHANGED');
@@ -920,21 +1048,22 @@ export function verifyPrivateLinkNoSubmissionResolution(c, context, evidence, re
   verifyPrivateLinkMigrationReview(c, context, resolution.migrationReview, at, source);
   for (const p of [proposal, observed]) {
     closed(p, ['version', 'kind', 'sourceSha256', 'originalSha256', 'pendingHead', 'after', 'deployment', 'operations',
-      'policyRevision', 'submissionState', 'originalExecutionQualified', 'replayAuthorized']);
-    if (p.version !== 3 || p.kind !== 'private-link-not-submitted-proposal' || p.sourceSha256 !== source ||
+      'policyRevision', 'submissionState', 'originalExecutionQualified', 'replayAuthorized',
+      ...(p.version === 4 ? ['externalAdoptionSha256'] : [])]);
+    if (p.version !== (resolution.version === 2 ? 4 : 3) || p.kind !== 'private-link-not-submitted-proposal' || p.sourceSha256 !== source ||
         p.originalSha256 !== hash(original) || p.submissionState !== 'known-not-submitted' ||
         p.originalExecutionQualified !== false || p.replayAuthorized !== false ||
         p.deployment !== null || p.operations !== null) fail('PRIVATE_LINK_NO_SUBMISSION_EVIDENCE_CHANGED');
+    if (resolution.version === 2 && p.externalAdoptionSha256 !== resolution.externalAdoptionSha256) fail('PRIVATE_LINK_NSG_RESOLUTION_BINDING_CHANGED');
     equal(p.pendingHead, pendingHead(context, evidence, original.intent, original.phase), 'PRIVATE_LINK_PENDING_HEAD_CHANGED');
     equal(p.policyRevision, resolution.policyRevision, 'PRIVATE_LINK_POLICY_REVISION_CHANGED');
     fresh(p.after, at);
-    verifyPrivateLinkSnapshot(c, context, p.after, originalState(evidence), environmentWireVersion(evidence));
-    equal(snapshotState(p.after), snapshotState(original.preflight.before), 'PRIVATE_LINK_NOT_SUBMITTED_STATE_CONFLICT');
+    verifyNoSubmissionCurrent(c, context, evidence, original, p.after, validation);
   }
   if (observed.after.startedAt < canonicalInstant(review.approvedAt)) fail('PRIVATE_LINK_NO_SUBMISSION_FRESH_READ_REQUIRED');
   return resolution;
 }
-export function verifyPrivateLinkContinuation(c, context, evidence, stage, source, continuation, at) {
+export function verifyPrivateLinkContinuation(c, context, evidence, stage, source, continuation, at, validation = null) {
   const ancestors = new Set(), attempts = new Set();
   for (let value = continuation, depth = 0; value; value = value.resolution?.original?.phase?.continuation, depth++) {
     if (depth >= 8 || ancestors.has(value) || attempts.has(value.attemptId)) fail('PRIVATE_LINK_CONTINUATION_HISTORY_LIMIT');
@@ -945,7 +1074,7 @@ export function verifyPrivateLinkContinuation(c, context, evidence, stage, sourc
   if (continuation.version !== 1 || continuation.kind !== 'reviewed-private-link-no-submission-continuation' ||
       !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(attemptId ?? '') ||
       attemptId === c.runId) fail('PRIVATE_LINK_NEW_ATTEMPT_ID_REQUIRED');
-  verifyPrivateLinkNoSubmissionResolution(c, context, evidence, resolution);
+  verifyPrivateLinkNoSubmissionResolution(c, context, evidence, resolution, validation);
   const fixed = privateLinkPhase(c, context, stage, resolution.original.phase.version);
   if (resolution.original.phase.stage !== stage || fixed.request === null) fail('PRIVATE_LINK_CONTINUATION_STAGE_CHANGED');
   equal(resolution.original.phase.request, fixed.request, 'PRIVATE_LINK_CONTINUATION_REQUEST_CHANGED');
@@ -964,10 +1093,14 @@ export function verifyPrivateLinkContinuation(c, context, evidence, stage, sourc
   return continuation;
 }
 export function verifyPrivateLinkRuntimePrerequisites(c, context, evidence, at) {
-  const terminal = verifyPrivateLinkControlEvidence(c, context, evidence, at);
+  return withPrivateLinkNsgValidation(c, context, externalNsg(evidence), evidence, validation => runtimePrerequisites(c, context, evidence, at, validation));
+}
+function runtimePrerequisites(c, context, evidence, at, validation) {
+  const terminal = verifyControlEvidence(c, context, evidence, at, validation);
   if (!terminal || !privateLinkAtLeast(terminal.stage, 'assign-queue-role')) fail('PRIVATE_LINK_RUNTIME_PREREQUISITES_REQUIRED');
   const s = terminal.after, n = context.plan.topology.ids, q = context.origin.adoption.topology.ids;
-  const path = verifyPrivateLinkSnapshot(c, context, s, terminal.stage, environmentWireVersion(evidence));
+  const path = verifyPrivateLinkSnapshot(c, context, s, terminal.stage, environmentWireVersion(evidence),
+    privateLinkNsgValidationFor(c, context, externalNsg(evidence), validation));
   return { version: 1, kind: 'private-link-runtime-prerequisites', controlHeadSha256: hash(privateLinkHead(context, evidence)),
     planSha256: context.plan.planSha256, queueTopology: context.origin.adoption.topology,
     queueResources: Object.fromEntries([q.account, q.service, q.queue].map(id => [id, s.resources[id]])),
@@ -983,6 +1116,9 @@ export function verifyPrivateLinkRuntimePrerequisites(c, context, evidence, at) 
 }
 
 export function privateLinkReadIO(c, context, directory, invoke = az, options = {}) {
+  return withPrivateLinkControlValidation(c, context, () => readIO(c, context, directory, invoke, options));
+}
+function readIO(c, context, directory, invoke, options) {
   verifyPrivateLinkControlContext(c, context);
   const now = options.now ?? Date.now, allowed = new Set(), policy = new Set(), r = ids(c), n = context.plan.topology.ids;
   const key = request => json([request.id.toLowerCase(), request.apiVersion, request.filter ?? null]);
@@ -993,6 +1129,8 @@ export function privateLinkReadIO(c, context, directory, invoke = az, options = 
     n.oldApp, n.oldEnvironment, context.origin.network.topology.ids.perimeter, r.workspace, r.dcr, ...(n.publicProbe ? [n.publicProbe] : [])]) allow({
     id: `${id}/providers/Microsoft.Insights/diagnosticSettings`, apiVersion: '2021-05-01-preview', filter: null });
   for (const ns of ['Microsoft.Network', 'Microsoft.Storage', 'Microsoft.App']) allow({ id: `${r.sub}/providers/${ns}`, apiVersion: '2021-04-01', filter: null });
+  const nsgRequests = privateLinkNsgReadRequests(c, context);
+  for (const request of Object.values(nsgRequests)) allow(request);
   for (const stage of STAGES) {
     const phase = privateLinkPhase(c, context, stage);
     if (phase.deploymentId) for (const id of [phase.deploymentId, `${phase.deploymentId}/operations`]) {
@@ -1008,7 +1146,7 @@ export function privateLinkReadIO(c, context, directory, invoke = az, options = 
   };
   const scheduleRead = limitReadConcurrency(work => work());
   const limited = (args, timeout, deadline) => scheduleRead(() => dispatch(args, timeout, deadline)), batch = readBatch;
-  const retain = (kind, value) => saveImmutable(directory, `private-link-${kind}-${randomUUID()}.json`, value);
+  const retain = (kind, value) => savePrivateLinkArtifact(directory, `private-link-${kind}-${randomUUID()}.json`, value);
   const io = { now, batch, scheduleRead, invokeRead: limited, sourceDigest: options.sourceDigest ?? sourceDigest, sleep: options.sleep ?? sleep, retain,
     allowPolicyRead: request => policy.add(key(request)),
     account: deadline => limited(['account', 'show', '--subscription', c.subscriptionId, '--only-show-errors', '--output', 'json'], LIMITS.commandMs, deadline),
@@ -1082,6 +1220,9 @@ export function privateLinkReadIO(c, context, directory, invoke = az, options = 
         if (result === undefined) fail('PRIVATE_LINK_PAGINATION_LIMIT');
       } catch (error) { failure = safeOperationFailure(error); throw error; }
       finally { await retain('read', { request, pages, complete: failure === null && result !== undefined, failure }); }
+      if (sameId(request.id, nsgRequests.watchers.id) && request.apiVersion === API.network && request.filter === null) {
+        for (const watcher of privateLinkNsgRegionalWatchers(c, result)) allow({ id: `${watcher.id}/flowLogs`, apiVersion: API.network, filter: null });
+      }
       return result;
     } };
   if (context.origin.adoption.version === 3) {
@@ -1099,22 +1240,88 @@ export function privateLinkReadIO(c, context, directory, invoke = az, options = 
   }
   return io;
 }
+export async function verifyPrivateLinkNsgSources(c, context, adoption, lookup = publishedSourceDigest, validation = null, evidence = null) {
+  adoption = privateLinkNsgValidatedRecord(c, context, privateLinkNsgValidationFor(c, context, adoption, validation), evidence);
+  const anchor = validation ? privateLinkNsgValidatedAnchor(c, context, validation) : evidence;
+  const publications = [adoption.publication, adoption.proposal.original.publication,
+    ...anchor.records.slice(0, 6).flatMap(record => [record.publication, record.recovery?.currentPublication])].filter(Boolean);
+  for (const publication of publications) if (await lookup(publication.commitSha) !== publication.sourceSha256) fail('PRIVATE_LINK_NSG_PUBLISHED_SOURCE_CHANGED');
+}
+export async function runPrivateLinkNsgAdoption(c, context, evidence, operation, directoryArg, inputs, options = {}) {
+  const invoke = options.invoke ?? az, now = options.now ?? Date.now, deadline = now() + LIMITS.checkMs;
+  if (!['observe-nsg-adoption', 'adopt-nsg'].includes(operation)) fail('PRIVATE_LINK_NSG_READONLY_COMMAND_REQUIRED');
+  if (evidence.version !== 1) fail('PRIVATE_LINK_NSG_ORIGINAL_ANCHOR_REQUIRED');
+  closed(inputs, ['original', 'originalDirectory', 'publication', 'policyRevision', 'costReview', 'costEvidence', 'migrationReview',
+    ...(operation === 'observe-nsg-adoption' ? ['provenance'] : ['proposal', 'review'])]);
+  const directory = await privateDirectory(directoryArg), original = inputs.original, phase = original.phase;
+  const originalDirectory = await privateDirectory(inputs.originalDirectory);
+  if (originalDirectory === directory) fail('PRIVATE_LINK_NSG_NEW_REVISION_DIRECTORY_REQUIRED');
+  if (operation === 'adopt-nsg') {
+    equal(original, inputs.proposal.original, 'PRIVATE_LINK_NSG_ORIGINAL_PENDING_CHANGED');
+    if (evidence.records.length !== 6) fail('PRIVATE_LINK_NSG_ANCHOR_CHANGED');
+    for (const key of ['policyRevision', 'costReview', 'costEvidence', 'migrationReview']) {
+      equal(inputs[key], inputs.proposal[key], 'PRIVATE_LINK_NSG_REVIEW_INPUT_CHANGED');
+    }
+  }
+  const io = privateLinkAzureIO(c, context, evidence, phase, directory, inputs, invoke, options);
+  io.verifyOriginal = value => verifyOriginalArtifacts(context, value, originalDirectory,
+    options.store?.root ?? resolve(here, '.operator-private'), options.store?.read ?? loadPrivateLinkArtifact);
+  io.adoptionDeadline = deadline;
+  io.saveAdoption = async (record, validation) => {
+    privateLinkNsgValidatedRecord(c, context, privateLinkNsgValidationFor(c, context, record, validation));
+    const root = options.store?.root ?? resolve(here, '.operator-private'), read = options.store?.read ?? loadPrivateLinkArtifact;
+    const immutable = options.store?.saveImmutable ?? savePrivateLinkArtifact;
+    const guard = async () => {
+      if (now() >= canonicalInstant(record.review.expiresAt) ||
+          now() >= io.adoptionDeadline || now() - record.verifiedCurrent.startedAt > LIMITS.freshnessMs) fail('PRIVATE_LINK_NSG_ADOPTION_EXPIRED');
+      if (verifyPrivateLinkPolicyRevision(c, context, record.proposal.policyRevision, now()) !== record.publication.sourceSha256) fail('PRIVATE_LINK_NSG_SOURCE_CHANGED');
+      verifyPrivateLinkCostReview(c, context, record.proposal.costReview, record.proposal.costEvidence, record.publication.sourceSha256, now());
+      verifyPrivateLinkMigrationReview(c, context, record.proposal.migrationReview, now(), record.publication.sourceSha256);
+      await readPrivateLinkHead(context, evidence, { root, read, pending: record.proposal.pendingHead });
+      await io.verifyOriginal(record.proposal.original);
+      if (await io.sourceDigest() !== record.publication.sourceSha256) fail('PRIVATE_LINK_NSG_SOURCE_CHANGED');
+    };
+    await guard();
+    await savePrivateLinkArtifact(directory, 'private-link-nsg-adoption.json', record);
+    await savePrivateLinkArtifact(directory, 'private-link-nsg-adopted-evidence.json', {
+      ...evidence, version: 2, externalAdoption: record,
+    });
+    await guard();
+    await immutable(root, `private-link-nsg-adoption-${privateLinkTargetKey(context)}.json`, record);
+  };
+  if (operation === 'observe-nsg-adoption') {
+    const deadline = io.adoptionDeadline, provenance = structuredClone(inputs.provenance);
+    const actor = provenance.actor;
+    if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/u.test(actor?.appId ?? '')) fail('PRIVATE_LINK_NSG_ACTOR_PINS_REQUIRED');
+    const response = await invoke(['ad', 'sp', 'show', '--id', actor.appId, '--query',
+      '{accountEnabled:accountEnabled,appId:appId,appOwnerOrganizationId:appOwnerOrganizationId,displayName:displayName,id:id,servicePrincipalType:servicePrincipalType}',
+      '--only-show-errors', '--output', 'json'], Math.min(LIMITS.commandMs, deadline - now()));
+    provenance.writer = { appid: actor.appId, response, observedAt: stamp(now()) };
+    const proposal = await observePrivateLinkNsgAdoption(c, context, evidence, original, provenance, io);
+    await savePrivateLinkArtifact(directory, 'private-link-nsg-adoption-proposal.json', proposal);
+    return proposal;
+  }
+  const lockPath = resolve(here, '../../opentofu/telemetry/.operator-private/controller.lock'), lock = await open(lockPath, 'wx', 0o600);
+  try { return await adoptPrivateLinkNsg(c, context, evidence, inputs.proposal, inputs.review, inputs.publication, io); }
+  finally { await lock.close(); await rm(lockPath); }
+}
 export function privateLinkAzureIO(c, context, evidence, phase, directory, inputs, invoke = az, options = {}) {
   const io = privateLinkReadIO(c, context, directory, invoke, options), root = options.store?.root ?? resolve(here, '.operator-private');
-  const readStore = options.store?.read ?? load, saveStore = options.store?.save ?? save, immutableStore = options.store?.saveImmutable ?? saveImmutable;
+  const readStore = options.store?.read ?? loadPrivateLinkArtifact, saveStore = options.store?.save ?? updatePrivateLinkArtifact;
+  const immutableStore = options.store?.saveImmutable ?? savePrivateLinkArtifact;
   const publication = inputs.publication;
   const policyRevision = inputs.policyRevision ?? phase.policyRevision ?? null;
   const continuation = inputs.continuation ?? phase.continuation ?? null;
   if (!isDeepStrictEqual(continuation, phase.continuation ?? null)) fail('PRIVATE_LINK_CONTINUATION_CHANGED');
   const file = suffix => `private-link-${phase.stage}-${suffix}.json`;
-  const verifySources = async () => {
+  const verifySources = async (_deadline, validation = null) => {
     const source = verifyPrivateLinkPolicyRevision(c, context, policyRevision, io.now());
     if (await io.sourceDigest() !== source || publication.sourceSha256 !== source ||
         await (options.lookup ?? publishedSourceDigest)(publication.commitSha) !== publication.sourceSha256) fail('PRIVATE_LINK_PUBLISHED_SOURCE_CHANGED');
     if (policyRevision && !isDeepStrictEqual(policyRevision.publication, publication)) fail('PRIVATE_LINK_POLICY_PUBLICATION_CHANGED');
     if (continuation) verifyPrivateLinkContinuation(c, context, evidence, phase.stage,
       inputs.original ? inputs.original.phase.sourceSha256 : source, continuation,
-      inputs.original ? canonicalInstant(inputs.original.intent.at) : io.now());
+      inputs.original ? canonicalInstant(inputs.original.intent.at) : io.now(), validation);
     for (const p of [...evidence.records.flatMap(record => [record.publication, record.recovery?.currentPublication]),
       inputs.original?.publication].filter(Boolean)) {
       if (await (options.lookup ?? publishedSourceDigest)(p.commitSha) !== p.sourceSha256) fail('PRIVATE_LINK_HISTORICAL_POLICY_CHANGED');
@@ -1133,6 +1340,7 @@ export function privateLinkAzureIO(c, context, evidence, phase, directory, input
     }
     if (await (options.lookup ?? publishedSourceDigest)(context.origin.original.publication.commitSha) !==
         context.origin.original.publication.sourceSha256) fail('PRIVATE_LINK_ORIGINAL_SOURCE_CHANGED');
+    if (externalNsg(evidence)) await verifyPrivateLinkNsgSources(c, context, evidence.externalAdoption, options.lookup ?? publishedSourceDigest, validation);
   };
   return { ...io, publication, policyRevision, costReview: inputs.costReview, costEvidence: inputs.costEvidence,
     migrationReview: inputs.migrationReview, cancelled: options.cancelled, verifySources,
@@ -1140,11 +1348,7 @@ export function privateLinkAzureIO(c, context, evidence, phase, directory, input
     nspHead: () => readStore(root, `nsp-head-${nspTargetKey(context.origin.network.topology)}.json`),
     journal: () => load(directory, file('journal'), true),
     saveJournal: value => save(directory, file('journal'), value),
-    verifyOriginal: async original => {
-      const archived = await readStore(root, intentName(context, original.phase.stage, original.phase.continuation?.attemptId));
-      equal(archived, { phase: original.phase, intent: original.intent }, 'PRIVATE_LINK_ORIGINAL_INTENT_ARCHIVE_CHANGED');
-      equal(await load(directory, file('journal')), original.journal, 'PRIVATE_LINK_ORIGINAL_DURABLE_JOURNAL_CHANGED');
-    },
+    verifyOriginal: original => verifyOriginalArtifacts(context, original, directory, root, readStore),
     runtimeCompletion: async () => {
       if (!inputs.runtimeCompletion) fail('PRIVATE_LINK_RUNTIME_QUALIFICATION_REQUIRED');
       return inputs.runtimeCompletion;
@@ -1152,10 +1356,10 @@ export function privateLinkAzureIO(c, context, evidence, phase, directory, input
     verifyRuntimeCompletion: (record, at) => {
       return verifyPrivateLinkRuntimeCompletion(c, context, record, at);
     },
-    reserve: async (prior, exact, intent) => {
+    reserve: async (prior, exact, intent, validation) => {
       await readPrivateLinkHead(context, prior, { root, read: readStore, continuation });
       if (continuation) {
-        verifyPrivateLinkContinuation(c, context, prior, exact.stage, exact.sourceSha256, continuation, io.now());
+        verifyPrivateLinkContinuation(c, context, prior, exact.stage, exact.sourceSha256, continuation, io.now(), validation);
         await immutableStore(root, `private-link-continuation-${hash({ targetKey: privateLinkTargetKey(context),
           attemptId: continuation.attemptId })}.json`, { continuation, phase: exact, intent, previousHead: exact.expectedHead });
         await readPrivateLinkHead(context, prior, { root, read: readStore, continuation });
@@ -1190,7 +1394,7 @@ export function privateLinkAzureIO(c, context, evidence, phase, directory, input
       await readPrivateLinkHead(context, evidence, { root, read: readStore, pending, continuation });
       if (await io.sourceDigest() !== publication.sourceSha256) fail('PRIVATE_LINK_SOURCE_CHANGED');
       guard();
-      await saveImmutable(directory, file(record.recovery ? 'recovered-record' : 'record'), record);
+      await savePrivateLinkArtifact(directory, file(record.recovery ? 'recovered-record' : 'record'), record);
       await immutableStore(root, `private-link-resolution-${hash(pending)}.json`, { pending, record, next });
       await readPrivateLinkHead(context, evidence, { root, read: readStore, pending, continuation });
       if (await io.sourceDigest() !== publication.sourceSha256) fail('PRIVATE_LINK_SOURCE_CHANGED');
@@ -1211,7 +1415,7 @@ export function privateLinkAzureIO(c, context, evidence, phase, directory, input
           record.qualified !== false || record.replayAuthorized !== false ||
           privateLinkSubmissionState(record.original) !== 'known-not-submitted') fail('PRIVATE_LINK_NO_SUBMISSION_REVIEW_REQUIRED');
       await guard();
-      await saveImmutable(directory, file('not-submitted-resolution'), record);
+      await savePrivateLinkArtifact(directory, file('not-submitted-resolution'), record);
       await immutableStore(root, `private-link-no-submission-${hash(record.original.intent)}.json`, { pending, record });
       await guard();
     },
@@ -1235,13 +1439,13 @@ export function privateLinkAzureIO(c, context, evidence, phase, directory, input
         return { validation, preview: whatif.result };
       } finally { await rm(path); }
     },
-    write: async (exact, guard, current, mark, deadline) => {
-      equal(exact, preparePrivateLinkPhase(c, context, evidence, exact.stage, exact.policyRevision ?? null,
-        exact.continuation ?? null), 'PRIVATE_LINK_FIXED_WRITE_REQUIRED');
+    write: async (exact, guard, current, mark, deadline, validation) => {
+      equal(exact, preparePhase(c, context, evidence, exact.stage, exact.policyRevision ?? null,
+        exact.continuation ?? null, exact.stage === 'create-environment' ? 2 : 1, validation), 'PRIVATE_LINK_FIXED_WRITE_REQUIRED');
       if (!exact.request || typeof guard !== 'function' || types.isAsyncFunction(guard) ||
           typeof mark !== 'function') fail('PRIVATE_LINK_FIXED_WRITE_REQUIRED');
       const { method, id, apiVersion, body } = exact.request;
-      verifyProof(c, context, evidence, exact, inputs.proof, io.now());
+      verifyProof(c, context, evidence, exact, inputs.proof, io.now(), validation);
       verifyPrivateLinkApproval(c, context, exact, inputs.proof, inputs.approval, io.now());
       const bodyName = body === null ? null : `private-link-request-${randomUUID()}.json`;
       if (bodyName) await saveImmutable(directory, bodyName, body);
@@ -1259,7 +1463,7 @@ export function privateLinkAzureIO(c, context, evidence, phase, directory, input
             marker.rolloutDeadline > io.now() + exact.rolloutMs ||
             typeof marker.beforeInvoke !== 'function' || types.isAsyncFunction(marker.beforeInvoke)) fail('PRIVATE_LINK_DISPATCH_GUARD_REQUIRED');
         guard();
-        verifyProof(c, context, evidence, exact, inputs.proof, io.now());
+        verifyProof(c, context, evidence, exact, inputs.proof, io.now(), validation);
         verifyPrivateLinkApproval(c, context, exact, inputs.proof, inputs.approval, io.now());
         guard();
         const timeout = Math.min(LIMITS.commandMs, marker.rolloutDeadline - io.now());
@@ -1274,21 +1478,33 @@ export function privateLinkAzureIO(c, context, evidence, phase, directory, input
 }
 export async function currentPrivateLinkRuntimeProof(c, context, evidence, directory, invoke = az, options = {}) {
   const at = (options.now ?? Date.now)(), deadline = Math.min(options.deadline ?? at + LIMITS.checkMs, at + LIMITS.checkMs);
-  const prerequisites = verifyPrivateLinkRuntimePrerequisites(c, context, evidence, at);
+  return withPrivateLinkNsgValidation(c, context, externalNsg(evidence), evidence, validation =>
+    currentRuntimeProof(c, context, evidence, directory, invoke, options, at, deadline, validation));
+}
+async function currentRuntimeProof(c, context, evidence, directory, invoke, options, at, deadline, validation) {
+  const prerequisites = runtimePrerequisites(c, context, evidence, at, validation);
   const io = privateLinkReadIO(c, context, directory, invoke, options), source = await io.sourceDigest();
   const terminal = evidence.records.at(-1);
   const revision = options.policyRevision ?? terminal.recovery?.policyRevision ?? terminal.phase.policyRevision ?? null;
   if (source !== verifyPrivateLinkPolicyRevision(c, context, revision, io.now())) fail('PRIVATE_LINK_SOURCE_CHANGED');
   if (revision && await (options.lookup ?? publishedSourceDigest)(revision.publication.commitSha) !== source) fail('PRIVATE_LINK_POLICY_PUBLICATION_CHANGED');
-  const collection = snapshotWithTargets(c, context, io, deadline);
+  const adoption = externalNsg(evidence);
+  if (adoption) await verifyPrivateLinkNsgSources(c, context, adoption, options.lookup ?? publishedSourceDigest, validation);
+  const checkedAdoption = privateLinkNsgValidationFor(c, context, adoption, validation);
+  const collection = snapshotWithTargets(c, context, io, deadline, adoption);
   const policyTask = (async () => {
-    const { resources } = await collection.targets;
+    const targets = await collection.targets, { resources } = targets;
     const policyResources = privateLinkResourceDescriptors(c, context).filter(d => {
       const resource = resources[d.id];
       return resource && ![context.plan.topology.ids.app, context.plan.topology.ids.oldApp,
-        context.plan.topology.ids.oldEnvironment, context.plan.topology.ids.managedGroup, context.plan.topology.ids.publicProbe].includes(d.id) &&
+        context.plan.topology.ids.oldEnvironment, context.plan.topology.ids.managedGroup, context.plan.topology.ids.publicProbe,
+        context.plan.topology.ids.ingestIdentity, context.plan.topology.ids.pullIdentity].includes(d.id) &&
         !resource.type?.startsWith('Microsoft.Consumption/') && !resource.type?.startsWith('Microsoft.ManagedIdentity/');
     }).map(d => ({ ...d, type: resources[d.id].type, expected: resources[d.id] }));
+    if (adoption) {
+      for (const value of Object.values(privateLinkNsgMembers(targets.externalNsg))) policyResources.push({ id: value.id,
+        type: 'Microsoft.Network/networkSecurityGroups', apiVersion: API.network, expected: value });
+    }
     if (context.plan.publicProbe) policyResources.push(structuredClone(context.plan.publicProbe));
     const policyPhase = { version: 1, kind: 'private-link-runtime-effective-policy', planSha256: context.plan.planSha256, resources: policyResources };
     const policy = await collectEffectivePolicies(policyPhase, async (id, apiVersion, filter) => {
@@ -1299,7 +1515,7 @@ export async function currentPrivateLinkRuntimeProof(c, context, evidence, direc
     return policy;
   })();
   const [head, snapshot, policy] = await Promise.all([readPrivateLinkHead(context, evidence, options.store ?? {}), collection.snapshot, policyTask]);
-  verifyPrivateLinkSnapshot(c, context, snapshot, originalState(evidence), environmentWireVersion(evidence));
+  verifyPrivateLinkSnapshot(c, context, snapshot, originalState(evidence), environmentWireVersion(evidence), checkedAdoption);
   verifyCostScope(c, context, evidence, snapshot, io.now());
   for (const [id, previous] of Object.entries(terminal.after.resources)) {
     if (!previous || sameId(id, context.plan.topology.ids.app)) continue;
@@ -1307,7 +1523,7 @@ export async function currentPrivateLinkRuntimeProof(c, context, evidence, direc
     if (!current) fail('PRIVATE_LINK_CURRENT_RESOURCE_MISSING');
     equal(privateLinkGeneration(current), privateLinkGeneration(previous), 'PRIVATE_LINK_CURRENT_GENERATION_CHANGED');
   }
-  const currentPath = verifyPrivateLinkSnapshot(c, context, snapshot, originalState(evidence), environmentWireVersion(evidence));
+  const currentPath = verifyPrivateLinkSnapshot(c, context, snapshot, originalState(evidence), environmentWireVersion(evidence), checkedAdoption);
   if (currentPath.privateIp !== prerequisites.privateIp || currentPath.queueHost !== prerequisites.queueHost) fail('PRIVATE_LINK_PRIVATE_TARGET_CHANGED');
   const currentReview = terminal.recovery ?? terminal.preflight;
   verifyPrivateLinkCostReview(c, context, options.costReview ?? currentReview.costReview,
@@ -1316,7 +1532,7 @@ export async function currentPrivateLinkRuntimeProof(c, context, evidence, direc
   if (await io.sourceDigest() !== source || io.now() >= deadline) fail('PRIVATE_LINK_RUNTIME_PROOF_EXPIRED');
   return { version: 1, kind: 'current-private-link-runtime-proof', sourceSha256: source, checkedAt: stamp(io.now()),
     head, headSha256: hash(head), planSha256: context.plan.planSha256, snapshot,
-    effectivePolicy: policy, preservedResourceIds: privateLinkPreservedIds(c, context, snapshot),
+    effectivePolicy: policy, preservedResourceIds: privateLinkPreservedIds(c, context, snapshot, checkedAdoption),
     billingReview: options.costReview ?? currentReview.costReview, costEvidence: options.costEvidence ?? currentReview.costEvidence,
     policyRevision: revision,
     prerequisites: { ...prerequisites, environment: snapshot.resources[context.plan.topology.ids.environment] } };
@@ -1328,18 +1544,24 @@ export async function runPrivateLinkControl(c, context, evidence, stage, operati
     preparePrivateLinkPhase(c, context, evidence, stage, inputs.policyRevision ?? null, inputs.continuation ?? null);
   if (phase.stage !== stage) fail('PRIVATE_LINK_STAGE_CHANGED');
   if (operation === 'prepare') {
-    await saveImmutable(directory, `private-link-${stage}-plan.json`, phase);
+    await savePrivateLinkArtifact(directory, `private-link-${stage}-plan.json`, phase);
     return phase;
   }
   const io = privateLinkAzureIO(c, context, evidence, phase, directory, inputs, options.invoke ?? az, options);
+  if (['reconcile', 'recover'].includes(operation) && externalNsg(evidence)) {
+    const originalDirectory = await privateDirectory(inputs.originalDirectory);
+    if (originalDirectory === directory) fail('PRIVATE_LINK_NSG_NEW_REVISION_DIRECTORY_REQUIRED');
+    io.verifyOriginal = original => verifyOriginalArtifacts(context, original, originalDirectory,
+      options.store?.root ?? resolve(here, '.operator-private'), options.store?.read ?? loadPrivateLinkArtifact);
+  }
   if (operation === 'check') {
     const proof = await checkPrivateLinkPhase(c, context, evidence, phase, io);
-    await saveImmutable(directory, `private-link-${stage}-preflight.json`, proof);
+    await savePrivateLinkArtifact(directory, `private-link-${stage}-preflight.json`, proof);
     return proof;
   }
   if (operation === 'reconcile') {
     const proposal = await reconcilePrivateLinkPhase(c, context, evidence, inputs.original, io);
-    await saveImmutable(directory, `private-link-${stage}-reconciliation-proposal.json`, proposal);
+    await savePrivateLinkArtifact(directory, `private-link-${stage}-reconciliation-proposal.json`, proposal);
     return proposal;
   }
   if (!['execute', 'recover', 'retire'].includes(operation)) fail('PRIVATE_LINK_FIXED_COMMAND_REQUIRED');
@@ -1349,7 +1571,7 @@ export async function runPrivateLinkControl(c, context, evidence, stage, operati
     const record = operation === 'recover' ? await recoverPrivateLinkPhase(c, context, evidence, inputs.original,
       inputs.proposal, inputs.recoveryReview, io) : await executePrivateLinkPhase(c, context, evidence, phase, inputs.proof, inputs.approval, io);
     if (record.kind === 'reviewed-private-link-no-submission') return record;
-    await saveImmutable(directory, `private-link-${stage}-${operation === 'recover' ? 'recovered-' : ''}evidence.json`,
+    await savePrivateLinkArtifact(directory, `private-link-${stage}-${operation === 'recover' ? 'recovered-' : ''}evidence.json`,
       { ...evidence, records: [...evidence.records, record] });
     return record;
   } finally { await lock.close(); await rm(lockPath); }

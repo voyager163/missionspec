@@ -324,7 +324,8 @@ test('published source includes Defender only for controllers importing it and p
   }
   const current = createHash('sha256');
   for (const name of [...names, 'queue-defender.mjs', 'private-link.mjs', 'private-link-whatif.mjs',
-    'private-link-controller.mjs', 'private-link-readback.mjs', 'private-link-runtime.mjs', 'private-link-exec.py']) current.update(name).update(await readFile(prefix + name));
+    'private-link-controller.mjs', 'private-link-readback.mjs', 'private-link-runtime.mjs', 'private-link-exec.py',
+    'private-link-artifacts.mjs', 'private-link-nsg-adoption.mjs']) current.update(name).update(await readFile(prefix + name));
   current.update(json(contract));
   assert.equal(await sourceDigest(), current.digest('hex'));
 });

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { dispatchPrivateLinkOperation, PRIVATE_LINK_CONTROL_COMMANDS, PRIVATE_LINK_RUNTIME_COMMANDS } from '../controller.mjs';
+import { dispatchPrivateLinkOperation, PRIVATE_LINK_CONTROL_COMMANDS, PRIVATE_LINK_RUNTIME_COMMANDS,
+  PRIVATE_LINK_NSG_COMMANDS } from '../controller.mjs';
 import { baseFixture } from './durable-queue.fixture.mjs';
 
 const c = baseFixture().c;
@@ -9,12 +10,14 @@ function fixture(inputs = {}) {
   const evidence = { records: [] }, calls = [], writes = [];
   let runtimeResult = { kind: 'test-only-preparation' };
   const files = { 'private-link-control-context.json': context, 'private-link-control-evidence.json': evidence,
-    'private-link-control-inputs.json': inputs, 'private-link-runtime-inputs.json': inputs };
+    'private-link-control-inputs.json': inputs, 'private-link-runtime-inputs.json': inputs,
+    'private-link-nsg-adoption-inputs.json': inputs };
   const io = { directory: async value => { calls.push(['directory', value]); return value; },
     read: async (_directory, name) => { calls.push(['read', name]); assert(Object.hasOwn(files, name)); return files[name]; },
     immutable: async (_directory, name, value) => { writes.push({ name, value }); },
     control: async (...args) => { calls.push(['control', ...args]); return { kind: 'test-only-control-result' }; },
-    runtime: async (...args) => { calls.push(['runtime', ...args]); return runtimeResult; } };
+    runtime: async (...args) => { calls.push(['runtime', ...args]); return runtimeResult; },
+    nsg: async (...args) => { calls.push(['nsg', ...args]); return { kind: 'test-only-nsg-result' }; } };
   return { context, evidence, calls, writes, io, result: value => { runtimeResult = value; } };
 }
 
@@ -29,6 +32,48 @@ test('Private Link routing validates fixed families before directory access and 
   const injected = fixture({ publication: {}, costReview: {}, costEvidence: {}, migrationReview: {}, options: { invoke: 'untrusted' } });
   await assert.rejects(dispatchPrivateLinkOperation(c, 'check-private-link', 'review-migration', 'unit', injected.io), /CLOSED_INPUT_REQUIRED/);
   assert(!injected.calls.some(value => value[0] === 'control'));
+});
+
+test('NSG observation and adoption require their closed read-only family and explicit original journal directory', async () => {
+  for (const [command, action] of Object.entries(PRIVATE_LINK_NSG_COMMANDS)) {
+    const inputs = { original: {}, originalDirectory: 'original-relative-dir', publication: {}, policyRevision: null,
+      costReview: {}, costEvidence: {}, migrationReview: {},
+      ...(action === 'observe-nsg-adoption' ? { provenance: {} } : { proposal: {}, review: {} }) };
+    const f = fixture(inputs);
+    await assert.rejects(dispatchPrivateLinkOperation(c, command, 'create-environment', 'new-relative-dir', f.io),
+      /FIXED_PHASE_COMMAND_REQUIRED/);
+    assert.deepEqual(f.calls, []);
+    await dispatchPrivateLinkOperation(c, command, 'private-link-nsg-adoption', 'new-relative-dir', f.io);
+    assert.deepEqual(f.calls.at(-1), ['nsg', c, f.context, f.evidence, action, 'new-relative-dir', inputs]);
+    assert.deepEqual(f.writes, []);
+    for (const change of [
+      value => { value.options = {}; }, value => { value.request = { method: 'DELETE' }; },
+      value => { delete value.originalDirectory; }, value => { delete value.policyRevision; },
+    ]) {
+      const altered = structuredClone(inputs); change(altered);
+      const invalid = fixture(altered);
+      await assert.rejects(dispatchPrivateLinkOperation(c, command, 'private-link-nsg-adoption', 'new', invalid.io),
+        /CLOSED_INPUT_REQUIRED/);
+      assert(!invalid.calls.some(value => value[0] === 'nsg'));
+    }
+  }
+});
+
+test('only adopted-evidence reconciliation forwards the explicit original directory', async () => {
+  for (const command of ['reconcile-private-link', 'recover-private-link']) {
+    const inputs = { publication: {}, costReview: {}, costEvidence: {}, migrationReview: {}, original: {},
+      originalDirectory: 'original-relative-dir',
+      ...(command === 'recover-private-link' ? { proposal: {}, recoveryReview: {} } : {}) };
+    const f = fixture(inputs); f.evidence.version = 2;
+    await dispatchPrivateLinkOperation(c, command, 'create-environment', 'new-relative-dir', f.io);
+    assert.deepEqual(f.calls.at(-1).at(-1), inputs);
+    delete inputs.originalDirectory;
+    const missing = fixture(inputs); missing.evidence.version = 2;
+    await assert.rejects(dispatchPrivateLinkOperation(c, command, 'create-environment', 'new', missing.io), /CLOSED_INPUT_REQUIRED/);
+  }
+  const forbidden = fixture({ originalDirectory: 'old' }); forbidden.evidence.version = 2;
+  await assert.rejects(dispatchPrivateLinkOperation(c, 'prepare-private-link', 'create-environment', 'new', forbidden.io),
+    /CLOSED_INPUT_REQUIRED/);
 });
 
 test('control routes exact current context, evidence and stage-specific inputs to the concrete driver', async () => {

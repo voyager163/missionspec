@@ -31,6 +31,40 @@ export const LIMITS = Object.freeze({ body_timeout_ms: 150, storage_timeout_ms: 
 const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/u;
 export const digest = value => createHash('sha256').update(value).digest('hex');
 export const json = value => `${JSON.stringify(value, null, 2)}\n`;
+export function digestJson(value) {
+  const hash = createHash('sha256'), ancestors = new Set();
+  let chunks = [], size = 0;
+  const emit = text => {
+    chunks.push(text); size += text.length;
+    if (size >= 65536) { hash.update(chunks.join('')); chunks = []; size = 0; }
+  };
+  const visit = (entry, depth) => {
+    if (depth > 128) fail('CANONICAL_JSON_DEPTH_LIMIT');
+    if (entry === null || typeof entry === 'string' || typeof entry === 'boolean' ||
+        typeof entry === 'number' && Number.isFinite(entry)) {
+      emit(JSON.stringify(entry)); return;
+    }
+    if (typeof entry !== 'object' || ancestors.has(entry) ||
+        !Array.isArray(entry) && ![Object.prototype, null].includes(Object.getPrototypeOf(entry))) fail('CANONICAL_JSON_DATA_REQUIRED');
+    ancestors.add(entry);
+    try {
+      const array = Array.isArray(entry), keys = array ? Array.from({ length: entry.length }, (_, index) => index) : Object.keys(entry);
+      emit(array ? '[' : '{');
+      for (let index = 0; index < keys.length; index++) {
+        emit((index ? ',\n' : '\n') + '  '.repeat(depth + 1));
+        const key = keys[index];
+        if (!array) emit(JSON.stringify(key) + ': ');
+        visit(entry[key], depth + 1);
+      }
+      if (keys.length) emit('\n' + '  '.repeat(depth));
+      emit(array ? ']' : '}');
+    } finally { ancestors.delete(entry); }
+  };
+  visit(value, 0);
+  emit('\n');
+  if (chunks.length) hash.update(chunks.join(''));
+  return hash.digest('hex');
+}
 export const fail = code => { throw new Error(code); };
 export const sameId = (a, b) => typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase();
 export function closed(value, fields) {

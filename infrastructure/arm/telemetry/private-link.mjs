@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
-import { BUDGET, budgetProperties, closed, digest, fail, ids, json, ownerTags, projectBudgetFilter, sameId, validateConfig } from './definition.mjs';
+import { BUDGET, budgetProperties, closed, digestJson, fail, ids, ownerTags, projectBudgetFilter, sameId, validateConfig } from './definition.mjs';
 import { durableQueueCost, QUEUE_PROFILE_KIND, QUEUE_RUNTIME, queueEnvironment, queueResources, verifyQueueTopology } from './durable-queue.mjs';
 import { verifyQueueAdoptionRecord } from './queue-adoption.mjs';
 import { queueDefenderInventory } from './queue-defender.mjs';
@@ -26,7 +26,7 @@ export const PRIVATE_LINK_LIMITS = Object.freeze({ commandMs: 15000, checkMs: 12
   pages: 32, items: 2048, bytes: 16 * 1024 * 1024, pollMs: 3000 });
 export const PRIVATE_LINK_BUDGETS = Object.freeze({ migration: { project: 425, telemetry: 375, state: 50 },
   steady: { project: 375, telemetry: 325, state: 50 } });
-const hash = value => digest(json(value));
+const hash = digestJson;
 const sha = value => typeof value === 'string' && /^[0-9a-f]{64}$/u.test(value);
 const equal = (actual, expected, code) => { if (!isDeepStrictEqual(actual, expected)) fail(code); };
 const networkReserved = ['169.254.0.0/16', '172.30.0.0/16', '172.31.0.0/16', '192.0.2.0/24',
@@ -332,7 +332,27 @@ export function buildPrivateLinkPlan(c, context, input, sourceSha256) {
   };
   return { ...body, planSha256: hash(body) };
 }
+// Only synchronous checks share this proof; its inputs are deeply immutable.
+let synchronousContextProof = null;
+function freezeContext(value) {
+  if (value && typeof value === 'object') {
+    Object.values(value).forEach(freezeContext); Object.freeze(value);
+  }
+  return value;
+}
+export function withPrivateLinkControlValidation(c, context, verify) {
+  closed(context, ['plan', 'origin']);
+  verifyPrivateLinkPlan(c, context.origin, context.plan, context.plan?.sourceSha256);
+  const previous = synchronousContextProof;
+  synchronousContextProof = { c: freezeContext(c), context: freezeContext(context) };
+  try {
+    const result = verify();
+    if (result && typeof result.then === 'function') fail('PRIVATE_LINK_SYNCHRONOUS_VALIDATION_REQUIRED');
+    return result;
+  } finally { synchronousContextProof = previous; }
+}
 export function verifyPrivateLinkControlContext(c, context) {
+  if (synchronousContextProof?.c === c && synchronousContextProof.context === context) return context;
   closed(context, ['plan', 'origin']);
   verifyPrivateLinkPlan(c, context.origin, context.plan, context.plan?.sourceSha256);
   return context;

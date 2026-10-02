@@ -130,6 +130,44 @@ offsets or an absent zone are not inferred to be UTC. The separately scoped
 timezone-less ACA creation format remains an opaque recorded identity rather
 than a reconstructed timestamp.
 
+External governance changes are not folded into the original plan or treated
+as effects of a stopped deployment. `observe-private-link-nsg-adoption` and
+`adopt-private-link-nsg` use the fixed selector `private-link-nsg-adoption`
+and a new private revision directory. Their closed
+`private-link-nsg-adoption-inputs.json` supplies the complete original attempt,
+its canonical `originalDirectory`, current publication/policy/cost/migration
+reviews, and either provenance for observation or the exact proposal and
+review for adoption. These operations perform reads only; they cannot create,
+edit, attach, detach or delete an NSG.
+
+A verified adoption is a separate record on a version-2 control-evidence
+wrapper. The original six records and failed environment journal stay intact.
+Adoption does not qualify that environment attempt or permit another one.
+Reconciliation and recovery under the adopted wrapper require the old
+`originalDirectory` while writing their new records elsewhere. A distinct
+no-submission resolution and a fresh continuation review remain necessary.
+The exact NSG identities, rules, approved attachment mode, writer provenance
+and complete regional flow-log/diagnostic observations must match; unknown
+resources, changed attachments and exports remain blocking.
+
+NSG contract version 2 retains the original endpoint-attached/Apps-unattached
+interpretation. Version 3 requires the explicit
+`attachmentMode: "both-corresponding-subnets"` in provenance, proposal,
+review, adoption and current NSG observations. It verifies both exact NSGs
+attached only to their corresponding subnets; there is no automatic promotion
+from the older review. Its separately retained Apps-attachment activity must
+prove the later settled write by the pinned governance actor, while the
+original overlapping write captures remain unchanged. The version-3 review
+action is `preserve-both-exact-private-link-nsg-attachments-readonly`.
+
+Both variants require no custom security rules, the six reviewed default
+rules, no diagnostics and no target-bound regional flow logs. Apps-subnet
+compatibility checks cover the exact Consumption environment, address,
+delegation, no route/NAT changes and default-only NSG configuration. They
+explicitly do **not** qualify platform traffic: environment provisioning,
+image pull, DNS and paired runtime delivery still need their own evidence.
+Neither variant authorizes changing, attaching or deleting an NSG.
+
 Explicit continuation is limited to a conclusively never-invoked version-3
 attempt. Use a **new private revision directory**, preserving the original
 artifacts, context and successful chain. Forward control inputs may include
@@ -260,6 +298,25 @@ read-only cleanup preparation must retain the exact observed generation and
 a new cleanup approval must bind its hash. That review authorizes only the
 fixed observed public-probe generation; it neither proves original creation
 nor grants generic resource adoption.
+
+Large runtime and retirement artifacts use a lossless, versioned storage
+envelope for repeated `controlEvidence` and `candidate` blocks. Only the fixed
+runtime record kinds' exact thirteen-stage prefix through `assign-queue-role`
+and version-2 receiver candidate fields can be stored separately, under
+distinct immutable content-addressed filenames in the private operator root.
+References cannot cross these two types and contain no caller-selected path. Each load checks
+the held file's owner, mode, size and content hash, then restores the full
+logical evidence before ordinary source, history, authority and drift
+validation. A hash is never a substitute for those checks.
+
+Every file remains bounded by 64 MiB; the total distinct referenced content loaded for
+one artifact is also bounded. Recursive references, unknown reference
+positions, corrupted or aliased blobs and missing evidence fail closed.
+Only a single load may share identical frozen evidence objects in memory;
+there is no cross-operation validation cache. Historical plain JSON files
+remain readable and are never rewritten. Streaming canonical hashing
+preserves the existing JSON-plus-newline digests while avoiding Node's
+single-string limit for large restored records.
 
 The existing NSP failure remains an original failure. Supersession and
 retirement records are appended separately, bound to its physical target and

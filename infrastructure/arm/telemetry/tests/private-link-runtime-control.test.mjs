@@ -1,14 +1,19 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { randomUUID } from 'node:crypto';
+import { mkdir, readFile, readdir, rm } from 'node:fs/promises';
+import { join } from 'node:path';
 import { digest, ids, json } from '../definition.mjs';
 import { whatIfRequestContext } from '../controller.mjs';
 import { privateInput, privateLinkFixture, privateControlChain } from './private-link.fixture.mjs';
 import { verifyPrivateLinkRuntimePrerequisites } from '../private-link-controller.mjs';
 import { verifyPrivateLinkSnapshot } from '../private-link-readback.mjs';
-import { privateLinkRuntimeTarget, oldPublicRuntimeTarget, privateRuntimePhase, verifyPrivateLinkApp } from '../private-link-runtime.mjs';
+import { privateLinkRuntimeTarget, oldPublicRuntimeTarget, privateRuntimePhase, verifyPrivateLinkApp,
+  verifyPrivateLinkRuntimeCompletion } from '../private-link-runtime.mjs';
 import { privateRuntimeCompletionFixture } from './private-link-runtime.fixture.mjs';
+import { createPrivateLinkArtifactStore } from '../private-link-artifacts.mjs';
 
-test('actual plan3 control chain binds patched private and temporary public runtime without old permissions', async () => {
+test('actual plan3 control chain binds patched private and temporary public runtime without old permissions', async t => {
   const f = await privateLinkFixture({ ...structuredClone(privateInput), version: 2 }), evidence = await privateControlChain(f);
   const prerequisites = verifyPrivateLinkRuntimePrerequisites(f.c, f.context, evidence, f.at);
   const target = privateLinkRuntimeTarget(f.c, f.context, f.candidate, prerequisites);
@@ -64,4 +69,20 @@ test('actual plan3 control chain binds patched private and temporary public runt
     'create-public-probe', digest(json(completion.disabled)));
   assert.equal(whatIfRequestContext(f.c, publicPhase).phase, 'private-link-runtime-create-public-probe');
   assert.equal(completion.disable.oldApp.id, ids(f.c).app);
+  const directory = join('infrastructure/arm/telemetry/tests', `.runtime-artifact-${randomUUID()}`);
+  const root = join(directory, 'evidence');
+  await mkdir(directory, { mode: 0o700 }); await mkdir(root, { mode: 0o700 });
+  t.after(() => rm(directory, { recursive: true }));
+  const store = createPrivateLinkArtifactStore({ root });
+  await store.immutable(directory, 'completion.json', completion);
+  const stored = JSON.parse(await readFile(join(directory, 'completion.json'), 'utf8'));
+  assert.equal(stored.kind, 'private-link-artifact-envelope');
+  assert.equal(stored.referenceCount, 12);
+  assert.equal((await readdir(root)).length, 2);
+  const restored = await store.load(directory, 'completion.json');
+  assert.deepEqual(restored, completion);
+  assert.deepEqual(verifyPrivateLinkRuntimeCompletion(f.c, f.context, restored, Date.parse(restored.completedAt)),
+    verifyPrivateLinkRuntimeCompletion(f.c, f.context, completion, Date.parse(completion.completedAt)));
+  await store.update(directory, 'progress.json', restored);
+  assert.deepEqual(await store.load(directory, 'progress.json'), completion);
 });

@@ -286,14 +286,18 @@ test('Private Link code enters current source hashing but is not retroactively a
   const names = ['definition.mjs', 'policy.mjs', 'controller.mjs', 'arm-whatif.py', 'receiver-upgrade.mjs', 'durable-queue.mjs',
     'effective-policy.mjs', 'queue-adoption.mjs', 'nsp.mjs', 'nsp-controller.mjs', 'nsp-reconciliation.mjs', 'queue-defender.mjs'];
   const privateNames = ['private-link.mjs', 'private-link-whatif.mjs', 'private-link-controller.mjs',
-    'private-link-readback.mjs', 'private-link-runtime.mjs', 'private-link-exec.py'];
+    'private-link-readback.mjs', 'private-link-runtime.mjs', 'private-link-exec.py', 'private-link-artifacts.mjs',
+    'private-link-nsg-adoption.mjs'];
   const prefix = 'infrastructure/arm/telemetry/', contract = await storageContract(), commit = 'e'.repeat(40);
-  for (const include of [false, true, 'runtime']) {
-    const additions = include === 'runtime' ? privateNames : include ? ['private-link.mjs'] : [];
+  for (const include of [false, true, 'runtime', 'indirect-adoption']) {
+    const additions = ['runtime', 'indirect-adoption'].includes(include) ? privateNames : include ? ['private-link.mjs'] : [];
     const files = Object.fromEntries([...names, ...privateNames].map(name => [prefix + name, `UNIT ${name}`]));
     files[prefix + 'controller.mjs'] = names.slice(6).map(name => `import {} from './${name}';`).join('\n') +
       additions.filter(name => !['private-link-readback.mjs', 'private-link-exec.py'].includes(name))
+        .filter(name => include !== 'indirect-adoption' || name !== 'private-link-nsg-adoption.mjs')
         .map(name => `\nimport {} from './${name}';`).join('');
+    if (include === 'indirect-adoption') files[prefix + 'private-link-controller.mjs'] =
+      "import { verifyPrivateLinkNsgAdoption } from './private-link-nsg-adoption.mjs';";
     files['assets/schemas/telemetry-event.schema.json'] = json(contract.schema);
     files['services/telemetry-ingest/schema/storage-columns.json'] = json(contract.columns);
     const expected = createHash('sha256');

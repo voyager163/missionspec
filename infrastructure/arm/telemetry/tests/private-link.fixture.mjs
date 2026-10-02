@@ -117,6 +117,9 @@ export function privateSnapshotFixture(f, stage, at = f.at) {
   }));
   if (privateLinkAtLeast(stage, 'create-network')) {
     const p = s.resources[n.vnet].properties;
+    for (const id of [n.appsSubnet, n.endpointSubnet]) Object.assign(s.resources[id].properties, {
+      privateEndpointNetworkPolicies: 'Disabled', privateLinkServiceNetworkPolicies: 'Enabled',
+    });
     p.subnets = [s.resources[n.appsSubnet], s.resources[n.endpointSubnet]];
     p.virtualNetworkPeerings = []; p.dhcpOptions = { dnsServers: [] };
     s.resources[n.endpointSubnet].properties.delegations = [];
@@ -274,6 +277,7 @@ async function controlHarnessFromSetup(f, evidence, stage, options, setup) {
     },
     append: async (pending, record, next) => { assert.deepEqual(head, pending); appended = clone(record); head = next; },
   };
+  if (options.configureIO) options.configureIO(io);
   const proof = setup.proof ?? await checkPrivateLinkPhase(f.c, f.context, evidence, phase, io);
   const approval = setup.approval ?? { version: 1, action: `execute-exact-private-link-${stage}`, configSha256: hash(f.c),
     planSha256: f.context.plan.planSha256, phaseSha256: hash(phase), bindingSha256: hash(proof.binding),
@@ -290,7 +294,7 @@ function controlFixtureKey(f, evidence, stage) {
     topology: f.topology, opaque: f.opaque, evidence, stage };
 }
 export async function privateControlHarness(f, evidence, stage, options = {}) {
-  if (options.uncached || options.snapshot || options.runtimeCompletion) {
+  if (options.uncached || options.snapshot || options.runtimeCompletion || options.configureIO) {
     return controlHarnessFromSetup(f, evidence, stage, options, privateControlSetup(f, evidence, stage, options));
   }
   const setup = await privateLinkCachedFixture('checked-control-setup', controlFixtureKey(f, evidence, stage), async () => {

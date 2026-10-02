@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
 import { readFileSync } from 'node:fs';
-import { budgetConfiguration, budgetProperties, buildPhase, closed, digest, fail, ids, json, ownerTags, projectBudgetFilter, sameId } from './definition.mjs';
+import { budgetConfiguration, budgetProperties, buildPhase, closed, digestJson, fail, ids, json, ownerTags, projectBudgetFilter, sameId } from './definition.mjs';
 import { verifyAdoptedQueueStorage, queueArmInstant } from './queue-adoption.mjs';
 import { queueDefenderReadRequests, verifyCurrentQueueDefender } from './queue-defender.mjs';
 import { admissionFlag, canonicalAppWrite, executionIdentity, resourceContext, verifyResource } from './policy.mjs';
@@ -8,8 +8,11 @@ import { verifyQueueResource } from './durable-queue.mjs';
 import { PRIVATE_LINK_API as API, PRIVATE_LINK_LIMITS as LIMITS, privateLinkAtLeast as atLeast,
   privateLinkAddresses, privateLinkBudgetConfiguration, privateLinkIpInSubnet, privateLinkResources,
   verifyPrivateLinkControlContext } from './private-link.mjs';
+import { collectPrivateLinkNsgCurrent, privateLinkNsgTarget, privateLinkNsgTargets, privateLinkNsgValidatedRecord,
+  verifyPrivateLinkNsgCurrent, privateLinkNsgAttachmentMode, PRIVATE_LINK_NSG_ATTACHED_MODE,
+  verifyPrivateLinkNsgAcaCompatibility } from './private-link-nsg-adoption.mjs';
 
-export const privateLinkHash = value => digest(json(value));
+export const privateLinkHash = digestJson;
 const hash = privateLinkHash;
 const telemetryColumns = JSON.parse(readFileSync(new URL('../../../services/telemetry-ingest/schema/storage-columns.json', import.meta.url), 'utf8'));
 export const plEqual = (a, b, code) => { if (!isDeepStrictEqual(a, b)) fail(code); };
@@ -117,7 +120,9 @@ function ref(value, id, extra = []) {
   if (!sameId(value.id, id)) fail('PRIVATE_LINK_REFERENCE_DRIFT');
 }
 function succeeded(p) { if (p.provisioningState !== 'Succeeded') fail('PRIVATE_LINK_PROPAGATION_PENDING'); }
-function verifyNetwork(c, context, s) {
+function verifyNetwork(c, context, s, externalAdoption) {
+  const attachedApps = externalAdoption && privateLinkNsgAttachmentMode(externalAdoption) === PRIVATE_LINK_NSG_ATTACHED_MODE;
+  const appsNsg = attachedApps ? privateLinkNsgTargets(c, context, PRIVATE_LINK_NSG_ATTACHED_MODE).apps : null;
   const { topology } = context.plan, n = topology.ids, d = privateLinkResources(c, topology, context.origin), r = s.resources;
   owned(c, r[n.vnet], d.vnet);
   const p = resource(r[n.vnet], n.vnet, d.vnet.type, API.network, [
@@ -137,8 +142,23 @@ function verifyNetwork(c, context, s) {
         'provisioningState', 'ipConfigurations', 'privateEndpoints', 'serviceAssociationLinks', 'resourceNavigationLinks',
         'serviceEndpoints', 'serviceEndpointPolicies', 'networkSecurityGroup', 'routeTable', 'natGateway', 'defaultOutboundAccess', 'purpose']);
     succeeded(a);
-    if (a.addressPrefix !== address || a.networkSecurityGroup || a.routeTable || a.natGateway ||
+    if (a.addressPrefix !== address || (a.networkSecurityGroup && (!externalAdoption || (isApps && !attachedApps))) || a.routeTable || a.natGateway ||
         (a.defaultOutboundAccess !== undefined && typeof a.defaultOutboundAccess !== 'boolean')) fail('PRIVATE_LINK_SUBNET_DRIFT');
+    if (externalAdoption && (!isApps || attachedApps)) {
+      closed(a.networkSecurityGroup, ['id']);
+      if (!sameId(a.networkSecurityGroup.id, isApps ? appsNsg.id : privateLinkNsgTarget(c, context).id)) fail('PRIVATE_LINK_NSG_ATTACHMENT_CHANGED');
+      const copies = [p.subnets.find(value => sameId(value.id, id)), s.lists.subnets.value.find(value => sameId(value.id, id)),
+        s.lists.addressSpaces.value.find(value => sameId(value.id, n.vnet))?.properties?.subnets?.find(value => sameId(value.id, id))];
+      for (const copy of copies) {
+        if (!sameId(copy?.properties?.networkSecurityGroup?.id, a.networkSecurityGroup.id)) fail('PRIVATE_LINK_NSG_ATTACHMENT_COPY_CHANGED');
+        closed(copy.properties.networkSecurityGroup, ['id']);
+      }
+    }
+    if (externalAdoption && isApps && !attachedApps) {
+      const copies = [p.subnets.find(value => sameId(value.id, id)), s.lists.subnets.value.find(value => sameId(value.id, id)),
+        s.lists.addressSpaces.value.find(value => sameId(value.id, n.vnet))?.properties?.subnets?.find(value => sameId(value.id, id))];
+      if (copies.some(copy => !copy || copy.properties?.networkSecurityGroup)) fail('PRIVATE_LINK_NSG_APPS_ATTACHMENT_FORBIDDEN');
+    }
     for (const key of ['serviceEndpoints', 'serviceEndpointPolicies']) if (a[key] !== undefined) plEqual(a[key], [], 'PRIVATE_LINK_SUBNET_FEATURE_DRIFT');
     if (a.purpose !== undefined && (isApps || r[n.endpoint] === null || a.purpose !== 'PrivateEndpoints')) {
       fail('PRIVATE_LINK_SUBNET_PURPOSE_UNVERIFIED');
@@ -434,13 +454,18 @@ export function privateLinkReadRequests(c, context) {
     workspaceExports: req(`${r.workspace}/dataExports`, '2020-08-01'),
   };
 }
-export async function collectPrivateLinkSnapshot(c, context, io, deadline, resourcesReady = null) {
+export async function collectPrivateLinkSnapshot(c, context, io, deadline, resourcesReady = null, externalAdoption = null) {
   verifyPrivateLinkControlContext(c, context);
   const start = io.now(), n = context.plan.topology.ids;
   if (!Number.isSafeInteger(deadline) || deadline <= start) fail('PRIVATE_LINK_READ_DEADLINE');
   deadline = Math.min(deadline, start + LIMITS.checkMs);
   const s = { version: 1, kind: 'private-link-control-snapshot', startedAt: start, completedAt: null,
     accountContext: null, resources: {}, lists: {}, diagnostics: {}, nic: null, effective: null, defender: null, images: null, managed: {} };
+  const attachmentMode = externalAdoption?.observeOnly && externalAdoption.version === undefined ? undefined
+    : externalAdoption ? privateLinkNsgAttachmentMode(externalAdoption) : undefined;
+  const nsgTask = externalAdoption ? collectPrivateLinkNsgCurrent(c, context, io, deadline, attachmentMode).then(value => {
+    s.version = 2; s.externalNsg = value;
+  }) : Promise.resolve();
   const resources = new Map(privateLinkResourceDescriptors(c, context).map(d => [d.id, Promise.resolve().then(async () => {
     const value = await io.read({ ...d, filter: null }, deadline); s.resources[d.id] = value; return value;
   })]));
@@ -460,7 +485,11 @@ export async function collectPrivateLinkSnapshot(c, context, io, deadline, resou
       async ([key, request]) => [key, await io.read(request, deadline)]));
     verifyCurrentQueueDefender(c, context.origin.adoption.origin, e, s.defender);
   })() : Promise.resolve();
-  await Promise.all([Promise.all(resources.values()).then(() => resourcesReady?.({ resources: structuredClone(s.resources) })), ...listTasks, ...diagnosticTasks, defenderTask,
+  await Promise.all([Promise.all(resources.values()).then(async () => {
+    if (externalAdoption) await nsgTask;
+    return resourcesReady?.({ resources: structuredClone(s.resources),
+      ...(externalAdoption ? { externalNsg: structuredClone(s.externalNsg) } : {}) });
+  }), ...listTasks, ...diagnosticTasks, defenderTask, nsgTask,
     io.account(deadline).then(value => { s.accountContext = value; }),
     io.registry(deadline).then(value => { s.images = value; })]);
   await io.batch(plList(s.lists.managedResources), async item => {
@@ -495,11 +524,18 @@ export async function collectPrivateLinkSnapshot(c, context, io, deadline, resou
   s.managed = Object.fromEntries(Object.entries(s.managed).sort(([a], [b]) => a.localeCompare(b)));
   return s;
 }
-export function verifyPrivateLinkSnapshot(c, context, s, stage = 'initial', environmentWireVersion = 2) {
+export function verifyPrivateLinkSnapshot(c, context, s, stage = 'initial', environmentWireVersion = 2, externalAdoption = null, evidence = null) {
   verifyPrivateLinkControlContext(c, context);
-  closed(s, ['version', 'kind', 'startedAt', 'completedAt', 'accountContext', 'resources', 'lists', 'diagnostics', 'nic', 'effective', 'defender', 'images', 'managed']);
-  if (s.version !== 1 || s.kind !== 'private-link-control-snapshot' || !Number.isSafeInteger(s.startedAt) ||
+  closed(s, ['version', 'kind', 'startedAt', 'completedAt', 'accountContext', 'resources', 'lists', 'diagnostics', 'nic', 'effective', 'defender', 'images', 'managed',
+    ...(externalAdoption ? ['externalNsg'] : [])]);
+  if (s.version !== (externalAdoption ? 2 : 1) || s.kind !== 'private-link-control-snapshot' || !Number.isSafeInteger(s.startedAt) ||
       !Number.isSafeInteger(s.completedAt) || s.completedAt < s.startedAt || s.completedAt - s.startedAt > LIMITS.checkMs) fail('PRIVATE_LINK_SNAPSHOT_INVALID');
+  if (externalAdoption) {
+    externalAdoption = privateLinkNsgValidatedRecord(c, context, externalAdoption, evidence);
+    verifyPrivateLinkNsgCurrent(c, context, s.externalNsg, externalAdoption.proposal.current.externalNsg);
+    if (privateLinkNsgAttachmentMode(externalAdoption) === PRIVATE_LINK_NSG_ATTACHED_MODE) verifyPrivateLinkNsgAcaCompatibility(c, context, s);
+    if (s.externalNsg.startedAt < s.startedAt || s.externalNsg.completedAt > s.completedAt) fail('PRIVATE_LINK_NSG_READBACK_WINDOW_CHANGED');
+  }
   const a = s.accountContext;
   if (a?.id !== c.subscriptionId || a.tenantId !== c.tenantId || a.environmentName !== 'AzureCloud' || a.state !== 'Enabled') fail('PRIVATE_LINK_ACCOUNT_CONTEXT_CHANGED');
   const t = context.plan.topology, n = t.ids, old = context.origin.network.topology.ids, q = context.origin.adoption.topology.ids, r = ids(c);
@@ -643,7 +679,7 @@ export function verifyPrivateLinkSnapshot(c, context, s, stage = 'initial', envi
     });
     privateLinkAddresses({ ...t.addresses, knownAddressSpaces: spaces });
     plEqual([...new Set(spaces)].sort(), [...t.addresses.knownAddressSpaces].sort(), 'PRIVATE_LINK_ADDRESS_INVENTORY_CHANGED');
-  } else verifyNetwork(c, context, s);
+  } else verifyNetwork(c, context, s, externalAdoption);
   let privatePath = null;
   if (atLeast(stage, 'create-queue-endpoint')) privatePath = verifyPrivateLinkEndpoint(c, context, s);
   else if (plList(s.lists.storageConnections).length || s.nic !== null) fail('PRIVATE_LINK_ALTERNATIVE_ENDPOINT');
@@ -689,7 +725,8 @@ export function verifyPrivateLinkSnapshot(c, context, s, stage = 'initial', envi
   closed(s.diagnostics, diagnosticTargets);
   for (const value of Object.values(s.diagnostics)) exactIds(value, []);
   const known = new Set([...context.plan.preservedResourceIds, ...context.origin.original.preflight.preservedIds,
-    ...Object.keys(s.resources).filter(id => s.resources[id] !== null), ...(s.nic ? [s.nic.id] : [])].map(id => id.toLowerCase()));
+    ...Object.keys(s.resources).filter(id => s.resources[id] !== null), ...(s.nic ? [s.nic.id] : []),
+    ...(externalAdoption ? Object.values(privateLinkNsgTargets(c, context)).map(value => value.id) : [])].map(id => id.toLowerCase()));
   if (plList(s.lists.groupResources).some(value => !known.has(value.id?.toLowerCase()))) fail('PRIVATE_LINK_UNREVIEWED_RESOURCE');
   return { stage, ...(privatePath ?? {}), snapshotSha256: hash(s) };
 }

@@ -5,13 +5,14 @@ import { join, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID, createHash } from 'node:crypto';
 import { isDeepStrictEqual, promisify, types } from 'node:util';
-import { closed, digest, fail, ids, json, sameId, SYNTHETIC_FIXTURES, SYNTHETIC_LIMITS } from './definition.mjs';
+import { closed, digest, digestJson, fail, ids, json, sameId, SYNTHETIC_FIXTURES, SYNTHETIC_LIMITS } from './definition.mjs';
 import { admissionFlag, canonicalAppWrite, canonicalInstant, executionIdentity, verifySyntheticRows } from './policy.mjs';
 import { receiverDatabaseInstant, verifyReceiverCandidate, verifyReceiverInventory } from './receiver-upgrade.mjs';
 import { QUEUE_RUNTIME, queueEnvironment } from './durable-queue.mjs';
 import { queueArmInstant } from './queue-adoption.mjs';
 import { privateLinkAcaCreationIdentity } from './private-link-readback.mjs';
 import { verifyPrivateLinkPolicyRevision, verifyPrivateLinkCostReview } from './private-link-controller.mjs';
+import { loadPrivateLinkArtifact, savePrivateLinkArtifact, updatePrivateLinkArtifact } from './private-link-artifacts.mjs';
 import { az, sourceDigest, publishedSourceDigest, verifyReceiverSource, saveImmutable, save, load,
   emptyAcrReferrers, safeOperationFailure, syntheticHttp, readSyntheticQuery, asyncWhatIf, privateDirectory,
   limitReadConcurrency, authenticatedWhatIfRequest, whatIfRequestContext } from './controller.mjs';
@@ -20,7 +21,7 @@ const execute = promisify(execFile);
 const repository = 'missionspec/telemetry-ingest';
 const privateRoot = fileURLToPath(new URL('./.operator-private/', import.meta.url));
 const appApi = '2025-07-01';
-const hash = value => digest(json(value));
+const hash = digestJson;
 const equal = (a, b, code) => { if (!isDeepStrictEqual(a, b)) fail(code); };
 const sha = value => typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value);
 const iso = at => new Date(at).toISOString();
@@ -202,8 +203,9 @@ export async function privateLinkRuntimeIO(c, context, evidence, directory, opti
       if (result.stdout.trim() !== approval.policyCommitSha || await readSource() !== approval.sourceSha256) fail('PRIVATE_RUNTIME_SOURCE_CHANGED');
     },
     verifySource: candidate => verifyReceiverSource(candidate, options.sourceRun ?? run, lookup),
-    load: name => load(directory, name, true), immutable: (name, value) => saveImmutable(directory, name, value),
-    save: (name, value) => save(directory, name, value),
+    load: name => loadPrivateLinkArtifact(directory, name, true),
+    immutable: (name, value) => savePrivateLinkArtifact(directory, name, value),
+    save: (name, value) => updatePrivateLinkArtifact(directory, name, value),
     reserve: async (kind, key, value) => {
       if (!['image', 'receiver', 'window', 'recovery', 'public-probe', 'public-cleanup'].includes(kind) || !sha(key)) fail('PRIVATE_RUNTIME_FENCE_INVALID');
       try { await saveImmutable(privateRoot, `private-link-runtime-${kind}-${key}.json`, value); }
