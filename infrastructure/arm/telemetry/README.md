@@ -67,6 +67,11 @@ qualification requires a new readiness measurement under the retained review,
 a separate continuation approval and fresh native admission. One immutable
 successor preserves the original failed result and physical fence; this is not
 a retry of an unknown or previously enabled window.
+An already-published image can use a separately reviewed, genuinely new
+scan attestation for window preparation/qualification without replacing its
+candidate or publication profile. Full facts are retained once in the
+version-5 intent; the new review cannot authorize image publication or receiver
+creation, and historical cleanup remains independent of current scan expiry.
 Neither a local plan nor a successful setup stage authorizes runtime work.
 Effects require exact reviewed bindings, published source, fresh evidence,
 durable physical-target intent fencing and retained outcomes. Unknown

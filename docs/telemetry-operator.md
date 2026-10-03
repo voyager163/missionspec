@@ -355,7 +355,7 @@ checks still apply. Recovery and reconciliation commands reject `runtimeReview`
 and retain their frozen-source, backend-independent scope. Arbitrary `options`,
 IO adapters and transport replacements are never accepted from JSON.
 
-When the frozen plan's scan expires, a separately reviewed
+Before image publication, when the frozen plan's scan expires, a separately reviewed
 `review-same-image-private-link-scan-refresh` revision may bind a new scan
 profile for the exact same manifest, config, source and notice bytes. Only
 the scan, scan counts, scanner database metadata and a closed
@@ -372,6 +372,79 @@ fall within the recorded scan window. Wrong image/source, changed qualifiers,
 unknown fields and expired reviews fail before effects. Frozen false-only
 disable and public cleanup retain their original admission-time checks, so
 safe cleanup is not vetoed by a subsequently expired scan.
+
+**Already-published images use a separate scan attestation.** Replacing a
+published candidate's profile would invalidate its original publication
+review and receipt. Window preparation and qualification instead accept a
+small `runtimeReview.publishedScanReview` paired with complete
+`publishedScanAttestation` facts. Neither record changes the candidate,
+publication, receiver receipt, prior failed window or physical fence. This
+path cannot publish an image or create a receiver.
+
+The facts have exactly `version: 1`,
+`kind: "private-link-published-image-scan-attestation"`,
+`candidateSha256`, `candidatePublicationSha256`, `originalProfileSha256`,
+`publishedProfileSha256`, `receiverCreateIntentSha256` and `freshProfile`.
+`freshProfile` is the complete newly scanned profile, not a scalar certificate.
+Its scan-refresh chain starts from the **published** profile, which may differ
+from the original plan profile. The existing disabled receipt's complete
+creation intent supplies any earlier version-1 profile review, verified only
+at its original recorded time. That historical review is never re-dated or
+treated as current authority.
+
+The closed scan review has `version: 1`, action
+`review-published-private-link-image-scan-attestation`, decision
+`retain-published-image-and-receipts`, and the hashes `configSha256`,
+`contextSha256`, `planSha256`, `originSha256`, `controlEvidenceSha256`,
+`candidateSha256`, `candidatePublicationSha256`, `originalProfileSha256`,
+`publishedProfileSha256`, `freshProfileSha256` and `attestationSha256`.
+It also records `manifestDigest`, `configDigest`, `sourceSha256`,
+`publication: {commitSha, sourceSha256}`, `approvedAt` and `expiresAt`.
+It binds the current published operator source, lasts at most one hour and
+expires no later than the fresh scanner database interval. It is mutually
+exclusive with a current `runtimeReview.imageProfileRevision`; policy, cost
+and name reviews remain independently required.
+
+Only scan findings/counts, scanner database hash/metadata and the explicit
+scan-refresh chain may differ from the published profile. Image/config/layer
+identity, source locks, notices, scanner identity/configuration and every
+runtime, SDK, native-overlay measurement and caveat remain exact. Full profile
+validation retains the zero-Critical/zero-High and no-suppressed/no-unknown
+severity gates. Database and scan timestamps must be genuine, ordered and
+newer than the published scan; the scan must follow publication and finish
+before the new review. Neither the report nor its timestamps can be refreshed
+merely to extend eligibility.
+
+On the fixed runtime CLI routes, `prepare-private-link-window` and
+`prepare-private-link-window-continuation` receive the facts as the sole additional
+top-level `publishedScanAttestation` input. Version-2 preparation retains
+those full facts once; bindings carry only their hash and the small review.
+Attested qualification reloads that exact fixed preparation file and rejects
+replacement facts in operator JSON. The version-5 window intent retains the
+full attestation once and an explicit `continuation: null` or the existing
+single-predecessor continuation. Completion remains version 1 and carries
+the facts only through its intent. Legacy version-3/version-4 shapes remain
+unchanged, and version 5 grants no second-continuation permission.
+
+Direct and routed window entry require the paired facts/review even inside
+an existing attestation scope. Preparation checks caller references and
+contents after awaits and retains the verified private facts, not a later
+replacement. Image/receiver preparation and execution cannot borrow ambient
+scan freshness. Legacy intent/completion verification likewise remains
+independent of ambient attestation state. Frozen false/public recovery checks
+the originally admitted version-5 facts at their recorded times and can still
+perform its narrowly reviewed cleanup after the scan or review expires.
+
+The operator sequence remains reviewed input data, fresh read-only readiness,
+prepare only, a **new** post-preparation readiness measurement under the same
+retained review/facts, then the paired window reviews and qualification.
+Readiness and qualification bind both review and fact hashes. After expensive
+validation, the operator must recheck report age, exact review bindings,
+source and remaining cleanup reserves before creating effect approvals.
+Graceful cancellation is required during preparation as well as qualification:
+preparation can hold an admission mutex even though it cannot enable ingestion.
+All existing current-proof, runtime, cleanup, storage and no-replay bounds
+remain unchanged.
 
 Versioned native what-if contexts distinguish the new fixed control phases
 and UUID-bound replacement-app phases from historical collector requests.
