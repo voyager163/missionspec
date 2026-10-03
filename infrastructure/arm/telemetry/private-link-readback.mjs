@@ -7,7 +7,7 @@ import { admissionFlag, canonicalAppWrite, executionIdentity, resourceContext, v
 import { verifyQueueResource } from './durable-queue.mjs';
 import { PRIVATE_LINK_API as API, PRIVATE_LINK_LIMITS as LIMITS, privateLinkAtLeast as atLeast,
   privateLinkAddresses, privateLinkBudgetConfiguration, privateLinkIpInSubnet, privateLinkResources,
-  verifyPrivateLinkControlContext } from './private-link.mjs';
+  verifyPrivateLinkControlContext, privateLinkRuntimeResources, verifyPrivateLinkNameProjection } from './private-link.mjs';
 import { collectPrivateLinkNsgCurrent, privateLinkNsgTarget, privateLinkNsgTargets, privateLinkNsgValidatedRecord,
   verifyPrivateLinkNsgCurrent, privateLinkNsgAttachmentMode, PRIVATE_LINK_NSG_ATTACHED_MODE,
   verifyPrivateLinkNsgAcaCompatibility } from './private-link-nsg-adoption.mjs';
@@ -32,7 +32,7 @@ function exactIds(response, wanted, emptyTerminal = false) {
   return values;
 }
 function acaId(id) {
-  return typeof id === 'string' && /^\/subscriptions\/[0-9a-f-]{36}\/resourceGroups\/missionspec-[a-z0-9]{2,10}-telemetry\/providers\/Microsoft\.App\/(?:containerApps\/missionspec-[a-z0-9]{2,10}-(?:ingest|private-ingest|public-probe)|managedEnvironments\/missionspec-[a-z0-9]{2,10}-(?:environment|private-environment))$/iu.test(id);
+  return typeof id === 'string' && /^\/subscriptions\/[0-9a-f-]{36}\/resourceGroups\/missionspec-[a-z0-9]{2,10}-telemetry\/providers\/Microsoft\.App\/(?:containerApps\/missionspec-[a-z0-9]{2,10}-(?:ingest|private-ingest|public-probe|pl-ingest|pub-probe)|managedEnvironments\/missionspec-[a-z0-9]{2,10}-(?:environment|private-environment))$/iu.test(id);
 }
 function opaqueAcaDate(value) {
   if (typeof value !== 'string') return false;
@@ -445,9 +445,10 @@ function verifyRuntimeApp(c, context, s, descriptor, flag) {
     ...context.origin.receiver.prerequisiteReceipts, receiverUpgrade: context.origin.receiver }),
     identities: { [n.ingestIdentity]: s.resources[n.ingestIdentity], [n.pullIdentity]: s.resources[n.pullIdentity] } });
 }
-export function privateLinkResourceDescriptors(c, context) {
+export function privateLinkResourceDescriptors(c, context, nameProjection = null, evidence = null) {
   const n = context.plan.topology.ids, q = context.origin.adoption.topology.ids, r = ids(c), old = context.origin.network.topology.ids;
-  const d = privateLinkResources(c, context.plan.topology, context.origin);
+  const projected = privateLinkRuntimeResources(c, context, nameProjection, evidence);
+  const d = projected.resources;
   const values = Object.values(d).filter(value => value?.id).map(value => ({ id: value.id, apiVersion: value.apiVersion }));
   values.push(...[q.account, q.service, q.queue].map(id => ({ id, apiVersion: API.storage })),
     ...[old.perimeter, old.profile, old.association, old.rule].map(id => ({ id, apiVersion: '2025-09-01' })),
@@ -457,6 +458,7 @@ export function privateLinkResourceDescriptors(c, context) {
     { id: r.workspace, apiVersion: '2023-09-01' },
     { id: r.table, apiVersion: '2022-10-01' }, { id: r.dcr, apiVersion: '2024-03-11' },
     ...[r.projectBudget, r.budget, r.stateBudget].map(id => ({ id, apiVersion: '2024-08-01' })));
+  values.push(...projected.legacyAbsentIds.map(id => ({ id, apiVersion: API.app })));
   return [...new Map(values.map(value => [value.id.toLowerCase(), value])).values()];
 }
 export function privateLinkReadRequests(c, context) {
@@ -487,17 +489,20 @@ export function privateLinkReadRequests(c, context) {
 }
 export async function collectPrivateLinkSnapshot(c, context, io, deadline, resourcesReady = null, externalAdoption = null) {
   verifyPrivateLinkControlContext(c, context);
-  const start = io.now(), n = context.plan.topology.ids;
+  const start = io.now(), nameProjection = io.nameProjection ?? null, projectionEvidence = io.projectionEvidence ?? null;
+  if (nameProjection && !projectionEvidence) fail('PRIVATE_LINK_NAME_PREFIX_REQUIRED');
+  const view = privateLinkRuntimeResources(c, context, nameProjection, projectionEvidence, start), n = view.ids;
   if (!Number.isSafeInteger(deadline) || deadline <= start) fail('PRIVATE_LINK_READ_DEADLINE');
   deadline = Math.min(deadline, start + LIMITS.checkMs);
   const s = { version: 1, kind: 'private-link-control-snapshot', startedAt: start, completedAt: null,
-    accountContext: null, resources: {}, lists: {}, diagnostics: {}, nic: null, effective: null, defender: null, images: null, managed: {} };
+    accountContext: null, resources: {}, lists: {}, diagnostics: {}, nic: null, effective: null, defender: null, images: null, managed: {},
+    ...(nameProjection ? { nameProjection: structuredClone(nameProjection) } : {}) };
   const attachmentMode = externalAdoption?.observeOnly && externalAdoption.version === undefined ? undefined
     : externalAdoption ? privateLinkNsgAttachmentMode(externalAdoption) : undefined;
   const nsgTask = externalAdoption ? collectPrivateLinkNsgCurrent(c, context, io, deadline, attachmentMode).then(value => {
     s.version = 2; s.externalNsg = value;
   }) : Promise.resolve();
-  const resources = new Map(privateLinkResourceDescriptors(c, context).map(d => [d.id, Promise.resolve().then(async () => {
+  const resources = new Map(privateLinkResourceDescriptors(c, context, nameProjection, projectionEvidence).map(d => [d.id, Promise.resolve().then(async () => {
     const value = await io.read({ ...d, filter: null }, deadline); s.resources[d.id] = value; return value;
   })]));
   const targets = [n.vnet, n.endpoint, n.dnsZone, n.environment, n.app, n.account,
@@ -549,7 +554,7 @@ export async function collectPrivateLinkSnapshot(c, context, io, deadline, resou
   s.completedAt = io.now();
   if (s.completedAt >= deadline) fail('PRIVATE_LINK_READ_DEADLINE');
   if (Buffer.byteLength(json(s)) > LIMITS.bytes) fail('PRIVATE_LINK_SNAPSHOT_SIZE_LIMIT');
-  s.resources = Object.fromEntries(privateLinkResourceDescriptors(c, context).map(d => [d.id, s.resources[d.id]]));
+  s.resources = Object.fromEntries(privateLinkResourceDescriptors(c, context, nameProjection, projectionEvidence).map(d => [d.id, s.resources[d.id]]));
   s.lists = Object.fromEntries(Object.keys(privateLinkReadRequests(c, context)).map(key => [key, s.lists[key]]));
   s.diagnostics = Object.fromEntries(targets.map(id => [id, s.diagnostics[id]]));
   s.managed = Object.fromEntries(Object.entries(s.managed).sort(([a], [b]) => a.localeCompare(b)));
@@ -557,8 +562,12 @@ export async function collectPrivateLinkSnapshot(c, context, io, deadline, resou
 }
 export function verifyPrivateLinkSnapshot(c, context, s, stage = 'initial', environmentWireVersion = 2, externalAdoption = null, evidence = null) {
   verifyPrivateLinkControlContext(c, context);
+  const nameProjection = s.nameProjection ?? null;
+  if (nameProjection && (!evidence || !atLeast(stage, 'assign-queue-role'))) fail('PRIVATE_LINK_NAME_PREFIX_REQUIRED');
+  const view = privateLinkRuntimeResources(c, context, nameProjection, evidence, s.startedAt);
+  if (nameProjection) verifyPrivateLinkNameProjection(c, context, nameProjection, s.completedAt, evidence);
   closed(s, ['version', 'kind', 'startedAt', 'completedAt', 'accountContext', 'resources', 'lists', 'diagnostics', 'nic', 'effective', 'defender', 'images', 'managed',
-    ...(externalAdoption ? ['externalNsg'] : [])]);
+    ...(externalAdoption ? ['externalNsg'] : []), ...(nameProjection ? ['nameProjection'] : [])]);
   if (s.version !== (externalAdoption ? 2 : 1) || s.kind !== 'private-link-control-snapshot' || !Number.isSafeInteger(s.startedAt) ||
       !Number.isSafeInteger(s.completedAt) || s.completedAt < s.startedAt || s.completedAt - s.startedAt > LIMITS.checkMs) fail('PRIVATE_LINK_SNAPSHOT_INVALID');
   if (externalAdoption) {
@@ -569,10 +578,14 @@ export function verifyPrivateLinkSnapshot(c, context, s, stage = 'initial', envi
   }
   const a = s.accountContext;
   if (a?.id !== c.subscriptionId || a.tenantId !== c.tenantId || a.environmentName !== 'AzureCloud' || a.state !== 'Enabled') fail('PRIVATE_LINK_ACCOUNT_CONTEXT_CHANGED');
-  const t = context.plan.topology, n = t.ids, old = context.origin.network.topology.ids, q = context.origin.adoption.topology.ids, r = ids(c);
+  const t = context.plan.topology, n = view.ids, old = context.origin.network.topology.ids, q = context.origin.adoption.topology.ids, r = ids(c);
   closed(s.images, ['repositories', 'manifests', 'legacyManifest', 'preparedManifest', 'queueManifest', 'referrers']);
   equalImageInventory(c, context, s.images, stage);
-  closed(s.resources, privateLinkResourceDescriptors(c, context).map(value => value.id));
+  closed(s.resources, privateLinkResourceDescriptors(c, context, nameProjection, evidence).map(value => value.id));
+  for (const id of view.legacyAbsentIds) {
+    if (s.resources[id] !== null || plList(s.lists.apps).some(value => sameId(value.id, id)) ||
+        plList(s.lists.groupResources).some(value => sameId(value.id, id))) fail('PRIVATE_LINK_RETIRED_RUNTIME_NAME_PRESENT');
+  }
   closed(s.lists, Object.keys(privateLinkReadRequests(c, context)));
   for (const [key, value] of Object.entries(s.lists)) plList(value, ['profiles', 'associations', 'rules', 'links', 'linkReferences'].includes(key));
   const created = Object.fromEntries(context.plan.stages.flatMap(value => value.resources.map(d => [d.id, value.id])));
@@ -725,7 +738,7 @@ export function verifyPrivateLinkSnapshot(c, context, s, stage = 'initial', envi
     if (!sameId(s.resources[id]?.id, id)) fail('PRIVATE_LINK_BUDGET_TARGET_CHANGED');
     plEqual(budgetConfiguration(s.resources[id]), { ...expected, filter: expected.filter ?? {} }, 'PRIVATE_LINK_BUDGET_COVERAGE_REQUIRED');
   }
-  const descriptor = privateLinkResources(c, t, context.origin);
+  const descriptor = view.resources;
   if (atLeast(stage, 'create-queue-role')) verifyQueueResource(c, context.origin.adoption.topology, descriptor.queueRole, s.resources[q.role]);
   if (atLeast(stage, 'assign-queue-role')) verifyQueueResource(c, context.origin.adoption.topology, descriptor.queueAssignment, s.resources[q.assignment]);
   for (const key of ['accountGrants', 'serviceGrants', 'queueGrants']) for (const grant of plList(s.lists[key])) {

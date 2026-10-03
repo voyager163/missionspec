@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
 import { closed, digest, fail, ids, json, ownerTags } from './definition.mjs';
-import { verifyPrivateLinkEnvironmentWire } from './private-link.mjs';
+import { verifyPrivateLinkEnvironmentWire, verifyPrivateLinkNameBinding, verifyPrivateLinkRuntimeName } from './private-link.mjs';
 
 export const PRIVATE_LINK_WHATIF_STAGES = Object.freeze({
   'create-network': 4, 'create-queue-endpoint': 5, 'create-environment': 6,
@@ -59,8 +59,9 @@ export function privateLinkWhatIfContext(c, phase) {
 }
 
 export function privateLinkRuntimeWhatIfContext(c, phase) {
-  closed(phase, ['version', 'kind', 'phase', 'action', 'windowInstanceId', 'predecessorSha256', 'targetSha256', 'request']);
-  if (phase.version !== 1 || phase.kind !== 'fixed-private-link-runtime-phase' ||
+  closed(phase, ['version', 'kind', 'phase', 'action', 'windowInstanceId', 'predecessorSha256', 'targetSha256', 'request',
+    ...(phase.version === 2 ? ['nameBinding'] : [])]);
+  if (![1, 2].includes(phase.version) || phase.kind !== 'fixed-private-link-runtime-phase' ||
       !Object.hasOwn(PRIVATE_LINK_RUNTIME_SUFFIXES, phase.action) || phase.phase !== `private-link-runtime-${phase.action}` ||
       !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(phase.windowInstanceId ?? '') ||
       phase.windowInstanceId === c.runId ||
@@ -81,7 +82,10 @@ export function privateLinkRuntimeWhatIfContext(c, phase) {
     fail('FIXED_PRIVATE_LINK_RUNTIME_WHATIF_REQUIRED');
   }
   const publicProbe = phase.action === 'create-public-probe';
-  const expectedApp = `${c.namePrefix}-${publicProbe ? 'public-probe' : 'private-ingest'}`;
+  const projected = phase.version === 2 ? verifyPrivateLinkNameBinding(c, phase.nameBinding).projected : null;
+  const expectedApp = projected ? projected[publicProbe ? 'publicProbe' : 'app'].split('/').at(-1) :
+    `${c.namePrefix}-${publicProbe ? 'public-probe' : 'private-ingest'}`;
+  verifyPrivateLinkRuntimeName(expectedApp);
   const expectedEnvironment = publicProbe ? r.environment
     : `${r.group}/providers/Microsoft.App/managedEnvironments/${c.namePrefix}-private-environment`;
   const app = template.resources[0], containers = app?.properties?.template?.containers;

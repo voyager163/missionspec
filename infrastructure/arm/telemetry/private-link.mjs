@@ -11,6 +11,108 @@ export const PRIVATE_LINK_API = Object.freeze({ network: '2024-05-01', dns: '202
   app: '2025-07-01', storage: '2025-01-01', deployment: '2022-09-01', authorization: '2022-04-01' });
 export const PRIVATE_LINK_AUTHORITY = Object.freeze({ deployment: false, retirement: false, imagePublication: false,
   queueGrants: false, ingestion: false, clientActivation: false, budgetMutation: false, productionClearance: false });
+
+export function privateLinkRuntimeNameIds(c) {
+  const r = ids(c), app = name => `${r.group}/providers/Microsoft.App/containerApps/${name}`;
+  return { original: { app: app(`${c.namePrefix}-private-ingest`), publicProbe: app(`${c.namePrefix}-public-probe`) },
+    projected: { app: app(`${c.namePrefix}-pl-ingest`), publicProbe: app(`${c.namePrefix}-pub-probe`) } };
+}
+export function verifyPrivateLinkRuntimeName(value) {
+  if (typeof value !== 'string' || value.length > 32 || !/^[a-z][a-z0-9-]*[a-z0-9]$/u.test(value) || value.includes('--')) {
+    fail('PRIVATE_LINK_RUNTIME_NAME_INVALID');
+  }
+  return value;
+}
+export function privateLinkAssignedPrefix(evidence) {
+  const stages = PRIVATE_LINK_CONTROL_STAGES.slice(0, PRIVATE_LINK_CONTROL_STAGES.indexOf('assign-queue-role') + 1);
+  if (!evidence || !Array.isArray(evidence.records) || evidence.records.length < stages.length ||
+      stages.some((stage, index) => evidence.records[index]?.stage !== stage)) fail('PRIVATE_LINK_ASSIGNED_PREFIX_REQUIRED');
+  return { ...evidence, records: evidence.records.slice(0, stages.length) };
+}
+const assignedPrefixHashes = new WeakMap();
+export function withPrivateLinkAssignedPrefixHash(evidence, use) {
+  const stages = PRIVATE_LINK_CONTROL_STAGES.slice(0, PRIVATE_LINK_CONTROL_STAGES.indexOf('assign-queue-role') + 1);
+  if (!Array.isArray(evidence?.records) || evidence.records.length < stages.length ||
+      stages.some((stage, index) => evidence.records[index]?.stage !== stage) || assignedPrefixHashes.has(evidence)) return use();
+  const seen = new WeakSet();
+  const frozen = value => {
+    if (value === null || typeof value !== 'object' || seen.has(value)) return true;
+    if (!Object.isFrozen(value)) return false;
+    seen.add(value);
+    return Object.values(value).every(frozen);
+  };
+  if (!frozen(evidence)) return use();
+  // This is a digest of immutable bytes, not a semantic/admission result.
+  assignedPrefixHashes.set(evidence, hash(privateLinkAssignedPrefix(evidence)));
+  try {
+    const result = use();
+    if (result && typeof result.then === 'function') return Promise.resolve(result).finally(() => assignedPrefixHashes.delete(evidence));
+    assignedPrefixHashes.delete(evidence);
+    return result;
+  } catch (error) { assignedPrefixHashes.delete(evidence); throw error; }
+}
+export function verifyPrivateLinkNameProjection(c, context, revision, at, evidence = null) {
+  closed(revision, ['version', 'action', 'decision', 'configSha256', 'planSha256', 'originSha256', 'controlEvidenceSha256',
+    'original', 'projected', 'sourceSha256', 'publication', 'approvedAt', 'expiresAt']);
+  closed(revision.original, ['app', 'publicProbe']); closed(revision.projected, ['app', 'publicProbe']);
+  closed(revision.publication, ['commitSha', 'sourceSha256']);
+  const exact = privateLinkRuntimeNameIds(c);
+  if (revision.version !== 1 || revision.action !== 'use-reviewed-private-link-runtime-names' ||
+      revision.decision !== 'use-two-shortened-runtime-names' || revision.configSha256 !== hash(c) ||
+      revision.planSha256 !== context.plan.planSha256 || revision.originSha256 !== hash(context.origin) ||
+      !sha(revision.controlEvidenceSha256) || !sha(revision.sourceSha256) ||
+      revision.publication.sourceSha256 !== revision.sourceSha256 || !/^[a-f0-9]{40}$/u.test(revision.publication.commitSha ?? '') ||
+      context.plan.version !== 3 || context.plan.topology.ids.app !== exact.original.app ||
+      context.plan.topology.ids.publicProbe !== exact.original.publicProbe) fail('PRIVATE_LINK_NAME_PROJECTION_REQUIRED');
+  equal(revision.original, exact.original, 'PRIVATE_LINK_ORIGINAL_NAMES_CHANGED');
+  equal(revision.projected, exact.projected, 'PRIVATE_LINK_PROJECTED_NAMES_CHANGED');
+  for (const id of Object.values(exact.projected)) verifyPrivateLinkRuntimeName(id.split('/').at(-1));
+  if (new Set([...Object.values(exact.original), ...Object.values(exact.projected), ids(c).app, ids(c).environment]).size !== 6) {
+    fail('PRIVATE_LINK_RUNTIME_NAME_COLLISION');
+  }
+  const time = value => {
+    const parsed = typeof value === 'string' ? Date.parse(value) : NaN;
+    if (!Number.isSafeInteger(parsed) || new Date(parsed).toISOString() !== value) fail('PRIVATE_LINK_NAME_REVIEW_TIME_INVALID');
+    return parsed;
+  };
+  const start = time(revision.approvedAt), end = time(revision.expiresAt);
+  if (!Number.isSafeInteger(at) || at < start || at >= end || end <= start || end - start > 3600000) fail('PRIVATE_LINK_NAME_REVIEW_EXPIRED');
+  if (evidence !== null && revision.controlEvidenceSha256 !==
+      (assignedPrefixHashes.get(evidence) ?? hash(privateLinkAssignedPrefix(evidence)))) fail('PRIVATE_LINK_NAME_PREFIX_CHANGED');
+  return exact;
+}
+// Only current runtime coordinates are projected. The caller continues validating all
+// historical records against the original context and passes that original prefix here.
+export function privateLinkRuntimeResources(c, context, nameProjection = null, evidence = null, at = null) {
+  const resources = privateLinkResources(c, context.plan.topology, context.origin);
+  const n = { ...context.plan.topology.ids };
+  if (nameProjection === null) return { ids: n, resources, legacyAbsentIds: [] };
+  const times = at ?? Date.parse(nameProjection.approvedAt);
+  const names = verifyPrivateLinkNameProjection(c, context, nameProjection, times, evidence);
+  for (const [key, member] of [['app', 'app'], ['publicProbe', 'publicProbe']]) {
+    resources[member] = structuredClone(resources[member]);
+    resources[member].id = names.projected[key];
+    resources[member].expected.name = names.projected[key].split('/').at(-1);
+    n[key] = names.projected[key];
+  }
+  return { ids: n, resources, legacyAbsentIds: Object.values(names.original) };
+}
+export function privateLinkNameBinding(c, context, revision, evidence = null) {
+  verifyPrivateLinkNameProjection(c, context, revision, Date.parse(revision.approvedAt), evidence);
+  const { configSha256, planSha256, originSha256, controlEvidenceSha256, original, projected } = revision;
+  return { version: 1, kind: 'private-link-short-runtime-names', configSha256, planSha256, originSha256,
+    controlEvidenceSha256, original: structuredClone(original), projected: structuredClone(projected) };
+}
+export function verifyPrivateLinkNameBinding(c, binding) {
+  closed(binding, ['version', 'kind', 'configSha256', 'planSha256', 'originSha256', 'controlEvidenceSha256', 'original', 'projected']);
+  if (binding.version !== 1 || binding.kind !== 'private-link-short-runtime-names' || binding.configSha256 !== hash(c) ||
+      !['planSha256', 'originSha256', 'controlEvidenceSha256'].every(key => sha(binding[key]))) fail('PRIVATE_LINK_NAME_BINDING_INVALID');
+  const names = privateLinkRuntimeNameIds(c);
+  equal(binding.original, names.original, 'PRIVATE_LINK_ORIGINAL_NAMES_CHANGED');
+  equal(binding.projected, names.projected, 'PRIVATE_LINK_PROJECTED_NAMES_CHANGED');
+  Object.values(names.projected).forEach(id => verifyPrivateLinkRuntimeName(id.split('/').at(-1)));
+  return names;
+}
 export const PRIVATE_LINK_STAGES = Object.freeze([
   'review-migration', 'set-project-migration-budget', 'set-telemetry-migration-budget',
   'retire-nsp-rule', 'create-network', 'create-queue-endpoint', 'create-environment',

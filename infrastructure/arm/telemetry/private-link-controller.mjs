@@ -14,6 +14,7 @@ import { az, sourceDigest, publishedSourceDigest, save, saveImmutable, load, rea
   asyncWhatIf, authenticatedWhatIfRequest, whatIfRequestContext, safeOperationFailure, verifyReceiverSource, readNspHead, privateDirectory,
   MAX_PRIVATE_ARTIFACT_BYTES } from './controller.mjs';
 import { PRIVATE_LINK_API as API, PRIVATE_LINK_CONTROL_STAGES as STAGES, PRIVATE_LINK_LIMITS as LIMITS,
+  privateLinkRuntimeResources, verifyPrivateLinkNameProjection, privateLinkNameBinding, withPrivateLinkAssignedPrefixHash,
   PRIVATE_LINK_RUNTIME_STAGES, privateLinkAtLeast, privateLinkCost, privateLinkPhase,
   verifyPrivateLinkControlContext, verifyPrivateLinkEnvironmentWire, withPrivateLinkControlValidation } from './private-link.mjs';
 import { collectPrivateLinkSnapshot, privateLinkGeneration, privateLinkHash as hash, privateLinkReadRequests,
@@ -71,7 +72,7 @@ function withDispatchValidation(c, context, values, use) {
       histories: [], continuations: [], originals: [], validated: false };
     dispatchValidations.set(validation, state);
     try {
-      const result = use(snapshot, validation);
+      const result = withPrivateLinkAssignedPrefixHash(snapshot.evidence, () => use(snapshot, validation));
       if (result && typeof result.then === 'function') return Promise.resolve(result).finally(() => dispatchValidations.delete(validation));
       dispatchValidations.delete(validation); return result;
     } catch (error) { dispatchValidations.delete(validation); throw error; }
@@ -461,6 +462,7 @@ function proofBindings(proof) {
     costReviewSha256: hash(proof.costReview), costEvidenceSha256: hash(proof.costEvidence),
     migrationReviewSha256: hash(proof.migrationReview), previewSha256: hash(proof.preview),
     validationSha256: hash(proof.validation), runtimeCompletionSha256: hash(proof.runtimeCompletion),
+    ...(proof.before.nameProjection ? { nameProjectionSha256: hash(proof.before.nameProjection) } : {}),
     ...(Object.hasOwn(proof, 'deploymentBefore') ? { deploymentBeforeSha256: hash(proof.deploymentBefore) } : {}) };
 }
 function verifyCostScope(c, context, evidence, snapshot, at) {
@@ -508,10 +510,20 @@ function verifyProof(c, context, evidence, phase, proof, at, validation = null) 
     const prefix = evidence.records.slice(0, STAGES.indexOf('assign-queue-role') + 1);
     equal(runtimeEvidence.records, prefix, 'PRIVATE_LINK_RUNTIME_CONTROL_LINEAGE_CHANGED');
     if (prefix.at(-1)?.stage !== 'assign-queue-role') fail('PRIVATE_LINK_RUNTIME_PREREQUISITES_REQUIRED');
-    const currentApp = proof.before.resources[context.plan.topology.ids.app];
+    const projection = proof.before.nameProjection ?? null;
+    const admitted = proof.runtimeCompletion.binding.runtimeReview?.nameProjection ?? null;
+    if (projection || admitted) {
+      if (!projection || !admitted) fail('PRIVATE_LINK_RETIREMENT_NAME_REVIEW_REQUIRED');
+      verifyPrivateLinkNameProjection(c, context, projection, at, evidence);
+      if (projection.sourceSha256 !== source) fail('PRIVATE_LINK_NAME_POLICY_CHANGED');
+      equal(privateLinkNameBinding(c, context, projection, evidence), privateLinkNameBinding(c, context, admitted, runtimeEvidence),
+        'PRIVATE_LINK_RETIREMENT_NAMES_CHANGED');
+    }
+    const currentApp = proof.before.resources[privateLinkRuntimeResources(c, context, projection, evidence).ids.app];
     equal(privateLinkResourceState(currentApp), privateLinkResourceState(proof.runtimeCompletion.disable.observation.app),
       'PRIVATE_LINK_QUALIFIED_REPLACEMENT_CHANGED');
   } else if (proof.runtimeCompletion !== null) fail('PRIVATE_LINK_UNEXPECTED_RUNTIME_AUTHORITY');
+  if (proof.before.nameProjection && !privateLinkAtLeast(phase.stage, 'retire-old-receiver')) fail('PRIVATE_LINK_NAME_STAGE_FORBIDDEN');
   if (phase.deploymentId && (proof.validation?.properties?.provisioningState !== 'Succeeded' ||
       proof.validation.error || proof.validation.properties.error || proof.validation.nextLink)) fail('PRIVATE_LINK_TEMPLATE_VALIDATION_REQUIRED');
 }
@@ -568,9 +580,11 @@ function checkWithValidation(c, context, evidence, phase, io, startedAt) {
 }
 async function checkPhase(c, context, evidence, phase, io, startedAt, validation) {
   const deadline = startedAt + LIMITS.checkMs, source = await io.sourceDigest(), state = dispatchValidation(c, context, validation);
+  const nameReviewSha256 = hash(io.nameProjection ?? null);
   let reviewed = null;
   const guard = () => {
     if (state) assertDispatchInputs(state);
+    if (hash(io.nameProjection ?? null) !== nameReviewSha256) fail('PRIVATE_LINK_NAME_REVIEW_CHANGED');
     if (reviewed) {
       equal(io.costReview, reviewed.costReview, 'PRIVATE_LINK_PREFLIGHT_BINDING_CHANGED');
       equal(io.costEvidence, reviewed.costEvidence, 'PRIVATE_LINK_PREFLIGHT_BINDING_CHANGED');
@@ -586,6 +600,11 @@ async function checkPhase(c, context, evidence, phase, io, startedAt, validation
   equal(phase, preparePhase(c, context, evidence, phase.stage, phase.policyRevision ?? null, phase.continuation ?? null,
     phase.stage === 'create-environment' ? 2 : 1, validation), 'PRIVATE_LINK_PREPARED_PHASE_CHANGED');
   if (source !== phaseSource(c, context, phase, io.now())) fail('PRIVATE_LINK_SOURCE_CHANGED');
+  if (io.nameProjection) {
+    if (!privateLinkAtLeast(phase.stage, 'retire-old-receiver')) fail('PRIVATE_LINK_NAME_STAGE_FORBIDDEN');
+    verifyPrivateLinkNameProjection(c, context, io.nameProjection, io.now(), evidence);
+    if (io.nameProjection.sourceSha256 !== source) fail('PRIVATE_LINK_NAME_POLICY_CHANGED');
+  }
   // Finish synchronous source/history validation before spawning bounded reads.
   await io.verifySources(deadline, validation);
   guard();
@@ -597,7 +616,7 @@ async function checkPhase(c, context, evidence, phase, io, startedAt, validation
   ]);
   guard();
   verifyPrivateLinkSnapshot(c, context, before, originalState(evidence), environmentWireVersion(evidence),
-    privateLinkNsgValidationFor(c, context, externalNsg(evidence), validation));
+    privateLinkNsgValidationFor(c, context, externalNsg(evidence), validation), evidence);
   if (phase.stage === 'review-migration') equal(await io.nspHead(), context.origin.pendingHead, 'PRIVATE_LINK_ORIGINAL_PENDING_HEAD_CHANGED');
   const preview = phase.deploymentId ? deploymentPreview : { validation: null, preview: {
     version: 1, kind: 'exact-private-link-request-preimage', request: phase.request,
@@ -630,11 +649,20 @@ export function verifyPrivateLinkApproval(c, context, phase, proof, approval, at
       approval.phaseSha256 !== hash(phase) || approval.bindingSha256 !== hash(proof.binding) ||
       approval.sourceSha256 !== phaseSource(c, context, phase, at) || approval.requestSha256 !== hash(phase.request)) fail('PRIVATE_LINK_EXACT_APPROVAL_REQUIRED');
   if (phase.continuation) boundedReview(phase.continuation.review, at);
+  if (proof.before?.nameProjection) {
+    verifyPrivateLinkNameProjection(c, context, proof.before.nameProjection, at);
+    if (proof.before.nameProjection.sourceSha256 !== approval.sourceSha256) fail('PRIVATE_LINK_NAME_POLICY_CHANGED');
+  }
 }
 function verifyTransition(c, context, phase, before, after, evidence, validation = null) {
   verifyPrivateLinkSnapshot(c, context, after, phase.stage,
     phase.stage === 'create-environment' ? phase.version : environmentWireVersion(evidence),
-    privateLinkNsgValidationFor(c, context, phaseExternalNsg(evidence, phase), validation));
+    privateLinkNsgValidationFor(c, context, phaseExternalNsg(evidence, phase), validation), evidence);
+  if (after.nameProjection || before.nameProjection) {
+    if (!after.nameProjection || !before.nameProjection) fail('PRIVATE_LINK_NAME_REVIEW_CHANGED');
+    equal(privateLinkNameBinding(c, context, after.nameProjection, evidence),
+      privateLinkNameBinding(c, context, before.nameProjection, evidence), 'PRIVATE_LINK_NAME_REVIEW_CHANGED');
+  }
   const n = context.plan.topology.ids, q = context.origin.adoption.topology.ids;
   for (const [id, previous] of Object.entries(before.resources)) if (previous && after.resources[id]) {
     equal(privateLinkGeneration(previous), privateLinkGeneration(after.resources[id]), 'PRIVATE_LINK_GENERATION_CHANGED');
@@ -823,7 +851,7 @@ async function verifyCurrent(c, context, evidence, phase, proof, io, deadline, p
     phase.continuation && phase.deploymentId ? io.read({ id: phase.deploymentId, apiVersion: API.deployment, filter: null }, deadline) : null]);
   if (phase.continuation && deploymentBefore !== null) fail('PRIVATE_LINK_CONTINUATION_DEPLOYMENT_PRESENT');
   verifyPrivateLinkSnapshot(c, context, current, originalState(evidence), environmentWireVersion(evidence),
-    privateLinkNsgValidationFor(c, context, externalNsg(evidence), validation));
+    privateLinkNsgValidationFor(c, context, externalNsg(evidence), validation), evidence);
   verifyCostScope(c, context, evidence, current, io.now());
   equal(snapshotState(current), snapshotState(proof.before), 'PRIVATE_LINK_DISPATCH_PREIMAGE_CHANGED');
   for (const key of ['providers', 'permissions', 'policy']) equal(controls[key], proof[key], 'PRIVATE_LINK_DISPATCH_GOVERNANCE_CHANGED');
@@ -870,6 +898,7 @@ async function executePhase(c, context, evidence, phase, proof, approval, io, va
   await io.saveJournal(journal);
   const guard = () => {
     if (state) assertDispatchInputs(state);
+    if (hash(io.nameProjection ?? null) !== hash(proof.before.nameProjection ?? null)) fail('PRIVATE_LINK_NAME_REVIEW_CHANGED');
     verifyPrivateLinkApproval(c, context, phase, proof, approval, io.now());
     verifyPrivateLinkCostReview(c, context, proof.costReview, proof.costEvidence, phase.sourceSha256, io.now());
     verifyPrivateLinkMigrationReview(c, context, proof.migrationReview, io.now(), phase.sourceSha256);
@@ -1003,6 +1032,11 @@ function verifyRecovery(c, context, prior, record, validation) {
   equal(original.intent, record.intent, 'PRIVATE_LINK_ORIGINAL_INTENT_CHANGED');
   equal(original.journal, record.journal, 'PRIVATE_LINK_ORIGINAL_JOURNAL_CHANGED');
   fresh(proposal.after, at);
+  if (Boolean(proposal.after.nameProjection) !== Boolean(record.after.nameProjection)) fail('PRIVATE_LINK_NAME_REVIEW_CHANGED');
+  for (const snapshot of [proposal.after, record.after]) if (snapshot.nameProjection) {
+    verifyPrivateLinkNameProjection(c, context, snapshot.nameProjection, at, prior);
+    equal(snapshot.nameProjection.publication, recovery.currentPublication, 'PRIVATE_LINK_NAME_POLICY_CHANGED');
+  }
   if (record.after.startedAt < canonicalInstant(review.approvedAt) || record.after.completedAt > at) fail('PRIVATE_LINK_RECOVERY_FRESH_READ_REQUIRED');
   equal(snapshotState(record.after), snapshotState(proposal.after), 'PRIVATE_LINK_RECONCILIATION_STATE_CHANGED');
   equal(record.deployment, proposal.deployment, 'PRIVATE_LINK_RECOVERY_DEPLOYMENT_CHANGED');
@@ -1042,7 +1076,7 @@ export function verifyPrivateLinkOriginalNoSubmission(c, context, evidence, orig
 }
 function verifyNoSubmissionCurrent(c, context, evidence, original, after, validation = null) {
   const adoption = privateLinkNsgValidationFor(c, context, externalNsg(evidence), validation);
-  verifyPrivateLinkSnapshot(c, context, after, originalState(evidence), environmentWireVersion(evidence), adoption);
+  verifyPrivateLinkSnapshot(c, context, after, originalState(evidence), environmentWireVersion(evidence), adoption, evidence);
   if (adoption && original.phase.externalAdoptionSha256 === undefined) {
     privateLinkNsgOriginalBaseline(c, context, adoption, after, original);
   } else equal(snapshotState(after), snapshotState(original.preflight.before), 'PRIVATE_LINK_NOT_SUBMITTED_STATE_CONFLICT');
@@ -1052,7 +1086,8 @@ export async function reconcilePrivateLinkPhase(c, context, evidence, original, 
 }
 function recoveryInputs(io, original) {
   return { publication: io.publication, policyRevision: io.policyRevision ?? original.phase.policyRevision ?? null,
-    costReview: io.costReview, costEvidence: io.costEvidence, migrationReview: io.migrationReview };
+    costReview: io.costReview, costEvidence: io.costEvidence, migrationReview: io.migrationReview,
+    ...(io.nameProjection ? { nameProjection: io.nameProjection } : {}) };
 }
 function recoveryGuard(c, context, original, io, validation, startedAt, review = null) {
   const state = dispatchValidation(c, context, validation);
@@ -1061,6 +1096,14 @@ function recoveryGuard(c, context, original, io, validation, startedAt, review =
     equal(recoveryInputs(io, original), state.reviews, 'PRIVATE_LINK_RECOVERY_INPUT_CHANGED');
   }
   const source = verifyPrivateLinkPolicyRevision(c, context, io.policyRevision ?? original.phase.policyRevision ?? null, io.now());
+  if (io.nameProjection) {
+    const prefix = original.preflight.runtimeCompletion?.controlEvidence;
+    if (!prefix || !original.preflight.before.nameProjection) fail('PRIVATE_LINK_NAME_RECOVERY_ORIGIN_REQUIRED');
+    verifyPrivateLinkNameProjection(c, context, io.nameProjection, io.now(), prefix);
+    equal(privateLinkNameBinding(c, context, io.nameProjection, prefix),
+      privateLinkNameBinding(c, context, original.preflight.before.nameProjection, prefix), 'PRIVATE_LINK_NAME_RECOVERY_ORIGIN_CHANGED');
+    if (source !== io.nameProjection.sourceSha256) fail('PRIVATE_LINK_NAME_POLICY_CHANGED');
+  }
   if (review) boundedReview(review, io.now());
   verifyPrivateLinkCostReview(c, context, io.costReview, io.costEvidence, source, io.now());
   verifyPrivateLinkMigrationReview(c, context, io.migrationReview, io.now(), source);
@@ -1241,6 +1284,10 @@ export function verifyPrivateLinkNoSubmissionResolution(c, context, evidence, re
     equal(p.pendingHead, pendingHead(context, evidence, original.intent, original.phase), 'PRIVATE_LINK_PENDING_HEAD_CHANGED');
     equal(p.policyRevision, resolution.policyRevision, 'PRIVATE_LINK_POLICY_REVISION_CHANGED');
     fresh(p.after, at);
+    if (p.after.nameProjection) {
+      verifyPrivateLinkNameProjection(c, context, p.after.nameProjection, at, evidence);
+      equal(p.after.nameProjection.publication, resolution.publication, 'PRIVATE_LINK_NAME_POLICY_CHANGED');
+    }
     verifyNoSubmissionCurrent(c, context, evidence, original, p.after, validation);
   }
   if (observed.after.startedAt < canonicalInstant(review.approvedAt)) fail('PRIVATE_LINK_NO_SUBMISSION_FRESH_READ_REQUIRED');
@@ -1293,7 +1340,7 @@ function runtimePrerequisites(c, context, evidence, at, validation) {
   if (!terminal || !privateLinkAtLeast(terminal.stage, 'assign-queue-role')) fail('PRIVATE_LINK_RUNTIME_PREREQUISITES_REQUIRED');
   const s = terminal.after, n = context.plan.topology.ids, q = context.origin.adoption.topology.ids;
   const path = verifyPrivateLinkSnapshot(c, context, s, terminal.stage, environmentWireVersion(evidence),
-    privateLinkNsgValidationFor(c, context, externalNsg(evidence), validation));
+    privateLinkNsgValidationFor(c, context, externalNsg(evidence), validation), evidence);
   return { version: 1, kind: 'private-link-runtime-prerequisites', controlHeadSha256: hash(privateLinkHead(context, evidence)),
     planSha256: context.plan.planSha256, queueTopology: context.origin.adoption.topology,
     queueResources: Object.fromEntries([q.account, q.service, q.queue].map(id => [id, s.resources[id]])),
@@ -1313,10 +1360,13 @@ export function privateLinkReadIO(c, context, directory, invoke = az, options = 
 }
 function readIO(c, context, directory, invoke, options) {
   verifyPrivateLinkControlContext(c, context);
-  const now = options.now ?? Date.now, allowed = new Set(), policy = new Set(), r = ids(c), n = context.plan.topology.ids;
+  const now = options.now ?? Date.now, allowed = new Set(), policy = new Set(), r = ids(c);
+  const nameProjection = options.nameProjection ?? null, projectionEvidence = options.projectionEvidence ?? null;
+  if (nameProjection && !projectionEvidence) fail('PRIVATE_LINK_NAME_PREFIX_REQUIRED');
+  const n = privateLinkRuntimeResources(c, context, nameProjection, projectionEvidence, now()).ids;
   const key = request => json([request.id.toLowerCase(), request.apiVersion, request.filter ?? null]);
   const allow = request => allowed.add(key(request));
-  for (const d of privateLinkResourceDescriptors(c, context)) allow({ ...d, filter: null });
+  for (const d of privateLinkResourceDescriptors(c, context, nameProjection, projectionEvidence)) allow({ ...d, filter: null });
   for (const { parent, ...request } of Object.values(privateLinkReadRequests(c, context))) allow(request);
   for (const id of [n.vnet, n.endpoint, n.dnsZone, n.environment, n.app, n.account, context.origin.adoption.topology.ids.service,
     n.oldApp, n.oldEnvironment, context.origin.network.topology.ids.perimeter, r.workspace, r.dcr, ...(n.publicProbe ? [n.publicProbe] : [])]) allow({
@@ -1348,6 +1398,7 @@ function readIO(c, context, directory, invoke, options) {
   const limited = (args, timeout, deadline) => scheduleRead(() => dispatch(args, timeout, deadline)), batch = readBatch;
   const retain = (kind, value) => savePrivateLinkArtifact(directory, `private-link-${kind}-${randomUUID()}.json`, value);
   const io = { now, batch, scheduleRead, invokeRead: limited, sourceDigest: options.sourceDigest ?? sourceDigest, sleep: options.sleep ?? sleep, retain,
+    ...(nameProjection ? { nameProjection, projectionEvidence } : {}),
     allowPolicyRead: request => policy.add(key(request)),
     account: deadline => limited(['account', 'show', '--subscription', c.subscriptionId, '--only-show-errors', '--output', 'json'], LIMITS.commandMs, deadline),
     registry: async deadline => {
@@ -1511,7 +1562,9 @@ export async function runPrivateLinkNsgAdoption(c, context, evidence, operation,
   finally { await lock.close(); await rm(lockPath); }
 }
 export function privateLinkAzureIO(c, context, evidence, phase, directory, inputs, invoke = az, options = {}) {
-  const io = privateLinkReadIO(c, context, directory, invoke, options), root = options.store?.root ?? resolve(here, '.operator-private');
+  if (inputs.nameProjection && !privateLinkAtLeast(phase.stage, 'retire-old-receiver')) fail('PRIVATE_LINK_NAME_STAGE_FORBIDDEN');
+  const io = privateLinkReadIO(c, context, directory, invoke, { ...options, nameProjection: inputs.nameProjection,
+    projectionEvidence: evidence }), root = options.store?.root ?? resolve(here, '.operator-private');
   const readStore = options.store?.read ?? loadPrivateLinkArtifact, saveStore = options.store?.save ?? updatePrivateLinkArtifact;
   const immutableStore = options.store?.saveImmutable ?? savePrivateLinkArtifact;
   const publication = inputs.publication;
@@ -1524,6 +1577,10 @@ export function privateLinkAzureIO(c, context, evidence, phase, directory, input
     if (await io.sourceDigest() !== source || publication.sourceSha256 !== source ||
         await (options.lookup ?? publishedSourceDigest)(publication.commitSha) !== publication.sourceSha256) fail('PRIVATE_LINK_PUBLISHED_SOURCE_CHANGED');
     if (policyRevision && !isDeepStrictEqual(policyRevision.publication, publication)) fail('PRIVATE_LINK_POLICY_PUBLICATION_CHANGED');
+    if (inputs.nameProjection) {
+      verifyPrivateLinkNameProjection(c, context, inputs.nameProjection, io.now(), evidence);
+      equal(inputs.nameProjection.publication, publication, 'PRIVATE_LINK_NAME_POLICY_CHANGED');
+    }
     if (continuation) verifyPrivateLinkContinuation(c, context, evidence, phase.stage,
       inputs.original ? inputs.original.phase.sourceSha256 : source, continuation,
       inputs.original ? canonicalInstant(inputs.original.intent.at) : io.now(), validation);
@@ -1708,7 +1765,13 @@ export async function currentPrivateLinkRuntimeProof(c, context, evidence, direc
 }
 async function currentRuntimeProof(c, context, evidence, directory, invoke, options, at, deadline, validation) {
   const prerequisites = runtimePrerequisites(c, context, evidence, at, validation);
-  const io = privateLinkReadIO(c, context, directory, invoke, options), source = await io.sourceDigest();
+  const originalNameProjection = options.nameProjection ?? null;
+  const nameProjection = originalNameProjection ? immutableDispatchCopy(originalNameProjection) : null;
+  const nameReviewSha256 = hash(nameProjection);
+  const view = privateLinkRuntimeResources(c, context, nameProjection, evidence, at);
+  const io = privateLinkReadIO(c, context, directory, invoke, { ...options, nameProjection, projectionEvidence: evidence }), source = await io.sourceDigest();
+  if (nameProjection && (nameProjection.sourceSha256 !== source ||
+      await (options.lookup ?? publishedSourceDigest)(nameProjection.publication.commitSha) !== source)) fail('PRIVATE_LINK_NAME_POLICY_CHANGED');
   const terminal = evidence.records.at(-1);
   const revision = options.policyRevision ?? terminal.recovery?.policyRevision ?? terminal.phase.policyRevision ?? null;
   if (source !== verifyPrivateLinkPolicyRevision(c, context, revision, io.now())) fail('PRIVATE_LINK_SOURCE_CHANGED');
@@ -1719,17 +1782,19 @@ async function currentRuntimeProof(c, context, evidence, directory, invoke, opti
   const guard = () => {
     const state = dispatchValidation(c, context, validation);
     if (state) assertDispatchInputs(state);
+    if (hash(options.nameProjection ?? null) !== nameReviewSha256) fail('PRIVATE_LINK_NAME_REVIEW_CHANGED');
     if (options.cancelled?.() || io.now() >= deadline) fail('PRIVATE_LINK_RUNTIME_PROOF_EXPIRED');
+    if (nameProjection) verifyPrivateLinkNameProjection(c, context, nameProjection, io.now(), evidence);
   };
   guard();
   const collection = snapshotWithTargets(c, context, io, deadline, adoption);
   const policyTask = (async () => {
     const targets = await collection.targets, { resources } = targets;
-    const policyResources = privateLinkResourceDescriptors(c, context).filter(d => {
+    const policyResources = privateLinkResourceDescriptors(c, context, nameProjection, evidence).filter(d => {
       const resource = resources[d.id];
-      return resource && ![context.plan.topology.ids.app, context.plan.topology.ids.oldApp,
-        context.plan.topology.ids.oldEnvironment, context.plan.topology.ids.managedGroup, context.plan.topology.ids.publicProbe,
-        context.plan.topology.ids.ingestIdentity, context.plan.topology.ids.pullIdentity].includes(d.id) &&
+      return resource && ![view.ids.app, view.ids.oldApp,
+        view.ids.oldEnvironment, view.ids.managedGroup, view.ids.publicProbe,
+        view.ids.ingestIdentity, view.ids.pullIdentity].includes(d.id) &&
         !resource.type?.startsWith('Microsoft.Consumption/') && !resource.type?.startsWith('Microsoft.ManagedIdentity/');
     }).map(d => {
       const resource = resources[d.id];
@@ -1747,7 +1812,8 @@ async function currentRuntimeProof(c, context, evidence, directory, invoke, opti
       for (const value of Object.values(privateLinkNsgMembers(targets.externalNsg))) policyResources.push({ id: value.id,
         type: 'Microsoft.Network/networkSecurityGroups', apiVersion: API.network, expected: value });
     }
-    if (context.plan.publicProbe) policyResources.push(structuredClone(context.plan.publicProbe));
+    if (context.plan.publicProbe) policyResources.push(structuredClone(view.resources.publicProbe));
+    if (nameProjection) policyResources.push(structuredClone(view.resources.app));
     const policyPhase = { version: 1, kind: 'private-link-runtime-effective-policy', planSha256: context.plan.planSha256, resources: policyResources };
     const policy = await collectEffectivePoliciesV3(policyPhase, async (id, apiVersion, filter) => {
       const request = { id, apiVersion, filter: filter ?? null }; io.allowPolicyRead(request);
@@ -1766,7 +1832,7 @@ async function currentRuntimeProof(c, context, evidence, directory, invoke, opti
   }
   const [head, snapshot, policy] = values;
   guard();
-  const currentPath = verifyPrivateLinkSnapshot(c, context, snapshot, originalState(evidence), environmentWireVersion(evidence), checkedAdoption);
+  const currentPath = verifyPrivateLinkSnapshot(c, context, snapshot, originalState(evidence), environmentWireVersion(evidence), checkedAdoption, evidence);
   verifyCostScope(c, context, evidence, snapshot, io.now());
   for (const [id, previous] of Object.entries(terminal.after.resources)) {
     if (!previous || sameId(id, context.plan.topology.ids.app)) continue;
@@ -1789,12 +1855,17 @@ async function currentRuntimeProof(c, context, evidence, directory, invoke, opti
     effectivePolicy: policy, preservedResourceIds: privateLinkPreservedIds(c, context, snapshot, checkedAdoption),
     billingReview: options.costReview ?? currentReview.costReview, costEvidence: options.costEvidence ?? currentReview.costEvidence,
     policyRevision: revision,
+    ...(nameProjection ? { nameProjection: structuredClone(nameProjection), nameBinding: privateLinkNameBinding(c, context, nameProjection, evidence) } : {}),
     prerequisites: { ...prerequisites, environment: snapshot.resources[context.plan.topology.ids.environment] } };
   guard();
   return result;
 }
 export async function runPrivateLinkControl(c, context, evidence, stage, operation, directoryArg, inputs = {}, options = {}) {
   const startedAt = (options.now ?? Date.now)();
+  if (Object.hasOwn(inputs, 'nameProjection')) {
+    if (!privateLinkAtLeast(stage, 'retire-old-receiver')) fail('PRIVATE_LINK_NAME_STAGE_FORBIDDEN');
+    verifyPrivateLinkNameProjection(c, context, inputs.nameProjection, startedAt, evidence);
+  }
   if (['reconcile', 'recover'].includes(operation) && Object.hasOwn(inputs, 'continuation')) fail('PRIVATE_LINK_CONTINUATION_FROM_ORIGINAL_ONLY');
   const directory = await privateDirectory(directoryArg);
   const deferred = ['check', 'execute', 'retire'].includes(operation) && externalNsg(evidence);

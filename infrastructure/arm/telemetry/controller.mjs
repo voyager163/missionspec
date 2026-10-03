@@ -2650,6 +2650,8 @@ export async function dispatchPrivateLinkOperation(c, operation, stage, director
       ...(stage.startsWith('retire-old-') || stage.includes('steady-budget') || stage === 'record-migration' ? ['runtimeCompletion'] : []),
     ];
     if (inputs && Object.hasOwn(inputs, 'policyRevision')) fields.push('policyRevision');
+    if (['retire-old-receiver', 'retire-old-environment', 'set-project-steady-budget', 'set-telemetry-steady-budget', 'record-migration'].includes(stage) &&
+        inputs && Object.hasOwn(inputs, 'nameProjection')) fields.push('nameProjection');
     if (['prepare', 'check', 'execute', 'retire'].includes(action) &&
         inputs && Object.hasOwn(inputs, 'continuation')) fields.push('continuation');
     if (evidence.version === 2 && ['reconcile', 'recover'].includes(action)) fields.push('originalDirectory');

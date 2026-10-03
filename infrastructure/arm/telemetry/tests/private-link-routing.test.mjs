@@ -183,3 +183,26 @@ test('runtime held errors propagate and successful cleanup does not become windo
     assert.deepEqual(f.writes, []);
   }
 });
+
+
+test('reviewed runtime names are forwarded only for the five post-runtime control stages', async () => {
+  const stages = ['retire-old-receiver', 'retire-old-environment', 'set-project-steady-budget', 'set-telemetry-steady-budget', 'record-migration'];
+  for (const [command, action] of Object.entries(PRIVATE_LINK_CONTROL_COMMANDS)) {
+    for (const stage of [...stages, 'create-network']) {
+      const allowed = stages.includes(stage);
+      const inputs = { ...(action === 'prepare' ? {} : { publication: {}, costReview: {}, costEvidence: {}, migrationReview: {},
+        ...(allowed ? { runtimeCompletion: {} } : {}),
+        ...(['execute', 'retire'].includes(action) ? { proof: {}, approval: {} } : {}),
+        ...(['reconcile', 'recover'].includes(action) ? { original: {} } : {}),
+        ...(action === 'recover' ? { proposal: {}, recoveryReview: {} } : {}) }), nameProjection: { version: 1 } };
+      const f = fixture(inputs);
+      if (allowed) {
+        await dispatchPrivateLinkOperation(c, command, stage, 'unit', f.io);
+        assert.deepEqual(f.calls.at(-1).at(-1), inputs);
+      } else {
+        await assert.rejects(dispatchPrivateLinkOperation(c, command, stage, 'unit', f.io), /CLOSED_INPUT_REQUIRED/);
+        assert(!f.calls.some(value => value[0] === 'control'));
+      }
+    }
+  }
+});

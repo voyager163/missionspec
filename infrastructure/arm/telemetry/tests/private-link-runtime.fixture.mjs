@@ -3,7 +3,7 @@ import { candidateFixture } from './receiver-upgrade.fixture.mjs';
 import { baseFixture, queueCandidateFixture } from './durable-queue.fixture.mjs';
 import { privateLinkRuntimeTarget, privateRuntimePhase, createPrivateLinkReceiver,
   qualifyPrivateLinkDelivery, privateLinkWindowBinding, verifyPrivateLinkRuntimeCompletion,
-  privateProbeProgram, privateLinkExecEndpoint, publicControlTarget } from '../private-link-runtime.mjs';
+  privateProbeProgram, privateLinkExecEndpoint, publicControlTarget, privateLinkRuntimeBinding } from '../private-link-runtime.mjs';
 
 // Generated offline evidence only. No fixture is a live approval, publication or Azure observation.
 export function runtimeFixture() {
@@ -121,16 +121,17 @@ export function runtimeProbeFixture(c, target, observation, candidate, prerequis
 }
 
 // Composes real control evidence with the production runtime driver; every cloud effect remains inert.
-export async function privateRuntimeCompletionFixture(f, evidence, prerequisites) {
+export async function privateRuntimeCompletionFixture(f, evidence, prerequisites, options = {}) {
   const { c, context, candidate } = f, r = ids(c), hash = value => digest(json(value));
-  const target = privateLinkRuntimeTarget(c, context, candidate, prerequisites);
+  const target = privateLinkRuntimeTarget(c, context, candidate, prerequisites, options.runtimeReview ?? null, evidence);
   const instanceId = '00000000-0000-4000-8000-000000000088';
   const identityValues = { [r.ingestIdentity]: prerequisites.identity, [r.pullIdentity]: prerequisites.pullIdentity };
   const store = new Map();
-  let now = f.at, flag = 'false', created = false, publicCreated = false, publicCreatedAt = f.at;
+  let now = f.at, flag = 'false', created = false, publicCreated = false, publicCreatedAt = f.at, activeSource = f.source;
+  let activeCommit = options.runtimeReview?.nameProjection?.publication.commitSha ?? 'c'.repeat(40);
   const publicTarget = publicControlTarget(c, target, context, evidence);
-  const approval = (action, binding) => ({ version: 1, action, bindingSha256: hash(binding), sourceSha256: f.source,
-    policyCommitSha: 'c'.repeat(40), approvedAt: new Date(now - 1000).toISOString(), expiresAt: new Date(now + 1800000).toISOString() });
+  const approval = (action, binding) => ({ version: 1, action, bindingSha256: hash(binding), sourceSha256: activeSource,
+    policyCommitSha: activeCommit, approvedAt: new Date(now - 1000).toISOString(), expiresAt: new Date(now + 1800000).toISOString() });
   const response = status => ({ status, errorCode: null, tlsVerified: true, bodyBytes: 0, durationMs: 30, headerPolicy: { noStore: true } });
   const observe = selected => {
     const isPublic = selected.appId === publicTarget.appId;
@@ -156,13 +157,13 @@ export async function privateRuntimeCompletionFixture(f, evidence, prerequisites
   const io = {
     now: () => now, sleep: async ms => { now += ms; }, verifyPrerequisites: () => prerequisites,
     published: async () => {}, verifySource: async () => {}, inventory: async () => candidate.publication,
-    sourceDigest: async () => f.source, load: async name => store.get(name) ?? null,
+    sourceDigest: async () => activeSource, load: async name => store.get(name) ?? null,
     save: async (name, value) => store.set(name, structuredClone(value)),
     immutable: async (name, value) => { if (store.has(name)) throw new Error('UNIT_HISTORY_REPLAY'); store.set(name, structuredClone(value)); },
     reserve: async (kind, key, value) => { const name = `${kind}-${key}`; if (store.has(name)) throw new Error('UNIT_FENCE_REPLAY');
       store.set(name, structuredClone(value)); },
     windowHead: async intent => store.get(`window-${intent.physicalKey}`),
-    current: async () => ({ sourceSha256: f.source, headSha256: prerequisites.controlHeadSha256, prerequisites,
+    current: async () => ({ sourceSha256: activeSource, headSha256: prerequisites.controlHeadSha256, prerequisites,
       preservedResourceIds: Object.keys(evidence.records.at(-1).after.resources).filter(id =>
         evidence.records.at(-1).after.resources[id] !== null) }),
     identities: async () => identityValues,
@@ -191,22 +192,26 @@ export async function privateRuntimeCompletionFixture(f, evidence, prerequisites
     },
     probe: async (selected, observation, image, _prereq, _transport, _until, guard, mode = 'private') => {
       guard();
-      return runtimeProbeFixture(c, selected, observation, image, prerequisites, f.source, prerequisites.controlHeadSha256, now, mode);
+      return runtimeProbeFixture(c, selected, observation, image, prerequisites, activeSource, prerequisites.controlHeadSha256, now, mode);
     },
   };
   const phase = privateRuntimePhase(c, target, instanceId, 'create-disabled', hash(evidence));
-  const createBinding = { version: 1, configSha256: hash(c), planSha256: hash(context.plan), originSha256: hash(context.origin),
-    controlEvidenceSha256: hash(evidence), candidateSha256: hash(candidate), targetSha256: hash(target), phaseSha256: hash(phase) };
+  const createBinding = { ...privateLinkRuntimeBinding(c, context, evidence, candidate, options.runtimeReview ?? null),
+    targetSha256: hash(target), phaseSha256: hash(phase) };
   const disabled = await createPrivateLinkReceiver(c, context, evidence, candidate, instanceId,
-    approval('private-link-create-disabled-receiver', createBinding), '/UNIT', { io });
+    approval('private-link-create-disabled-receiver', createBinding), '/UNIT', { io, runtimeReview: options.runtimeReview });
+  now += options.afterCreateMs ?? 0;
+  const windowReview = options.windowReview ?? options.runtimeReview ?? null;
+  activeSource = windowReview?.costReview.sourceSha256 ?? activeSource;
+  activeCommit = windowReview?.nameProjection?.publication.commitSha ?? activeCommit;
   const transport = { pythonPath: '/UNIT/python', pythonSha256: digest('UNIT python'), bridgeSha256: digest('UNIT bridge') };
-  const binding = privateLinkWindowBinding(c, context, evidence, candidate, disabled, instanceId, transport);
+  const binding = privateLinkWindowBinding(c, context, evidence, candidate, disabled, instanceId, transport, windowReview);
   const approvals = { enable: approval('private-link-bounded-enable', binding), disable: approval('private-link-false-only-disable', binding),
     publicCreate: approval('private-link-create-public-control', binding), publicDelete: approval('private-link-delete-public-control', binding) };
-  const completion = await qualifyPrivateLinkDelivery(c, context, evidence, candidate, disabled, instanceId, approvals, transport, '/UNIT', { io });
+  const completion = await qualifyPrivateLinkDelivery(c, context, evidence, candidate, disabled, instanceId, approvals, transport, '/UNIT', { io, runtimeReview: windowReview });
   if (completion.outcome !== 'qualified-private-delivery-disabled') throw new Error(JSON.stringify({
     failure: completion.failure, disableFailure: completion.disableFailure, outcome: completion.outcome,
   }));
   verifyPrivateLinkRuntimeCompletion(c, context, completion, now);
-  return { completion, disabled, target, at: now, store };
+  return { completion, disabled, target, at: now, store, io };
 }

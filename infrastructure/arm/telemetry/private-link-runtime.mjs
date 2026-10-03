@@ -12,6 +12,8 @@ import { QUEUE_RUNTIME, queueEnvironment } from './durable-queue.mjs';
 import { queueArmInstant } from './queue-adoption.mjs';
 import { privateLinkAcaCreationIdentity } from './private-link-readback.mjs';
 import { verifyPrivateLinkPolicyRevision, verifyPrivateLinkCostReview } from './private-link-controller.mjs';
+import { verifyPrivateLinkNameProjection, privateLinkNameBinding, verifyPrivateLinkNameBinding,
+  privateLinkRuntimeResources, privateLinkRuntimeNameIds, verifyPrivateLinkRuntimeName } from './private-link.mjs';
 import { loadPrivateLinkArtifact, savePrivateLinkArtifact, updatePrivateLinkArtifact } from './private-link-artifacts.mjs';
 import { az, sourceDigest, publishedSourceDigest, verifyReceiverSource, saveImmutable, save, load,
   emptyAcrReferrers, safeOperationFailure, syntheticHttp, readSyntheticQuery, asyncWhatIf, privateDirectory,
@@ -48,14 +50,17 @@ function review(value, action, binding, at) {
   if (selected) {
     const revision = selected.policyRevision;
     const image = selected.imageProfileRevision;
+    const names = selected.nameProjection;
     if (value.sourceSha256 !== selected.costReview.sourceSha256 ||
         revision && (value.sourceSha256 !== revision.sourceSha256 || value.policyCommitSha !== revision.publication.commitSha) ||
-        image && (value.sourceSha256 !== image.sourceSha256 || value.policyCommitSha !== image.publication.commitSha)) fail('PRIVATE_RUNTIME_REVIEW_SOURCE_CHANGED');
+        image && (value.sourceSha256 !== image.sourceSha256 || value.policyCommitSha !== image.publication.commitSha) ||
+        names && (value.sourceSha256 !== names.sourceSha256 || value.policyCommitSha !== names.publication.commitSha)) fail('PRIVATE_RUNTIME_REVIEW_SOURCE_CHANGED');
     if (!['private-link-false-only-disable', 'private-link-delete-public-control'].includes(action)) {
       if (at < canonicalInstant(selected.costReview.approvedAt) || at >= canonicalInstant(selected.costReview.expiresAt) ||
           at - canonicalInstant(selected.costEvidence.retrievedAt) > 86400000 ||
           revision && (at < canonicalInstant(revision.approvedAt) || at >= canonicalInstant(revision.expiresAt)) ||
-          image && (at < canonicalInstant(image.approvedAt) || at >= canonicalInstant(image.expiresAt))) fail('PRIVATE_RUNTIME_CURRENT_REVIEW_EXPIRED');
+          image && (at < canonicalInstant(image.approvedAt) || at >= canonicalInstant(image.expiresAt)) ||
+          names && (at < canonicalInstant(names.approvedAt) || at >= canonicalInstant(names.expiresAt))) fail('PRIVATE_RUNTIME_CURRENT_REVIEW_EXPIRED');
     }
   }
 }
@@ -137,25 +142,34 @@ export function verifyImageProfileRevision(c, context, profile, revision, at) {
 }
 export function verifyRuntimeReview(c, context, value, at) {
   closed(value, ['policyRevision', 'costReview', 'costEvidence',
-    ...(Object.hasOwn(value ?? {}, 'imageProfileRevision') ? ['imageProfileRevision'] : [])]);
+    ...(Object.hasOwn(value ?? {}, 'imageProfileRevision') ? ['imageProfileRevision'] : []),
+    ...(Object.hasOwn(value ?? {}, 'nameProjection') ? ['nameProjection'] : [])]);
   const source = verifyPrivateLinkPolicyRevision(c, context, value.policyRevision, at);
   verifyPrivateLinkCostReview(c, context, value.costReview, value.costEvidence, source, at);
   if (Object.hasOwn(value, 'imageProfileRevision')) {
     imageRevisionReview(c, context, value.imageProfileRevision, source, at);
     if (value.policyRevision) equal(value.imageProfileRevision.publication, value.policyRevision.publication, 'PRIVATE_IMAGE_REVISION_SOURCE_CHANGED');
   }
+  if (Object.hasOwn(value, 'nameProjection')) {
+    verifyPrivateLinkNameProjection(c, context, value.nameProjection, at);
+    if (value.nameProjection.sourceSha256 !== source) fail('PRIVATE_LINK_NAME_POLICY_CHANGED');
+    if (value.policyRevision) equal(value.nameProjection.publication, value.policyRevision.publication, 'PRIVATE_LINK_NAME_POLICY_CHANGED');
+  }
   return source;
 }
 function runtimeReviewTime(runtimeReview) {
   return Math.max(canonicalInstant(runtimeReview.costReview.approvedAt),
     runtimeReview.policyRevision === null ? 0 : canonicalInstant(runtimeReview.policyRevision.approvedAt),
-    runtimeReview.imageProfileRevision === undefined ? 0 : canonicalInstant(runtimeReview.imageProfileRevision.approvedAt));
+    runtimeReview.imageProfileRevision === undefined ? 0 : canonicalInstant(runtimeReview.imageProfileRevision.approvedAt),
+    runtimeReview.nameProjection === undefined ? 0 : canonicalInstant(runtimeReview.nameProjection.approvedAt));
 }
 function runtimeBinding(c, context, evidence, candidate, runtimeReview = null) {
   closed(context, ['plan', 'origin']);
   if (candidate?.version !== 2) fail('PRIVATE_RUNTIME_QUEUED_CANDIDATE_REQUIRED');
   if (runtimeReview !== null) verifyRuntimeReview(c, context, runtimeReview, runtimeReviewTime(runtimeReview));
   planCandidate(c, context, candidate, runtimeReview);
+  if (runtimeReview?.nameProjection) verifyPrivateLinkNameProjection(c, context, runtimeReview.nameProjection,
+    runtimeReviewTime(runtimeReview), evidence);
   return { version: 1, configSha256: hash(c), planSha256: hash(context.plan), originSha256: hash(context.origin),
     controlEvidenceSha256: hash(evidence), candidateSha256: hash(candidate),
     ...(runtimeReview === null ? {} : { runtimeReview: structuredClone(runtimeReview) }) };
@@ -255,7 +269,8 @@ export async function privateLinkRuntimeIO(c, context, evidence, directory, opti
     },
       { now, deadline: until, sourceDigest: readSource, lookup,
         policyRevision: options.runtimeReview?.policyRevision ?? options.policyRevision,
-        costReview: options.runtimeReview?.costReview, costEvidence: options.runtimeReview?.costEvidence });
+        costReview: options.runtimeReview?.costReview, costEvidence: options.runtimeReview?.costEvidence,
+        nameProjection: options.runtimeReview?.nameProjection });
     if (proof.sourceSha256 !== await readSource() ||
         proof.planSha256 !== (context.plan.planSha256 ?? hash(context.plan)) ||
         proof.headSha256 !== hash(proof.head) || proof.prerequisites?.controlHeadSha256 !== proof.headSha256 ||
@@ -265,6 +280,11 @@ export async function privateLinkRuntimeIO(c, context, evidence, directory, opti
       equal(proof.policyRevision, options.runtimeReview.policyRevision, 'PRIVATE_CURRENT_REVIEW_CHANGED');
       equal(proof.billingReview, options.runtimeReview.costReview, 'PRIVATE_CURRENT_REVIEW_CHANGED');
       equal(proof.costEvidence, options.runtimeReview.costEvidence, 'PRIVATE_CURRENT_REVIEW_CHANGED');
+      if (options.runtimeReview.nameProjection) {
+        equal(proof.nameProjection, options.runtimeReview.nameProjection, 'PRIVATE_CURRENT_NAME_PROJECTION_CHANGED');
+        equal(proof.nameBinding, privateLinkNameBinding(c, context, options.runtimeReview.nameProjection, evidence),
+          'PRIVATE_CURRENT_NAME_PROJECTION_CHANGED');
+      }
     }
     deadline(now, until);
     return proof;
@@ -343,7 +363,7 @@ export async function privateLinkRuntimeIO(c, context, evidence, directory, opti
       } finally { await rm(join(directory, name)); }
     },
     deletePublic: async (target, guard, until, check, intent) => {
-      if (target.appId !== `${ids(c).group}/providers/Microsoft.App/containerApps/${c.namePrefix}-public-probe` ||
+      if (target.appId !== runtimeTargetNames(c, target).publicProbe ||
           typeof check !== 'function' || typeof intent !== 'function' || typeof guard !== 'function' || types.isAsyncFunction(guard)) {
         fail('PRIVATE_PUBLIC_DELETE_SCOPE');
       }
@@ -501,13 +521,17 @@ export async function publishPrivateLinkImage(c, context, evidence, candidate, a
   return { ...candidate, publication: completed };
 }
 
-export function privateLinkRuntimeTarget(c, context, candidate, prerequisites, runtimeReview = null) {
+export function privateLinkRuntimeTarget(c, context, candidate, prerequisites, runtimeReview = null, evidence = null) {
   verifyReceiverCandidate(c, candidate);
   planCandidate(c, context, candidate, runtimeReview);
-  const n = context.plan.topology?.ids ?? context.plan.ids;
+  const nameProjection = runtimeReview?.nameProjection ?? null;
+  if (nameProjection && !evidence) fail('PRIVATE_LINK_NAME_PREFIX_REQUIRED');
+  const view = nameProjection ? privateLinkRuntimeResources(c, context, nameProjection, evidence) : null;
+  const n = view?.ids ?? context.plan.topology?.ids ?? context.plan.ids;
   const stage = context.plan.stages?.find(value => value.id === 'create-disabled-receiver');
   if (!n || !stage?.resources?.length || stage.resources.length !== 1) fail('PRIVATE_REPLACEMENT_DESCRIPTOR_REQUIRED');
-  const descriptor = structuredClone(stage.resources[0]);
+  const descriptor = nameProjection ? view.resources.app : structuredClone(stage.resources[0]);
+  verifyPrivateLinkRuntimeName(descriptor.expected.name);
   const container = descriptor.expected.properties.template.containers[0];
   if (!sameId(descriptor.id, n.app) || !sameId(descriptor.expected.properties.managedEnvironmentId, n.environment) ||
       sameId(n.app, ids(c).app) || sameId(n.environment, ids(c).environment) ||
@@ -518,12 +542,23 @@ export function privateLinkRuntimeTarget(c, context, candidate, prerequisites, r
   for (const [name, value] of Object.entries(queueEnvironment(candidate.topology))) if (env[name] !== value) fail('PRIVATE_QUEUE_RUNTIME_CHANGED');
   const domain = prerequisites.environment.properties?.defaultDomain;
   if (!/^[a-z0-9.-]+\.azurecontainerapps\.io$/u.test(domain ?? '')) fail('PRIVATE_ENVIRONMENT_FQDN_REQUIRED');
-  return { version: 1, appId: n.app, environmentId: n.environment, fqdn: `${descriptor.expected.name}.${domain}`, descriptor,
-    queueHost: new URL(candidate.topology.ids.queueUrl).hostname, privateIp: prerequisites.privateIp };
+  return { version: nameProjection ? 2 : 1, appId: n.app, environmentId: n.environment, fqdn: `${descriptor.expected.name}.${domain}`, descriptor,
+    queueHost: new URL(candidate.topology.ids.queueUrl).hostname, privateIp: prerequisites.privateIp,
+    ...(nameProjection ? { nameBinding: privateLinkNameBinding(c, context, nameProjection, evidence) } : {}) };
+}
+function runtimeTargetNames(c, target) {
+  if (target.version === 2) return verifyPrivateLinkNameBinding(c, target.nameBinding).projected;
+  if (target.version !== 1 || Object.hasOwn(target, 'nameBinding')) fail('PRIVATE_RUNTIME_TARGET_VERSION');
+  return privateLinkRuntimeNameIds(c).original;
 }
 
 // Project only the explicitly checked target coordinates, then reuse the existing full runtime validator.
 export function verifyPrivateLinkApp(c, target, candidate, actual, identities, flag, preview = false) {
+  if (target.version === 2) {
+    const names = runtimeTargetNames(c, target);
+    if (![names.app, names.publicProbe].includes(target.appId) || target.descriptor.id !== target.appId ||
+        target.descriptor.expected.name !== target.appId.split('/').at(-1)) fail('PRIVATE_RUNTIME_TARGET_DRIFT');
+  }
   if (preview) {
     actual = structuredClone(actual);
     actual.id ??= target.appId;
@@ -578,13 +613,15 @@ export function privateRuntimePhase(c, target, instanceId, action, predecessorSh
   if (!/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u.test(instanceId) ||
       !['create-disabled', 'enable', 'disable', 'create-public-probe'].includes(action) || !sha(predecessorSha256)) fail('PRIVATE_RUNTIME_PHASE_INVALID');
   const publicProbe = action === 'create-public-probe';
-  if (target.appId !== `${ids(c).group}/providers/Microsoft.App/containerApps/${c.namePrefix}-${publicProbe ? 'public-probe' : 'private-ingest'}` ||
+  const names = runtimeTargetNames(c, target);
+  if (target.appId !== names[publicProbe ? 'publicProbe' : 'app'] ||
       target.environmentId !== (publicProbe ? ids(c).environment : `${ids(c).group}/providers/Microsoft.App/managedEnvironments/${c.namePrefix}-private-environment`)) fail('PRIVATE_RUNTIME_PHASE_TARGET');
   const resource = structuredClone(target.descriptor.expected);
   resource.properties.template.containers[0].env.find(value => value.name === 'MSR_INGESTION_ENABLED').value = action === 'enable' ? 'true' : 'false';
   const id = `${ids(c).group}/providers/Microsoft.Resources/deployments/${c.namePrefix}-plr-${instanceId.replaceAll('-', '')}-${publicProbe ? 'p' : action === 'create-disabled' ? 'c' : action === 'enable' ? 'e' : 'd'}`;
-  return { version: 1, kind: 'fixed-private-link-runtime-phase', phase: `private-link-runtime-${action}`,
+  return { version: target.version === 2 ? 2 : 1, kind: 'fixed-private-link-runtime-phase', phase: `private-link-runtime-${action}`,
     action, windowInstanceId: instanceId, predecessorSha256, targetSha256: hash(target),
+    ...(target.version === 2 ? { nameBinding: structuredClone(target.nameBinding) } : {}),
     request: { id, body: { properties: { mode: 'Incremental',
     template: { $schema: 'https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#',
       contentVersion: '1.0.0.0', resources: [resource] } } } } };
@@ -649,7 +686,7 @@ async function ready(c, target, candidate, io, flag, until) {
 export async function createPrivateLinkReceiver(c, context, evidence, candidate, instanceId, approval, directory, options = {}) {
   const io = options.io ?? await privateLinkRuntimeIO(c, context, evidence, directory, options);
   freshImage(c, candidate, io.now());
-  const prerequisites = io.verifyPrerequisites(), target = privateLinkRuntimeTarget(c, context, candidate, prerequisites, options.runtimeReview ?? null);
+  const prerequisites = io.verifyPrerequisites(), target = privateLinkRuntimeTarget(c, context, candidate, prerequisites, options.runtimeReview ?? null, evidence);
   const phase = privateRuntimePhase(c, target, instanceId, 'create-disabled', hash(evidence));
   const binding = { ...runtimeBinding(c, context, evidence, candidate, options.runtimeReview ?? null), targetSha256: hash(target), phaseSha256: hash(phase) };
   const cap = canonicalInstant(approval.expiresAt);
@@ -741,6 +778,10 @@ export function verifyCreateIntent(c, context, evidence, intent) {
   if (intent.version !== 2 || intent.kind !== 'private-link-receiver-create-intent' || intent.outcome !== 'write-possible') fail('PRIVATE_CREATE_INTENT_CHANGED');
   equal(intent.controlEvidence, evidence, 'PRIVATE_CONTROL_EVIDENCE_CHANGED');
   planCandidate(c, context, intent.candidate, intent.binding.runtimeReview ?? null, canonicalInstant(intent.intentAt));
+  if (intent.target.version === 2 || intent.binding.runtimeReview?.nameProjection) {
+    equal(intent.target.nameBinding, privateLinkNameBinding(c, context, intent.binding.runtimeReview.nameProjection, evidence),
+      'PRIVATE_RUNTIME_ADMITTED_NAMES_CHANGED');
+  }
   const phase = privateRuntimePhase(c, intent.target, intent.phase.windowInstanceId, 'create-disabled', hash(evidence));
   equal(intent.phase, phase, 'PRIVATE_CREATE_PHASE_CHANGED');
   const binding = { ...runtimeBinding(c, context, evidence, intent.candidate, intent.binding.runtimeReview ?? null), targetSha256: hash(intent.target), phaseSha256: hash(phase) };
@@ -806,6 +847,11 @@ export async function reconcilePrivateLinkReceiver(c, context, evidence, reconci
 }
 
 function windowBinding(c, context, evidence, candidate, disabled, instanceId, transport, runtimeReview = null) {
+  if (disabled.target.version === 2 || runtimeReview?.nameProjection) {
+    if (!runtimeReview?.nameProjection) fail('PRIVATE_RUNTIME_CURRENT_NAMES_REVIEW_REQUIRED');
+    equal(disabled.target.nameBinding, privateLinkNameBinding(c, context, runtimeReview.nameProjection, evidence),
+      'PRIVATE_RUNTIME_TARGET_NAMES_CHANGED');
+  }
   return { ...runtimeBinding(c, context, evidence, candidate, runtimeReview), disabledRecordSha256: hash(disabled),
     instanceId, targetSha256: hash(disabled.target), transportSha256: hash(transport),
     publicTargetSha256: hash(publicControlTarget(c, disabled.target, context, evidence)),
@@ -938,7 +984,7 @@ export function verifyPrivateQueueProbe(probe, target, identity, mode = 'private
 
 export function privateLinkExecEndpoint(c, target, revision, replica) {
   const app = target.appId.split('/').at(-1);
-  if (![`${c.namePrefix}-public-probe`, `${c.namePrefix}-private-ingest`].includes(app) ||
+  if (!Object.values(runtimeTargetNames(c, target)).some(id => id === target.appId) ||
       ![revision, replica].every(value => typeof value === 'string' && /^[a-z0-9-]{1,128}$/u.test(value))) fail('PRIVATE_EXEC_TARGET_INVALID');
   return `wss://australiaeast.azurecontainerapps.dev/subscriptions/${c.subscriptionId}/resourceGroups/${c.namePrefix}-telemetry/containerApps/${app}/revisions/${revision}/replicas/${replica}/containers/telemetry-ingest/exec`;
 }
@@ -1049,7 +1095,7 @@ export async function qualifyPrivateLinkDelivery(c, context, evidence, candidate
   freshImage(c, candidate, io.now());
   const prerequisites = io.verifyPrerequisites();
   verifyDisabledReceiver(c, context, evidence, candidate, disabled);
-  const target = privateLinkRuntimeTarget(c, context, candidate, prerequisites, options.runtimeReview ?? null);
+  const target = privateLinkRuntimeTarget(c, context, candidate, prerequisites, options.runtimeReview ?? null, evidence);
   equal(target, disabled.target, 'PRIVATE_RUNTIME_TARGET_CHANGED');
   const binding = windowBinding(c, context, evidence, candidate, disabled, instanceId, transport, options.runtimeReview ?? null);
   closed(approvals, ['enable', 'disable', 'publicCreate', 'publicDelete']);
@@ -1077,6 +1123,8 @@ export async function qualifyPrivateLinkDelivery(c, context, evidence, candidate
     { c, candidate, identities: initial.identities });
   const disableBody = structuredClone(phases.disable.request);
   const publicTarget = publicControlTarget(c, target, context, evidence);
+  verifyPrivateLinkRuntimeName(target.descriptor.expected.name);
+  verifyPrivateLinkRuntimeName(publicTarget.descriptor.expected.name);
   if (prerequisites.oldEnvironment.properties.vnetConfiguration != null) fail('PRIVATE_PUBLIC_ENVIRONMENT_MUST_BE_NONVNET');
   const run = { version: 1, kind: 'private-link-runtime-completion', binding, approvals, disabled, candidate,
     controlEvidence: evidence, transport, target, publicTarget, phases, preflight: { current, initial, preview }, probe: null, publicProbe: null,
@@ -1394,7 +1442,7 @@ export function verifyPrivateLinkRuntimeCompletion(c, context, record, at) {
       record.publicProbe.imageDigest !== record.candidate.profile.manifestDigest ||
       !sameId(record.publicProbe.appId, record.publicTarget.appId) || !sameId(record.publicTarget.environmentId, ids(c).environment) ||
       record.publicTarget.queueHost !== record.target.queueHost || record.publicTarget.privateIp !== record.target.privateIp ||
-      !record.publicTarget.appId.endsWith('/' + c.namePrefix + '-public-probe')) fail('PRIVATE_PUBLIC_PROBE_BINDING_CHANGED');
+      record.publicTarget.appId !== runtimeTargetNames(c, record.publicTarget).publicProbe) fail('PRIVATE_PUBLIC_PROBE_BINDING_CHANGED');
   verifyPublicCompletion(c, record);
   if (!Array.isArray(record.requests) || record.requests.length !== 2 || record.queries.length < 1 || record.queries.length > 3) fail('PRIVATE_SYNTHETIC_BOUND_CHANGED');
   for (const [index, request] of record.requests.entries()) {
@@ -1457,14 +1505,22 @@ export function publicControlTarget(c, target, context, evidence) {
   if (!sameId(environment?.id, ids(c).environment) || environment.properties.vnetConfiguration != null) fail('PRIVATE_PUBLIC_ENVIRONMENT_REQUIRED');
   if (!/^[a-z0-9.-]+\.azurecontainerapps\.io$/u.test(domain)) fail('PRIVATE_PUBLIC_ENVIRONMENT_DOMAIN_REQUIRED');
   const descriptor = structuredClone(target.descriptor);
-  descriptor.id = `${ids(c).group}/providers/Microsoft.App/containerApps/${c.namePrefix}-public-probe`;
-  descriptor.expected.name = `${c.namePrefix}-public-probe`;
+  const names = runtimeTargetNames(c, target);
+  descriptor.id = names.publicProbe;
+  descriptor.expected.name = names.publicProbe.split('/').at(-1);
   descriptor.expected.properties.managedEnvironmentId = ids(c).environment;
-  equal(descriptor, context.plan.publicProbe, 'PRIVATE_PUBLIC_CONTROL_PLAN_CHANGED');
-  if (context.plan.topology.ids.publicProbe !== descriptor.id) fail('PRIVATE_PUBLIC_CONTROL_ID_CHANGED');
+  const expected = structuredClone(context.plan.publicProbe);
+  if (target.version === 2) {
+    if (target.nameBinding.planSha256 !== context.plan.planSha256 || target.nameBinding.originSha256 !== hash(context.origin) ||
+        target.nameBinding.controlEvidenceSha256 !== hash(evidence)) fail('PRIVATE_PUBLIC_NAME_BINDING_CHANGED');
+    expected.id = names.publicProbe; expected.expected.name = descriptor.expected.name;
+  }
+  equal(descriptor, expected, 'PRIVATE_PUBLIC_CONTROL_PLAN_CHANGED');
+  if (target.version === 1 && context.plan.topology.ids.publicProbe !== descriptor.id) fail('PRIVATE_PUBLIC_CONTROL_ID_CHANGED');
   if (admissionFlag(descriptor.expected) !== 'false') fail('PRIVATE_PUBLIC_CONTROL_DISABLED_ONLY');
-  return { version: 1, appId: descriptor.id, environmentId: ids(c).environment,
-    fqdn: `${descriptor.expected.name}.${domain}`, descriptor, queueHost: target.queueHost, privateIp: target.privateIp };
+  return { version: target.version, appId: descriptor.id, environmentId: ids(c).environment,
+    fqdn: `${descriptor.expected.name}.${domain}`, descriptor, queueHost: target.queueHost, privateIp: target.privateIp,
+    ...(target.version === 2 ? { nameBinding: structuredClone(target.nameBinding) } : {}) };
 }
 
 function publicCreatePhase(c, intent) {
@@ -1492,6 +1548,7 @@ async function createPublicControl(c, window, io) {
     review(approvals.publicCreate, 'private-link-create-public-control', binding, io.now());
     review(approvals.publicDelete, 'private-link-delete-public-control', binding, io.now());
     deadline(io.now, cap); freshImage(c, candidate, io.now());
+    verifyPrivateLinkRuntimeName(target.descriptor.expected.name);
   };
   guard();
   if (await io.load('private-public-create-intent.json')) fail('PRIVATE_PUBLIC_CREATE_NO_RETRY');
@@ -1791,7 +1848,7 @@ export async function runPrivateLinkRuntime(c, context, evidence, operation, dir
     closed(inputs, operation === 'prepare-receiver' ? ['candidate', 'instanceId'] : ['candidate', 'instanceId', 'approval']);
     if (operation === 'create-receiver') return createPrivateLinkReceiver(c, context, evidence, inputs.candidate,
       inputs.instanceId, inputs.approval, directory, effects);
-    const target = privateLinkRuntimeTarget(c, context, inputs.candidate, io.verifyPrerequisites(), runtimeReview);
+    const target = privateLinkRuntimeTarget(c, context, inputs.candidate, io.verifyPrerequisites(), runtimeReview, evidence);
     const phase = privateRuntimePhase(c, target, inputs.instanceId, 'create-disabled', hash(evidence));
     const binding = { ...runtimeBinding(c, context, evidence, inputs.candidate, runtimeReview), targetSha256: hash(target), phaseSha256: hash(phase) };
     const prepared = { version: 1, kind: 'private-link-runtime-preparation', operation, target, phase,
@@ -1810,12 +1867,14 @@ export async function runPrivateLinkRuntime(c, context, evidence, operation, dir
   io.verifyPrerequisites();
   verifyDisabledReceiver(c, context, evidence, inputs.candidate, inputs.disabled);
   const binding = windowBinding(c, context, evidence, inputs.candidate, inputs.disabled, inputs.instanceId, inputs.transport, runtimeReview);
+  verifyPrivateLinkRuntimeName(inputs.disabled.target.descriptor.expected.name);
+  verifyPrivateLinkRuntimeName(publicControlTarget(c, inputs.disabled.target, context, evidence).descriptor.expected.name);
   const phases = Object.fromEntries(['enable', 'disable'].map(action => [action,
     privateRuntimePhase(c, inputs.disabled.target, inputs.instanceId, action, hash(inputs.disabled))]));
   const prepared = { version: 1, kind: 'private-link-runtime-preparation', operation, binding, bindingSha256: hash(binding), phases,
     publicPhase: privateRuntimePhase(c, publicControlTarget(c, inputs.disabled.target, context, evidence),
       inputs.instanceId, 'create-public-probe', hash(inputs.disabled)),
-    publicCleanupRequest: { method: 'DELETE', id: context.plan.topology.ids.publicProbe, apiVersion: appApi, body: null },
+    publicCleanupRequest: { method: 'DELETE', id: publicControlTarget(c, inputs.disabled.target, context, evidence).appId, apiVersion: appApi, body: null },
     approvalActions: { enable: 'private-link-bounded-enable', disable: 'private-link-false-only-disable',
       publicCreate: 'private-link-create-public-control', publicDelete: 'private-link-delete-public-control' }, executionAuthorized: false };
   await io.immutable('private-window-preparation.json', prepared);
