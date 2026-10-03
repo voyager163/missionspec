@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdir, rm, readFile } from 'node:fs/promises';
+import { mkdir, rm, readFile, readdir } from 'node:fs/promises';
+import { setImmediate as nextTurn, setTimeout as delay } from 'node:timers/promises';
 import { randomUUID } from 'node:crypto';
 import { digest, ids, json } from '../definition.mjs';
 import { PRIVATE_LINK_CONTROL_STAGES as STAGES, PRIVATE_LINK_LIMITS, buildPrivateLinkPlan,
@@ -43,8 +44,14 @@ test('runtime policy targeting binds the known table type when its exact ARM GET
   h.setLive(snapshot);
   const options = { now: () => now, sourceDigest: async () => base.source, lookup: async () => base.source,
     store: { root: directory, read: async (_root, name) => structuredClone(files.get(name) ?? null) } };
-  const collect = () => currentPrivateLinkRuntimeProof(base.c, base.context, evidence, directory,
-    retainedReadInvoke(base, snapshot, h.io.read), options);
+  const retained = retainedReadInvoke(base, snapshot, h.io.read);
+  let metadataReads = 0;
+  const collect = () => currentPrivateLinkRuntimeProof(base.c, base.context, evidence, directory, async args => {
+    if (args[0] !== 'acr' || args[2] !== 'list-metadata') return retained(args);
+    metadataReads++;
+    try { await delay(100); return await retained(args); }
+    finally { metadataReads--; }
+  }, options);
   const before = json(table), proof = await collect();
   assert.equal(proof.effectivePolicy.version, 3);
   assert.equal(proof.effectivePolicy.qualified, true);
@@ -53,10 +60,48 @@ test('runtime policy targeting binds the known table type when its exact ARM GET
   for (const type of [null, '', 'Microsoft.Storage/storageAccounts']) {
     table.type = type;
     await assert.rejects(collect(), /RUNTIME_POLICY_TYPE_CHANGED/);
+    assert.equal(metadataReads, 0, 'A rejected proof must settle the concurrent snapshot before returning');
   }
   delete table.type;
   table.id += '-foreign';
   await assert.rejects(collect(), /RUNTIME_POLICY_TYPE_CHANGED/);
+  assert.equal(metadataReads, 0);
+  const captured = await readdir(directory);
+  await nextTurn();
+  assert.deepEqual(await readdir(directory), captured);
+});
+
+test('reader settlement waits for admitted reads and their evidence writes after a parallel failure', async t => {
+  const directory = `infrastructure/arm/telemetry/tests/.private-link-read-settlement-${randomUUID()}`;
+  await mkdir(directory, { mode: 0o700 }); t.after(() => rm(directory, { recursive: true }));
+  const first = Promise.withResolvers(), release = Promise.withResolvers(), failure = new Error('UNIT_READ_FAILURE');
+  const n = base.context.plan.topology.ids;
+  const io = privateLinkReadIO(base.c, base.context, directory, async (args, timeout) => {
+    assert(timeout > 0 && timeout <= 15000);
+    if (new URL(args[args.indexOf('--url') + 1]).pathname === n.vnet) {
+      first.resolve(); await release.promise; return { id: n.vnet };
+    }
+    throw failure;
+  }, { now: () => at });
+  const pending = io.read({ id: n.vnet, apiVersion: '2024-05-01', filter: null }, at + 120000);
+  await first.promise;
+  await assert.rejects(io.read({ id: n.endpoint, apiVersion: '2024-05-01', filter: null }, at + 120000),
+    error => error === failure);
+  let settled = false;
+  const settlement = io.settleReads().then(() => { settled = true; });
+  try {
+    await nextTurn();
+    assert.equal(settled, false);
+  } finally { release.resolve(); }
+  await pending;
+  await settlement;
+  const files = await readdir(directory);
+  assert.equal(files.length, 2);
+  const captures = await Promise.all(files.map(async name => JSON.parse(await readFile(`${directory}/${name}`))));
+  assert.equal(captures.filter(value => value.complete).length, 1);
+  assert.equal(captures.filter(value => value.failure?.code === 'UNIT_READ_FAILURE').length, 1);
+  await nextTurn();
+  assert.deepEqual(await readdir(directory), files);
 });
 
 test('permission preflight asks for denies at or above each target scope, never unrelated descendants', async t => {

@@ -1337,7 +1337,14 @@ function readIO(c, context, directory, invoke, options) {
     if (!Number.isSafeInteger(deadline) || now() >= deadline) fail('PRIVATE_LINK_READ_DEADLINE');
     return invoke(args, Math.min(LIMITS.commandMs, timeout, deadline - now()));
   };
-  const scheduleRead = limitReadConcurrency(work => work());
+  const pendingReads = new Set();
+  const track = pending => {
+    pendingReads.add(pending);
+    pending.then(() => pendingReads.delete(pending), () => pendingReads.delete(pending));
+    return pending;
+  };
+  const schedule = limitReadConcurrency(work => work());
+  const scheduleRead = work => track(schedule(work));
   const limited = (args, timeout, deadline) => scheduleRead(() => dispatch(args, timeout, deadline)), batch = readBatch;
   const retain = (kind, value) => savePrivateLinkArtifact(directory, `private-link-${kind}-${randomUUID()}.json`, value);
   const io = { now, batch, scheduleRead, invokeRead: limited, sourceDigest: options.sourceDigest ?? sourceDigest, sleep: options.sleep ?? sleep, retain,
@@ -1431,6 +1438,11 @@ function readIO(c, context, directory, invoke, options) {
     allow({ id: `${snapshot.topic.id}/eventSubscriptions`, apiVersion: '2025-02-15', filter: null });
     for (const id of [snapshot.settings.id, snapshot.topic.id]) allow({ id: `${id}/providers/Microsoft.Insights/diagnosticSettings`, apiVersion: '2021-05-01-preview', filter: null });
   }
+  const read = io.read;
+  io.read = (...args) => track(read(...args));
+  io.settleReads = async () => {
+    while (pendingReads.size) await Promise.allSettled([...pendingReads]);
+  };
   return io;
 }
 export async function verifyPrivateLinkNsgSources(c, context, adoption, lookup = publishedSourceDigest, validation = null, evidence = null) {
@@ -1744,7 +1756,15 @@ async function currentRuntimeProof(c, context, evidence, directory, invoke, opti
     verifyEffectivePolicyEvidenceV3(policyPhase, policy);
     return policy;
   })();
-  const [head, snapshot, policy] = await Promise.all([readPrivateLinkHead(context, evidence, options.store ?? {}), collection.snapshot, policyTask]);
+  const tasks = [readPrivateLinkHead(context, evidence, options.store ?? {}), collection.snapshot, policyTask];
+  let values;
+  try { values = await Promise.all(tasks); }
+  catch (error) {
+    await Promise.allSettled(tasks);
+    await io.settleReads();
+    throw error;
+  }
+  const [head, snapshot, policy] = values;
   guard();
   const currentPath = verifyPrivateLinkSnapshot(c, context, snapshot, originalState(evidence), environmentWireVersion(evidence), checkedAdoption);
   verifyCostScope(c, context, evidence, snapshot, io.now());

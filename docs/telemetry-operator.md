@@ -178,6 +178,11 @@ The runtime policy target for the exact owned telemetry table uses its fixed
 omits that field. Its resource ID must still match; explicit null, empty or
 contradictory types are rejected. Raw readback bytes are preserved and the
 table's schema, retention and policy checks remain mandatory.
+If concurrent runtime policy or state collection fails, the reader settles the
+other admitted reads and their private evidence writes before returning the
+original error. Failure does not reset the read limiter, extend any admission
+deadline or produce a current proof; no background capture may race later
+cleanup or a separately reviewed operation.
 
 Runtime current-state policy collection explicitly uses version 3 evidence.
 It groups observations only when all facts except the target resource hash
