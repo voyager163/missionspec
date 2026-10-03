@@ -155,7 +155,7 @@ export async function privateRuntimeCompletionFixture(f, evidence, prerequisites
     observedAt: new Date(now).toISOString() };
   };
   const io = {
-    now: () => now, sleep: async ms => { now += ms; }, verifyPrerequisites: () => prerequisites,
+    now: () => { now += options.clockTickMs ?? 0; return now; }, sleep: async ms => { now += ms; }, verifyPrerequisites: () => prerequisites,
     published: async () => {}, verifySource: async () => {}, inventory: async () => candidate.publication,
     sourceDigest: async () => activeSource, load: async name => store.get(name) ?? null,
     save: async (name, value) => store.set(name, structuredClone(value)),

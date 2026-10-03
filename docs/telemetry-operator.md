@@ -447,6 +447,33 @@ and `publicDelete` reviews. Preparation binds both the fixed
 `create-public-probe` phase and the exact bodyless app DELETE; the immutable
 window intent retains both before creation.
 
+One forward qualification operation owns a private immutable validation scope
+through its final cleanup and retention. It verifies the original control
+history and receiver candidate once, then reuses only those immutable facts
+and canonical digests within that operation. Candidate reuse is bound to the
+configuration as well as the candidate. Caller objects are not newly frozen;
+ordered structural checks detect changes after awaits. Each current proof still
+collects and verifies fresh source, head, policy, NSG, privacy, generation,
+permission, cost and scan evidence. No scope or serialized token is accepted
+from operator JSON, and no trust survives into a separate operation.
+
+The public `qualify-private-link-window` route constructs its normal IO inside
+that scope; it does not bypass validation sharing by preconstructing an adapter.
+The 420-second work bound, 600-second enabled bound, 900-second public-probe
+lifetime and cleanup/request bounds remain unchanged. Effect deadlines use
+their one recorded start, including the exact enabled-intent start plus at most
+120 seconds; another clock read cannot add time.
+
+During readiness polling only, an exact app/revisions GET returning HTTP 404
+`ContainerAppNotFound` can produce a retained propagation observation after
+the same child is reobserved between matching, ready parent-environment reads.
+It is not an absent-resource or successful-readiness result. Polling stays
+inside the original effect deadline and never repeats a PUT. Ordinary reads
+retain their original failure behavior; authorization errors, different codes,
+foreign targets, missing/changed parents and expired deadlines still fail.
+Healthy readiness keeps its original reads, without a new environment
+dependency for frozen false-only recovery.
+
 Interrupted enabled windows have separate
 `prepare-private-link-disable-recovery` and `recover-private-link-disable`
 routes, using the fixed original intent and preplanned false request rather

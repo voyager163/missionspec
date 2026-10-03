@@ -5,13 +5,14 @@ import { join, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID, createHash } from 'node:crypto';
 import { isDeepStrictEqual, promisify, types } from 'node:util';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { closed, digest, digestJson, fail, ids, json, sameId, SYNTHETIC_FIXTURES, SYNTHETIC_LIMITS } from './definition.mjs';
 import { admissionFlag, canonicalAppWrite, canonicalInstant, executionIdentity, verifySyntheticRows } from './policy.mjs';
 import { receiverDatabaseInstant, verifyReceiverProfile, verifyReceiverCandidate, verifyReceiverInventory } from './receiver-upgrade.mjs';
 import { QUEUE_RUNTIME, queueEnvironment } from './durable-queue.mjs';
 import { queueArmInstant } from './queue-adoption.mjs';
 import { privateLinkAcaCreationIdentity } from './private-link-readback.mjs';
-import { verifyPrivateLinkPolicyRevision, verifyPrivateLinkCostReview } from './private-link-controller.mjs';
+import { verifyPrivateLinkPolicyRevision, verifyPrivateLinkCostReview, withPrivateLinkRuntimeValidation } from './private-link-controller.mjs';
 import { verifyPrivateLinkNameProjection, privateLinkNameBinding, verifyPrivateLinkNameBinding,
   privateLinkRuntimeResources, privateLinkRuntimeNameIds, verifyPrivateLinkRuntimeName } from './private-link.mjs';
 import { loadPrivateLinkArtifact, savePrivateLinkArtifact, updatePrivateLinkArtifact } from './private-link-artifacts.mjs';
@@ -23,7 +24,68 @@ const execute = promisify(execFile);
 const repository = 'missionspec/telemetry-ingest';
 const privateRoot = fileURLToPath(new URL('./.operator-private/', import.meta.url));
 const appApi = '2025-07-01';
-const hash = digestJson;
+const forwardRuntime = new AsyncLocalStorage();
+const runtimeScopes = new WeakSet();
+const hash = value => {
+  const scope = forwardRuntime.getStore();
+  if (scope?.immutable.has(value)) {
+    if (!runtimeScopes.has(scope)) fail('PRIVATE_RUNTIME_OPERATION_SCOPE_CLOSED');
+    if (!scope.hashes.has(value)) scope.hashes.set(value, digestJson(value));
+    return scope.hashes.get(value);
+  }
+  return digestJson(value);
+};
+function immutableRuntime(value, seen) {
+  if (!value || typeof value !== 'object' || seen.has(value)) return value;
+  seen.add(value); Object.values(value).forEach(entry => immutableRuntime(entry, seen));
+  return Object.freeze(value);
+}
+function runtimeInputCheck(original, copy) {
+  const stable = new WeakMap();
+  const remember = (map, value, expected, frozen) => {
+    if (!map.has(value)) map.set(value, new WeakMap());
+    map.get(value).set(expected, frozen);
+  };
+  return () => {
+    const checked = new WeakMap();
+    const compare = (value, expected, depth) => {
+      if (depth > 128) fail('PRIVATE_RUNTIME_OPERATION_INPUT_CHANGED');
+      if (expected === null || typeof expected !== 'object') {
+        if (!Object.is(value, expected)) fail('PRIVATE_RUNTIME_OPERATION_INPUT_CHANGED');
+        return true;
+      }
+      if (value === null || typeof value !== 'object' || types.isProxy(value) ||
+          Array.isArray(value) !== Array.isArray(expected) ||
+          !Array.isArray(value) && ![Object.prototype, null].includes(Object.getPrototypeOf(value))) fail('PRIVATE_RUNTIME_OPERATION_INPUT_CHANGED');
+      if (stable.get(value)?.has(expected)) return true;
+      if (checked.get(value)?.has(expected)) return checked.get(value).get(expected);
+      const keys = Object.keys(value), expectedKeys = Object.keys(expected);
+      if (keys.length !== expectedKeys.length || Array.isArray(value) && value.length !== expected.length) fail('PRIVATE_RUNTIME_OPERATION_INPUT_CHANGED');
+      let frozen = Object.isFrozen(value);
+      for (let index = 0; index < keys.length; index++) {
+        const key = keys[index], descriptor = Object.getOwnPropertyDescriptor(value, key);
+        if (key !== expectedKeys[index] || !Object.hasOwn(descriptor, 'value')) fail('PRIVATE_RUNTIME_OPERATION_INPUT_CHANGED');
+        frozen = compare(descriptor.value, expected[key], depth + 1) && frozen;
+      }
+      remember(checked, value, expected, frozen);
+      if (frozen) remember(stable, value, expected, true);
+      return frozen;
+    };
+    compare(original, copy, 0);
+  };
+}
+function verifyImmutableCandidate(c, candidate) {
+  const scope = forwardRuntime.getStore();
+  if (!scope || !scope.immutable.has(c) || !scope.immutable.has(candidate)) return verifyReceiverCandidate(c, candidate);
+  if (!runtimeScopes.has(scope)) fail('PRIVATE_RUNTIME_OPERATION_SCOPE_CLOSED');
+  if (!scope.candidates.has(c)) scope.candidates.set(c, new WeakMap());
+  const candidates = scope.candidates.get(c);
+  if (!candidates.has(candidate)) {
+    scope.statistics.immutableCandidateVerifications++;
+    candidates.set(candidate, verifyReceiverCandidate(c, candidate));
+  } else scope.statistics.immutableCandidateReuses++;
+  return candidates.get(candidate);
+}
 const equal = (a, b, code) => { if (!isDeepStrictEqual(a, b)) fail(code); };
 const sha = value => typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value);
 const iso = at => new Date(at).toISOString();
@@ -201,7 +263,7 @@ function samePreimage(c, target, candidate, expected, actual, identities) {
     verifyPrivateLinkApp(c, target, candidate, expected, identities, admissionFlag(expected)), 'PRIVATE_RUNTIME_PREIMAGE_CHANGED');
 }
 function freshImage(c, candidate, at) {
-  verifyReceiverCandidate(c, candidate);
+  verifyImmutableCandidate(c, candidate);
   if (receiverDatabaseInstant(candidate.profile.scan.databaseUpdatedAt) > at ||
       receiverDatabaseInstant(candidate.profile.scan.databaseNextUpdate) <= at) fail('PRIVATE_IMAGE_SCAN_EXPIRED');
 }
@@ -261,6 +323,7 @@ export async function privateLinkRuntimeIO(c, context, evidence, directory, opti
     return value;
   };
   const current = async until => {
+    options.operationCheck?.();
     deadline(now, until);
     if (options.runtimeReview) verifyRuntimeReview(c, context, options.runtimeReview, now());
     const proof = await control.currentPrivateLinkRuntimeProof(c, context, evidence, directory, (args, timeout) => {
@@ -270,7 +333,7 @@ export async function privateLinkRuntimeIO(c, context, evidence, directory, opti
       { now, deadline: until, sourceDigest: readSource, lookup,
         policyRevision: options.runtimeReview?.policyRevision ?? options.policyRevision,
         costReview: options.runtimeReview?.costReview, costEvidence: options.runtimeReview?.costEvidence,
-        nameProjection: options.runtimeReview?.nameProjection });
+        nameProjection: options.runtimeReview?.nameProjection, cancelled: options.cancelled, store: options.store });
     if (proof.sourceSha256 !== await readSource() ||
         proof.planSha256 !== (context.plan.planSha256 ?? hash(context.plan)) ||
         proof.headSha256 !== hash(proof.head) || proof.prerequisites?.controlHeadSha256 !== proof.headSha256 ||
@@ -286,6 +349,7 @@ export async function privateLinkRuntimeIO(c, context, evidence, directory, opti
           'PRIVATE_CURRENT_NAME_PROJECTION_CHANGED');
       }
     }
+    options.operationCheck?.();
     deadline(now, until);
     return proof;
   };
@@ -294,6 +358,18 @@ export async function privateLinkRuntimeIO(c, context, evidence, directory, opti
     '--only-show-errors', '--output', 'json'], until);
   const identities = async until => Object.fromEntries(await Promise.all([ids(c).ingestIdentity, ids(c).pullIdentity]
     .map(async id => [id, await read(id, '2023-01-31', until)])));
+  const readinessGet = (target, id, until) => readJobs(async timeout => {
+    if (![target.appId, `${target.appId}/revisions`].includes(id)) fail('PRIVATE_PROPAGATION_READ_SCOPE');
+    try {
+      const value = await invoke(['rest', '--method', 'GET', '--url',
+        `https://management.azure.com${id}?api-version=${appApi}`, '--subscription', c.subscriptionId,
+        '--only-show-errors', '--output', 'json'], timeout);
+      return { state: 'observed', value };
+    } catch (error) {
+      if (error?.httpStatus !== 404 || error?.armCode !== 'ContainerAppNotFound') throw error;
+      return { state: 'propagating', id, httpStatus: 404, armCode: 'ContainerAppNotFound' };
+    }
+  }, until, 15000);
   return { now, sleep: options.sleep ?? sleep, sourceDigest: readSource, lookup, current, read, call, identities, run,
     beginRecoveryReads: async until => {
       deadline(now, until);
@@ -311,6 +387,7 @@ export async function privateLinkRuntimeIO(c, context, evidence, directory, opti
       if (!sha(approval?.sourceSha256) || !/^[a-f0-9]{40}$/u.test(approval?.policyCommitSha ?? '')) fail('PRIVATE_RUNTIME_UNPUBLISHED_SOURCE');
       if (await lookup(approval.policyCommitSha) !== approval.sourceSha256) fail('PRIVATE_RUNTIME_UNPUBLISHED_SOURCE');
       if (frozen) return;
+      options.operationCheck?.();
       const result = await run('git', ['rev-parse', 'HEAD'], { timeout: 10000, maxBuffer: 1024 });
       if (result.stdout.trim() !== approval.policyCommitSha || await readSource() !== approval.sourceSha256) fail('PRIVATE_RUNTIME_SOURCE_CHANGED');
     },
@@ -320,10 +397,10 @@ export async function privateLinkRuntimeIO(c, context, evidence, directory, opti
     save: (name, value) => updatePrivateLinkArtifact(directory, name, value),
     reserve: async (kind, key, value) => {
       if (!['image', 'receiver', 'window', 'recovery', 'public-probe', 'public-cleanup'].includes(kind) || !sha(key)) fail('PRIVATE_RUNTIME_FENCE_INVALID');
-      try { await saveImmutable(privateRoot, `private-link-runtime-${kind}-${key}.json`, value); }
+      try { await saveImmutable(options.store?.root ?? privateRoot, `private-link-runtime-${kind}-${key}.json`, value); }
       catch (error) { if (error.code === 'EEXIST') fail('PRIVATE_RUNTIME_PHYSICAL_FENCE_NO_RETRY'); throw error; }
     },
-    windowHead: intent => load(privateRoot, `private-link-runtime-window-${intent.physicalKey}.json`, true),
+    windowHead: intent => load(options.store?.root ?? privateRoot, `private-link-runtime-window-${intent.physicalKey}.json`, true),
     inventory: async (candidate, until, published) => {
       const registry = await read(ids(c).registry, '2023-07-01', until);
       if (!sameId(registry?.id, ids(c).registry) || registry.properties?.adminUserEnabled !== false ||
@@ -386,7 +463,33 @@ export async function privateLinkRuntimeIO(c, context, evidence, directory, opti
         return { validation, whatIf: whatIf.result };
       } finally { await rm(join(directory, name)); }
     },
-    observe: async (target, until) => {
+    recordPropagation: value => savePrivateLinkArtifact(directory, `private-runtime-propagation-${randomUUID()}.json`, value),
+    observe: async (target, until, readiness = false) => {
+      if (readiness) {
+        verifyRuntimeTargetScope(c, target);
+        const app = await readinessGet(target, target.appId, until);
+        const revisions = app.state === 'observed' ? await readinessGet(target, `${target.appId}/revisions`, until) : app;
+        if (app.state === 'propagating' || revisions.state === 'propagating') {
+          const missing = app.state === 'propagating' ? app : revisions;
+          const parentBefore = await read(target.environmentId, appApi, until);
+          if (!sameId(parentBefore?.id, target.environmentId) || parentBefore.properties?.provisioningState !== 'Succeeded') fail('PRIVATE_PROPAGATION_PARENT_UNQUALIFIED');
+          await readinessGet(target, missing.id, until);
+          const parentAfter = await read(target.environmentId, appApi, until);
+          if (!sameId(parentAfter?.id, target.environmentId) || parentAfter.properties?.provisioningState !== 'Succeeded') fail('PRIVATE_PROPAGATION_PARENT_UNQUALIFIED');
+          equal(executionIdentity(parentBefore, 'Microsoft.App/managedEnvironments'),
+            executionIdentity(parentAfter, 'Microsoft.App/managedEnvironments'), 'PRIVATE_PROPAGATION_PARENT_CHANGED');
+          deadline(now, until);
+          return { state: 'propagating', kind: 'private-runtime-readiness-propagation', appId: target.appId,
+            environmentId: target.environmentId, resourceId: missing.id, httpStatus: 404, armCode: 'ContainerAppNotFound',
+            parentIdentity: executionIdentity(parentAfter, 'Microsoft.App/managedEnvironments'), observedAt: iso(now()) };
+        }
+        const [identityValues, diagnostic, exports, oldApp] = await Promise.all([
+          identities(until), read(`${target.appId}/providers/Microsoft.Insights/diagnosticSettings`, '2021-05-01-preview', until),
+          read(`${ids(c).workspace}/dataExports`, '2020-08-01', until), read(ids(c).app, appApi, until),
+        ]);
+        return { app: app.value, revisions: revisions.value, identities: identityValues,
+          privacy: { diagnostic, exports }, oldApp, observedAt: iso(now()) };
+      }
       const [app, revisions, identityValues, diagnostic, exports, oldApp] = await Promise.all([
         read(target.appId, appApi, until), read(`${target.appId}/revisions`, appApi, until), identities(until),
         read(`${target.appId}/providers/Microsoft.Insights/diagnosticSettings`, '2021-05-01-preview', until),
@@ -394,7 +497,7 @@ export async function privateLinkRuntimeIO(c, context, evidence, directory, opti
       ]);
       return { app, revisions, identities: identityValues, privacy: { diagnostic, exports }, oldApp, observedAt: iso(now()) };
     },
-    http: syntheticHttp,
+    http: options.http ?? syntheticHttp,
     query: (workspace, source, start, end, guard, until) =>
       readSyntheticQuery(c, workspace, source, start, end, guard, until, (args, timeout) => readJobs(async remaining => {
         guard();
@@ -522,7 +625,7 @@ export async function publishPrivateLinkImage(c, context, evidence, candidate, a
 }
 
 export function privateLinkRuntimeTarget(c, context, candidate, prerequisites, runtimeReview = null, evidence = null) {
-  verifyReceiverCandidate(c, candidate);
+  verifyImmutableCandidate(c, candidate);
   planCandidate(c, context, candidate, runtimeReview);
   const nameProjection = runtimeReview?.nameProjection ?? null;
   if (nameProjection && !evidence) fail('PRIVATE_LINK_NAME_PREFIX_REQUIRED');
@@ -550,6 +653,14 @@ function runtimeTargetNames(c, target) {
   if (target.version === 2) return verifyPrivateLinkNameBinding(c, target.nameBinding).projected;
   if (target.version !== 1 || Object.hasOwn(target, 'nameBinding')) fail('PRIVATE_RUNTIME_TARGET_VERSION');
   return privateLinkRuntimeNameIds(c).original;
+}
+function verifyRuntimeTargetScope(c, target) {
+  const names = runtimeTargetNames(c, target);
+  const environment = target.appId === names.publicProbe ? ids(c).environment :
+    `${ids(c).group}/providers/Microsoft.App/managedEnvironments/${c.namePrefix}-private-environment`;
+  if (![names.app, names.publicProbe].includes(target.appId) || target.environmentId !== environment ||
+      target.descriptor?.id !== target.appId || target.descriptor.expected.name !== target.appId.split('/').at(-1) ||
+      target.descriptor.expected.properties.managedEnvironmentId !== environment) fail('PRIVATE_RUNTIME_PHASE_TARGET');
 }
 
 // Project only the explicitly checked target coordinates, then reuse the existing full runtime validator.
@@ -666,12 +777,22 @@ export function verifyPrivateRuntimePreview(target, phase, preview, before, pres
     'PRIVATE_RUNTIME_PREVIEW_CHANGED');
 }
 
-async function ready(c, target, candidate, io, flag, until) {
+export async function readyPrivateLinkRuntime(c, target, candidate, io, flag, until) {
+  verifyRuntimeTargetScope(c, target);
   let last;
   for (let index = 0; index < PRIVATE_RUNTIME_LIMITS.maxRolloutPolls; index++) {
     deadline(io.now, until);
-    last = await io.observe(target, until);
+    last = await io.observe(target, until, true);
     deadline(io.now, until);
+    if (last?.state === 'propagating') {
+      if (last.kind !== 'private-runtime-readiness-propagation' || last.appId !== target.appId ||
+          last.environmentId !== target.environmentId || ![target.appId, `${target.appId}/revisions`].includes(last.resourceId) ||
+          last.httpStatus !== 404 || last.armCode !== 'ContainerAppNotFound') fail('PRIVATE_PROPAGATION_READ_SCOPE');
+      await io.recordPropagation(last);
+      deadline(io.now, until);
+      await io.sleep(Math.min(3000, Math.max(0, until - io.now())));
+      continue;
+    }
     try { verifyObservation(c, target, candidate, last, flag); return last; }
     catch (error) {
       if (!['PRIVATE_REVISION_NOT_READY', 'PRIVATE_RUNTIME_TARGET_DRIFT'].includes(error.message)) throw error;
@@ -682,6 +803,7 @@ async function ready(c, target, candidate, io, flag, until) {
   }
   fail('PRIVATE_RUNTIME_ROLLOUT_UNQUALIFIED');
 }
+const ready = readyPrivateLinkRuntime;
 
 export async function createPrivateLinkReceiver(c, context, evidence, candidate, instanceId, approval, directory, options = {}) {
   const io = options.io ?? await privateLinkRuntimeIO(c, context, evidence, directory, options);
@@ -767,7 +889,7 @@ function verifyDisabledReceiver(c, context, evidence, candidate, record) {
   equal(record.intent.phase, record.phase, 'PRIVATE_CREATE_INTENT_CHANGED');
   equal(record.intent.approval, record.approval, 'PRIVATE_CREATE_INTENT_CHANGED');
   if (canonicalInstant(record.completedAt) > record.intent.effectDeadline) fail('PRIVATE_CREATE_RECEIPT_LATE');
-  verifyReceiverCandidate(c, candidate);
+  verifyImmutableCandidate(c, candidate);
   verifyObservation(c, record.target, candidate, record.observation, 'false');
   verifyHttp(record.disabledResponse, 503);
 }
@@ -1091,6 +1213,39 @@ export async function runPrivateLinkProbe(c, target, observation, candidate, pre
 }
 
 export async function qualifyPrivateLinkDelivery(c, context, evidence, candidate, disabled, instanceId, approvals, transport, directory, options = {}) {
+  if (forwardRuntime.getStore() || Object.hasOwn(options, 'runtimeValidation') || Object.hasOwn(options, 'validationScope')) {
+    fail('PRIVATE_RUNTIME_OPERATION_SCOPE_FORGED');
+  }
+  const inputs = { c, context, evidence, candidate, disabled, approvals, transport, runtimeReview: options.runtimeReview ?? null };
+  const scope = { immutable: new WeakSet(), hashes: new WeakMap(), candidates: new WeakMap() };
+  const statistics = { immutableCandidateVerifications: 0, immutableCandidateReuses: 0 };
+  scope.statistics = statistics;
+  const copy = immutableRuntime(structuredClone(inputs), scope.immutable);
+  // Compare the caller graph after awaits without serializing repeated history.
+  // Only pairs already proven deeply frozen may survive between checks.
+  const unchanged = runtimeInputCheck(inputs, copy);
+  const check = () => {
+    if (!runtimeScopes.has(scope) || (options.runtimeReview ?? null) !== inputs.runtimeReview) fail('PRIVATE_RUNTIME_OPERATION_INPUT_CHANGED');
+    unchanged();
+  };
+  runtimeScopes.add(scope);
+  try {
+    return await forwardRuntime.run(scope, () => {
+      const run = (selectedEvidence, controlCheck = () => {}, controlStatistics = null) => {
+        scope.controlStatistics = controlStatistics;
+        immutableRuntime(selectedEvidence, scope.immutable);
+        return qualifyWindow(copy.c, copy.context, selectedEvidence, copy.candidate, copy.disabled, instanceId,
+          copy.approvals, copy.transport, directory, { ...options, runtimeReview: copy.runtimeReview,
+            operationCheck: () => { check(); controlCheck(); } });
+      };
+      return options.io ? run(copy.evidence) : withPrivateLinkRuntimeValidation(copy.c, copy.context, copy.evidence, run);
+    });
+  } finally {
+    runtimeScopes.delete(scope);
+    options.onValidationStats?.({ ...statistics, ...(scope.controlStatistics ?? {}) });
+  }
+}
+async function qualifyWindow(c, context, evidence, candidate, disabled, instanceId, approvals, transport, directory, options) {
   const io = options.io ?? await privateLinkRuntimeIO(c, context, evidence, directory, options);
   freshImage(c, candidate, io.now());
   const prerequisites = io.verifyPrerequisites();
@@ -1108,6 +1263,8 @@ export async function qualifyPrivateLinkDelivery(c, context, evidence, candidate
   if (await io.load('private-window-intent.json') || await io.load('private-window-result.json')) fail('PRIVATE_WINDOW_HISTORY_NO_RETRY');
   const approvalCap = canonicalInstant(approvals.enable.expiresAt);
   const reviewed = () => {
+    options.operationCheck();
+    if (options.cancelled?.()) fail('PRIVATE_RUNTIME_CANCELLED');
     review(approvals.enable, 'private-link-bounded-enable', binding, io.now());
     review(approvals.disable, 'private-link-false-only-disable', binding, io.now());
     freshImage(c, candidate, io.now());
@@ -1145,6 +1302,8 @@ export async function qualifyPrivateLinkDelivery(c, context, evidence, candidate
   run.intent = intent;
   let enabledAt = null, workUntil = approvalCap;
   const active = () => {
+    options.operationCheck();
+    if (options.cancelled?.()) fail('PRIVATE_RUNTIME_CANCELLED');
     deadline(io.now, workUntil);
     freshImage(c, candidate, io.now());
     review(approvals.enable, 'private-link-bounded-enable', binding, io.now());
@@ -1178,7 +1337,7 @@ export async function qualifyPrivateLinkDelivery(c, context, evidence, candidate
       reviewed();
       enabledAt = io.now(); workUntil = Math.min(enabledAt + 420000, approvalCap,
         canonicalInstant(run.publicControl.intent.intentAt) + 900000 - 300000);
-      effectUntil = stageDeadline(io, workUntil);
+      effectUntil = Math.min(enabledAt + PRIVATE_RUNTIME_LIMITS.rolloutTimeoutMs, workUntil);
       run.enableIntentAt = iso(enabledAt);
       run.enableIntent = { version: 1, windowIntentSha256: hash(intent), phaseSha256: hash(phases.enable),
         intentAt: run.enableIntentAt, effectDeadline: effectUntil, outcome: 'enable-possible' };
@@ -1392,7 +1551,7 @@ export function verifyPrivateLinkRuntimeCompletion(c, context, record, at) {
   verifyWindowIntent(c, context, record.controlEvidence, record.intent);
   equal(record.intent.binding, record.binding, 'PRIVATE_WINDOW_BINDING_CHANGED');
   equal(record.intent.approvals, record.approvals, 'PRIVATE_WINDOW_APPROVAL_CHANGED');
-  verifyReceiverCandidate(c, record.candidate);
+  verifyImmutableCandidate(c, record.candidate);
   equal(record.binding, windowBinding(c, context, record.controlEvidence, record.candidate, record.disabled,
     record.binding.instanceId, record.transport, record.binding.runtimeReview ?? null), 'PRIVATE_RUNTIME_COMPLETION_BINDING');
   equal(record.target, record.disabled.target, 'PRIVATE_RUNTIME_TARGET_CHANGED');
@@ -1808,6 +1967,13 @@ export async function runPrivateLinkRuntime(c, context, evidence, operation, dir
       options.runtimeReview !== undefined && !isDeepStrictEqual(options.runtimeReview, runtimeReview)) fail('PRIVATE_RUNTIME_TYPED_REVIEW_DATA_REQUIRED');
   options = { ...options, runtimeReview };
   const directory = await privateDirectory(directoryArg);
+  if (operation === 'qualify-window') {
+    closed(inputs, ['candidate', 'disabled', 'instanceId', 'transport', 'approvals']);
+    const result = await qualifyPrivateLinkDelivery(c, context, evidence, inputs.candidate,
+      inputs.disabled, inputs.instanceId, inputs.approvals, inputs.transport, directory, options);
+    if (result.outcome !== 'qualified-private-delivery-disabled') fail('PRIVATE_RUNTIME_QUALIFICATION_HELD');
+    return result;
+  }
   const io = options.io ?? await privateLinkRuntimeIO(c, context, evidence, directory, options);
   const effects = { ...options, io };
   if (operation === 'prepare-public-cleanup' || operation === 'recover-public-cleanup') {
@@ -1856,14 +2022,7 @@ export async function runPrivateLinkRuntime(c, context, evidence, operation, dir
     await io.immutable('private-receiver-preparation.json', prepared);
     return prepared;
   }
-  closed(inputs, operation === 'prepare-window' ? ['candidate', 'disabled', 'instanceId', 'transport'] :
-    ['candidate', 'disabled', 'instanceId', 'transport', 'approvals']);
-  if (operation === 'qualify-window') {
-    const result = await qualifyPrivateLinkDelivery(c, context, evidence, inputs.candidate,
-      inputs.disabled, inputs.instanceId, inputs.approvals, inputs.transport, directory, effects);
-    if (result.outcome !== 'qualified-private-delivery-disabled') fail('PRIVATE_RUNTIME_QUALIFICATION_HELD');
-    return result;
-  }
+  closed(inputs, ['candidate', 'disabled', 'instanceId', 'transport']);
   io.verifyPrerequisites();
   verifyDisabledReceiver(c, context, evidence, inputs.candidate, inputs.disabled);
   const binding = windowBinding(c, context, evidence, inputs.candidate, inputs.disabled, inputs.instanceId, inputs.transport, runtimeReview);

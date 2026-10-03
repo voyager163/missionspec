@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { execFileSync, spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { setTimeout as pause } from 'node:timers/promises';
 import { access, chmod, lstat, mkdir, readFile, readdir, rm, rmdir, symlink, unlink, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, dirname, join } from 'node:path';
@@ -125,6 +127,33 @@ test('sibling workers share one same-run setup and the last worker removes its e
   for (const child of children) child.send('finish');
   assert.deepEqual(await Promise.all(ended), [0, 0]);
   await assert.rejects(access(a.root), error => error.code === 'ENOENT');
+});
+
+test('exiting workers retain their marker until they own the lifecycle cleanup lock', {
+  skip: !['darwin', 'linux'].includes(process.platform),
+}, async t => {
+  const module = new URL('./private-link-cache.fixture.mjs', import.meta.url).href;
+  const script = `import {privateLinkCachedFixture,privateLinkFixtureCacheDirectory} from ${JSON.stringify(module)};
+    await privateLinkCachedFixture('unit-exit-contention',{},async()=>({value:1}));
+    process.send({root:await privateLinkFixtureCacheDirectory()});
+    process.on('message',()=>process.disconnect());`;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script],
+    { env: { ...process.env, NODE_TEST_CONTEXT: 'child-v8' }, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+  t.after(() => { if (child.exitCode === null) child.kill(); });
+  const ended = once(child, 'exit');
+  const [{ root }] = await Promise.race([once(child, 'message'), ended.then(([code]) => {
+    throw new Error(`Unit cleanup worker exited before initialization: ${code}`);
+  })]);
+  const lifecycle = root + '.lifecycle';
+  await mkdir(lifecycle, { mode: 0o700 });
+  try {
+    child.send('finish');
+    await pause(50);
+    assert.equal(child.exitCode, null, 'Cleanup cannot abandon its marker while another worker holds the lock');
+    await access(join(root, `worker-${child.pid}`));
+  } finally { await rmdir(lifecycle); }
+  assert.equal((await ended)[0], 0);
+  await assert.rejects(access(root), error => error.code === 'ENOENT');
 });
 
 test('cache access rejects writable ancestors, a nonprivate leaf and symlinked directory boundaries', {

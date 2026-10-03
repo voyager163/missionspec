@@ -82,6 +82,67 @@ function windowFixture(f = runtimeFixture(), runtimeReview = null) {
     setFlag: value => { flag = value; }, setPublic: value => { publicPresent = value; }, get posted() { return posted; } };
 }
 
+test('operation-local window rejects admitted input changes after await and still performs frozen false-only cleanup', async () => {
+  for (const changed of ['config', 'history', 'candidate', 'approval', 'key-order', 'transport', 'review-swap', 'cancel']) {
+    const f = windowFixture(), options = { io: f.io, runtimeReview: null };
+    const frozenBefore = new Map();
+    const capture = value => {
+      if (value === null || typeof value !== 'object' || frozenBefore.has(value)) return;
+      frozenBefore.set(value, Object.isFrozen(value));
+      Object.values(value).forEach(capture);
+    };
+    capture([f.c, f.context, f.evidence, f.candidate, f.disabled, f.approvals, f.transport]);
+    let cancelled = false, mutated = false;
+    options.cancelled = () => cancelled;
+    const probe = f.io.probe;
+    f.io.probe = async (...args) => {
+      const result = await probe(...args);
+      await Promise.resolve();
+      if (changed === 'config') f.c.namePrefix = 'different';
+      if (changed === 'history') f.evidence.originSha256 = '0'.repeat(64);
+      if (changed === 'candidate') f.candidate.profile.manifestDigest = `sha256:${'0'.repeat(64)}`;
+      if (changed === 'approval') f.approvals.enable.bindingSha256 = '0'.repeat(64);
+      if (changed === 'key-order') {
+        const version = f.approvals.enable.version;
+        delete f.approvals.enable.version; f.approvals.enable.version = version;
+      }
+      if (changed === 'transport') f.transport.pythonPath = '/different/python';
+      if (changed === 'review-swap') options.runtimeReview = {};
+      if (changed === 'cancel') cancelled = true;
+      mutated = true;
+      return result;
+    };
+    const result = await qualifyPrivateLinkDelivery(f.c, f.context, f.evidence, f.candidate, f.disabled, f.instanceId,
+      f.approvals, f.transport, '/UNIT/inert', options);
+    assert.equal(mutated, true, `${changed}: caller mutation must succeed before guard rejection`);
+    for (const [value, frozen] of frozenBefore) assert.equal(Object.isFrozen(value), frozen, `${changed}: new caller freeze`);
+    assert.equal(result.outcome, 'stopped-disabled-unqualified', changed);
+    assert.equal(result.failure.code, changed === 'cancel' ? 'PRIVATE_RUNTIME_CANCELLED' : 'PRIVATE_RUNTIME_OPERATION_INPUT_CHANGED', changed);
+    assert.equal(result.terminalFalse, true, changed);
+    assert.equal(result.terminal503, true, changed);
+    assert.equal(f.posted, 0, changed);
+    assert(!f.events.includes('write:true') && !f.events.includes('create:public'), changed);
+    assert(f.events.includes('write:false'), changed);
+    assert(!f.files.has('private-enable-intent.json'), changed);
+  }
+});
+
+test('ambient candidate validation never reuses an immutable candidate under a foreign configuration', async () => {
+  const f = windowFixture(), probe = f.io.probe;
+  let checked = 0;
+  f.io.probe = async (...args) => {
+    const candidate = args[2];
+    assert(Object.isFrozen(candidate));
+    assert.throws(() => privateLinkRuntimeTarget({ ...f.c, budgetEmail: 'foreign@example.invalid' },
+      f.context, candidate, f.prerequisites));
+    assert.deepEqual(privateLinkRuntimeTarget({ ...f.c }, f.context, candidate, f.prerequisites), f.target);
+    checked++;
+    return probe(...args);
+  };
+  assert.equal((await f.run()).outcome, 'qualified-private-delivery-disabled');
+  assert.equal(checked, 2);
+});
+
 // A synthetic newer scan of exactly the same image. No fresh measurement or scan is claimed.
 function sameImageProfile(original, at) {
   const profile = structuredClone(original), before = JSON.parse(original.qualification.reportJson);

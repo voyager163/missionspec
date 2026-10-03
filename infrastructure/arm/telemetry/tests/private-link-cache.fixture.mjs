@@ -110,13 +110,18 @@ async function workerScope() {
     process.once('exit', () => {
       verifyPrivateDirectorySync(parentDirectory);
       verifyPrivateDirectorySync(root);
-      absentOkay(() => unlinkSync(worker));
-      try { mkdirSync(lifecycle, { mode: 0o700 }); }
-      catch (error) {
-        if (error.code === 'EEXIST') { absentOkay(() => verifyPrivateDirectorySync(lifecycle)); return; }
-        throw error;
+      const cleanupUntil = performance.now() + 30000, waiting = new Int32Array(new SharedArrayBuffer(4));
+      while (true) {
+        try { mkdirSync(lifecycle, { mode: 0o700 }); break; }
+        catch (error) {
+          if (error.code !== 'EEXIST') throw error;
+          absentOkay(() => verifyPrivateDirectorySync(lifecycle));
+          assert(performance.now() < cleanupUntil, 'Unit fixture exit lifecycle lock is bounded.');
+          Atomics.wait(waiting, 0, 0, 10);
+        }
       }
       try {
+        absentOkay(() => unlinkSync(worker));
         const names = absentOkay(() => readdirSync(root), []);
         if (names.some(name => name.startsWith('worker-'))) return;
         for (const name of names) {

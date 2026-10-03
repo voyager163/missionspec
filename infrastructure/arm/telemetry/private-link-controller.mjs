@@ -1,4 +1,5 @@
 import { isDeepStrictEqual, types } from 'node:util';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { open, rm } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
@@ -35,6 +36,37 @@ const operationLock = options => resolve(options.store?.root ?? resolve(here, '.
 // Each operation binds its own immutable copies. Nothing is trusted across
 // operations; caller inputs and clocks are checked again after awaits.
 const dispatchValidations = new WeakMap();
+const runtimeValidations = new AsyncLocalStorage();
+const activeRuntimeValidations = new WeakSet();
+function runtimeValidation(c, context, evidence) {
+  const state = runtimeValidations.getStore();
+  if (!state) return null;
+  if (!activeRuntimeValidations.has(state) || state.c !== c || state.context !== context || state.evidence !== evidence) {
+    fail('PRIVATE_LINK_RUNTIME_VALIDATION_SCOPE_CHANGED');
+  }
+  state.check();
+  return state;
+}
+// A forward runtime operation owns this scope until compensation and retention settle.
+// No token is accepted from JSON/options, and no mutable observation is cached here.
+export function withPrivateLinkRuntimeValidation(c, context, evidence, use) {
+  if (runtimeValidations.getStore()) fail('PRIVATE_LINK_RUNTIME_VALIDATION_NESTED');
+  return withDispatchValidation(c, context, { evidence }, (snapshot, validation) => {
+    const state = { c, context, evidence: snapshot.evidence, validation, prerequisites: null,
+      statistics: { immutableHistoryVerifications: 0, prerequisiteVerifications: 0, prerequisiteReuses: 0 },
+      check: () => {
+        const dispatch = dispatchValidation(c, context, validation);
+        if (dispatch) assertDispatchInputs(dispatch);
+        else equal(evidence, snapshot.evidence, 'PRIVATE_LINK_RUNTIME_VALIDATION_SCOPE_CHANGED');
+      } };
+    activeRuntimeValidations.add(state);
+    try {
+      const result = runtimeValidations.run(state, () => use(state.evidence, state.check, state.statistics));
+      if (result && typeof result.then === 'function') return Promise.resolve(result).finally(() => activeRuntimeValidations.delete(state));
+      activeRuntimeValidations.delete(state); return result;
+    } catch (error) { activeRuntimeValidations.delete(state); throw error; }
+  });
+}
 function immutableDispatchCopy(value) {
   const copy = structuredClone(value), seen = new WeakSet();
   function freeze(entry) {
@@ -50,10 +82,12 @@ function dispatchValidation(c, context, validation) {
   return state;
 }
 function verifiedHistory(state, evidence) {
+  if (evidence === state.evidence && state.verifiedEvidence) return state.verifiedEvidence;
   return state.histories.find(entry => isDeepStrictEqual(entry.value, evidence) && entry.sha256 === hash(evidence))?.value;
 }
 function assertDispatchInputs(state) {
   for (const key of Object.keys(state.callerInputs)) {
+    if (state.immutableCallerInputs?.get(key) === state.callerInputs[key]) continue;
     equal(state.callerInputs[key], state[key], 'PRIVATE_LINK_DISPATCH_VALIDATION_CHANGED');
     if (!state.inputHashes.has(key)) state.inputHashes.set(key, hash(state[key]));
     if (hash(state.callerInputs[key]) !== state.inputHashes.get(key)) fail('PRIVATE_LINK_DISPATCH_VALIDATION_CHANGED');
@@ -70,6 +104,18 @@ function withDispatchValidation(c, context, values, use) {
     const snapshot = { ...copied, evidence: Object.freeze({ ...copied.evidence, externalAdoption: evidence.externalAdoption }) };
     const state = { c, context, ...snapshot, callerInputs: values, inputHashes: new Map(),
       histories: [], continuations: [], originals: [], validated: false };
+    const frozen = (value, seen = new WeakSet()) => {
+      if (value === null || typeof value !== 'object' || seen.has(value)) return true;
+      if (!Object.isFrozen(value)) return false;
+      const descriptors = Object.values(Object.getOwnPropertyDescriptors(value));
+      if (descriptors.some(descriptor => !Object.hasOwn(descriptor, 'value'))) return false;
+      seen.add(value); return descriptors.every(descriptor => frozen(descriptor.value, seen));
+    };
+    state.immutableCallerInputs = new Map();
+    for (const [key, value] of Object.entries(values)) if (value !== null && typeof value === 'object' && frozen(value)) {
+      equal(value, state[key], 'PRIVATE_LINK_DISPATCH_VALIDATION_CHANGED');
+      state.immutableCallerInputs.set(key, value);
+    }
     dispatchValidations.set(validation, state);
     try {
       const result = withPrivateLinkAssignedPrefixHash(snapshot.evidence, () => use(snapshot, validation));
@@ -736,10 +782,13 @@ function verifyControlEvidence(c, context, evidence, at, validation) {
   }
   if (externalNsg(evidence) && !validation) return withPrivateLinkNsgValidation(c, context, externalNsg(evidence), evidence,
     proof => verifyControlEvidence(c, context, evidence, at, proof));
+  const scope = runtimeValidations.getStore();
+  if (scope && activeRuntimeValidations.has(scope) && evidence === scope.evidence) scope.statistics.immutableHistoryVerifications++;
   const result = withPrivateLinkControlValidation(c, context, () => verifyControlRecords(c, context, evidence, at, validation));
   if (state) {
     const value = immutableDispatchCopy(evidence);
     state.histories.push({ value, sha256: hash(value) });
+    if (evidence === state.evidence) state.verifiedEvidence = value;
   }
   return result;
 }
@@ -1333,6 +1382,15 @@ export function verifyPrivateLinkContinuation(c, context, evidence, stage, sourc
   return continuation;
 }
 export function verifyPrivateLinkRuntimePrerequisites(c, context, evidence, at) {
+  const scope = runtimeValidation(c, context, evidence);
+  if (scope) {
+    if (!scope.prerequisites) {
+      scope.statistics.prerequisiteVerifications++;
+      scope.prerequisites = immutableDispatchCopy(runtimePrerequisites(c, context, evidence, at, scope.validation));
+    } else scope.statistics.prerequisiteReuses++;
+    if (at !== undefined && evidence.records.some(record => canonicalInstant(record.completedAt) > at)) fail('PRIVATE_LINK_RECORD_INVALID');
+    return scope.prerequisites;
+  }
   return withDispatchValidation(c, context, { evidence }, (snapshot, validation) => runtimePrerequisites(c, context, snapshot.evidence, at, validation));
 }
 function runtimePrerequisites(c, context, evidence, at, validation) {
@@ -1759,12 +1817,16 @@ export function privateLinkAzureIO(c, context, evidence, phase, directory, input
   };
 }
 export async function currentPrivateLinkRuntimeProof(c, context, evidence, directory, invoke = az, options = {}) {
+  if (Object.hasOwn(options, 'runtimeValidation') || Object.hasOwn(options, 'validationScope')) fail('PRIVATE_LINK_RUNTIME_VALIDATION_FORGED');
   const at = (options.now ?? Date.now)(), deadline = Math.min(options.deadline ?? at + LIMITS.checkMs, at + LIMITS.checkMs);
+  const scope = runtimeValidation(c, context, evidence);
+  if (scope) return currentRuntimeProof(c, context, evidence, directory, invoke, options, at, deadline, scope.validation, scope);
   return withDispatchValidation(c, context, { evidence }, (snapshot, validation) =>
     currentRuntimeProof(c, context, snapshot.evidence, directory, invoke, options, at, deadline, validation));
 }
-async function currentRuntimeProof(c, context, evidence, directory, invoke, options, at, deadline, validation) {
-  const prerequisites = runtimePrerequisites(c, context, evidence, at, validation);
+async function currentRuntimeProof(c, context, evidence, directory, invoke, options, at, deadline, validation, scope = null) {
+  const prerequisites = scope ? verifyPrivateLinkRuntimePrerequisites(c, context, evidence, at) :
+    runtimePrerequisites(c, context, evidence, at, validation);
   const originalNameProjection = options.nameProjection ?? null;
   const nameProjection = originalNameProjection ? immutableDispatchCopy(originalNameProjection) : null;
   const nameReviewSha256 = hash(nameProjection);
