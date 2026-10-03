@@ -129,6 +129,13 @@ and those absent empty fields have an equivalent preview representation.
 Null/nonempty exclusions, missing or changed grants, additional permission
 blocks and broader assignable scopes remain contradictions. The submitted
 template and subsequent role readback checks are unchanged.
+The exact queue-assignment Create preview may similarly omit its top-level
+scope when the resource ID already contains that identical queue scope, and
+omit `principalType: ServicePrincipal` only when the unchanged principal ID
+matches an independently read user-assigned managed identity. Conflicting or
+null fields, missing identity evidence, different roles/principals and added
+conditions remain blocking. The request and actual assignment readback still
+require the original principal type and exact queue scope.
 
 Control dispatch journals distinguish known non-submission, possible
 submission, and an invocation that was reached. A durable version-3

@@ -6,6 +6,50 @@ import { privateLinkPreservedIds, verifyPrivateLinkPreview } from '../private-li
 import { privateLinkFixture, privateInput, privateSnapshotFixture } from './private-link.fixture.mjs';
 import { queueDefenderFixture } from './queue-defender.fixture.mjs';
 
+test('queue-assignment preview omission is bound to exact resource scope and independently read UAMI principal', async () => {
+  const f = await privateLinkFixture({ ...privateInput, version: 2 });
+  const phase = privateLinkPhase(f.c, f.context, 'assign-queue-role'), descriptor = phase.resources[0];
+  const snapshot = privateSnapshotFixture(f, 'create-queue-role');
+  const identity = Object.values(snapshot.resources).find(value =>
+    value?.properties?.principalId === descriptor.expected.properties.principalId);
+  identity.type = 'Microsoft.ManagedIdentity/userAssignedIdentities';
+  const preview = { status: 'Succeeded', changes: [{ resourceId: descriptor.id, changeType: 'Create',
+    after: { ...structuredClone(descriptor.expected), id: descriptor.id } }] };
+  delete preview.changes[0].after.scope;
+  delete preview.changes[0].after.properties.principalType;
+  const bytes = json(preview), phaseBytes = json(phase);
+  assert.equal(verifyPrivateLinkPreview(phase, preview, snapshot, []), digest(bytes));
+  assert.equal(json(preview), bytes); assert.equal(json(phase), phaseBytes);
+  for (const mutate of [
+    p => { p.changes[0].after.scope = null; },
+    p => { p.changes[0].after.scope = `/subscriptions/${f.c.subscriptionId}`; },
+    p => { p.changes[0].after.properties.principalType = null; },
+    p => { p.changes[0].after.properties.principalType = 'User'; },
+    p => { p.changes[0].after.properties.principalId = '00000000-0000-4000-8000-000000000099'; },
+    p => { p.changes[0].after.properties.roleDefinitionId += '-foreign'; },
+    p => { p.changes[0].after.properties.condition = 'unreviewed'; },
+    p => { p.changes[0].after.properties.delegatedManagedIdentityResourceId = 'unreviewed'; },
+    p => { p.changes[0].resourceId += '-foreign'; },
+  ]) {
+    const changed = structuredClone(preview); mutate(changed);
+    assert.throws(() => verifyPrivateLinkPreview(phase, changed, snapshot, []));
+  }
+  assert.throws(() => verifyPrivateLinkPreview(phase, preview, { resources: {} }, []), /WHATIF_CONTRADICTION/);
+  const wrongType = structuredClone(snapshot);
+  Object.values(wrongType.resources).find(value => value?.properties?.principalId === descriptor.expected.properties.principalId).type =
+    'Microsoft.ManagedIdentity/systemAssignedIdentities';
+  assert.throws(() => verifyPrivateLinkPreview(phase, preview, wrongType, []), /WHATIF_CONTRADICTION/);
+  const changedSnapshot = structuredClone(snapshot);
+  for (const resource of Object.values(changedSnapshot.resources)) if (resource?.properties?.principalId === descriptor.expected.properties.principalId) {
+    resource.properties.principalId = '00000000-0000-4000-8000-000000000099';
+  }
+  assert.throws(() => verifyPrivateLinkPreview(phase, preview, changedSnapshot, []), /WHATIF_CONTRADICTION/);
+  const changedPhase = structuredClone(phase);
+  changedPhase.resources[0].expected.scope = `/subscriptions/${f.c.subscriptionId}`;
+  assert.throws(() => verifyPrivateLinkPreview(changedPhase, preview, snapshot, []), /WHATIF_CONTRADICTION/);
+  assert.throws(() => verifyPrivateLinkPreview({ ...phase, stage: 'create-queue-role' }, preview, snapshot, []), /WHATIF_CONTRADICTION/);
+});
+
 test('native queue-role Create preview may omit only its two empty exclusion arrays', async () => {
   const f = await privateLinkFixture({ ...privateInput, version: 2 });
   const phase = privateLinkPhase(f.c, f.context, 'create-queue-role'), descriptor = phase.resources[0];

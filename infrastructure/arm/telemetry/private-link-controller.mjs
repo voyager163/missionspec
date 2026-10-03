@@ -430,6 +430,14 @@ export function verifyPrivateLinkPreview(phase, preview, snapshot, known) {
             isDeepStrictEqual(expected.properties.permissions[0][key], [])) delete expected.properties.permissions[0][key];
       }
     }
+    if (phase.stage === 'assign-queue-role' && d.type === 'Microsoft.Authorization/roleAssignments') {
+      const scope = d.id.slice(0, d.id.toLowerCase().lastIndexOf('/providers/microsoft.authorization/roleassignments/'));
+      if (!Object.hasOwn(actual, 'scope') && sameId(expected.scope, scope)) delete expected.scope;
+      if (actual.properties && !Object.hasOwn(actual.properties, 'principalType') &&
+          expected.properties.principalType === 'ServicePrincipal' &&
+          Object.values(snapshot.resources ?? {}).some(value => value?.type === 'Microsoft.ManagedIdentity/userAssignedIdentities' &&
+            value.properties?.principalId === expected.properties.principalId)) delete expected.properties.principalType;
+    }
     for (const key of ['apiVersion', 'dependsOn']) {
       if (Object.hasOwn(actual, key)) equal(actual[key], expected[key], 'PRIVATE_LINK_WHATIF_CONTRADICTION');
       delete actual[key]; delete expected[key];
