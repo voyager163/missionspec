@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: General privacy questions
+    url: https://github.com/voyager163/missionspec/issues/new?title=%5BPrivacy%5D%3A%20
+    about: Ask only questions safe to publish. Do not include personal data or sensitive findings.
+  - name: Security and sensitive privacy findings
+    url: https://github.com/voyager163/missionspec/blob/develop/SECURITY.md
+    about: Private vulnerability reporting is disabled. Read the policy; never post sensitive findings publicly.
+  - name: Conduct concerns
+    url: https://github.com/voyager163/missionspec/blob/develop/CODE_OF_CONDUCT.md
+    about: Use the separate conduct contact described in the Code of Conduct.
