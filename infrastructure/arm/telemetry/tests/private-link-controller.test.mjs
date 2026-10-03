@@ -22,6 +22,17 @@ function prefix(stage) { return { ...chain, records: chain.records.slice(0, STAG
 const at = Date.parse(chain.records.at(-1).completedAt) + 1000;
 function f() { return { ...base, at }; }
 
+test('missing effective-configuration GET does not qualify retirement while its listing is stale', () => {
+  const before = chain.records.find(value => value.stage === 'disable-storage-public').after;
+  const after = structuredClone(chain.records.find(value => value.stage === 'retire-nsp-association').after);
+  assert.equal(after.effective, null);
+  after.lists.effective = { value: [structuredClone(before.lists.effective.value[0])] };
+  assert.throws(() => verifyPrivateLinkSnapshot(base.c, base.context, after, 'retire-nsp-association'),
+    /PRIVATE_LINK_NSP_EFFECTIVE_COPY_PRESENT/);
+  after.lists.effective = { value: [] };
+  verifyPrivateLinkSnapshot(base.c, base.context, after, 'retire-nsp-association');
+});
+
 test('production controller executes each budget/network/retirement/RBAC setup boundary and preserves failed original NSP', () => {
   const record = verifyPrivateLinkControlEvidence(base.c, base.context, chain, at);
   assert.equal(record.stage, 'assign-queue-role');

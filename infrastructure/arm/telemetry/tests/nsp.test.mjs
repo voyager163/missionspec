@@ -48,13 +48,13 @@ function memoryNspStore() {
   return { store, files, writes };
 }
 
-test('NSP NotFound means absence only for the exact association or rule GET in the selected subscription', async () => {
+test('NSP NotFound means absence only for the fixed owned retirement resources and selected subscription', async () => {
   const { f, evidence } = await initial(), n = evidence.topology.ids;
   const absent = 'ERROR: Not Found({"error":{"code":"NotFound","message":"The requested NSP child does not exist."}})';
   const error = stderr => async () => { throw Object.assign(new Error('unit response'), { stderr }); };
   const args = (url, method = 'GET', subscription = f.c.subscriptionId) =>
     ['rest', '--method', method, '--url', url, '--subscription', subscription];
-  for (const id of [n.association, n.rule]) {
+  for (const id of [n.perimeter, n.profile, n.association, n.rule]) {
     const url = `https://management.azure.com${id}?api-version=${NSP_API}`;
     assert.equal(await az(args(url), 10, error(absent)), null);
     for (const method of ['PUT', 'PATCH', 'POST', 'DELETE']) {
@@ -66,10 +66,11 @@ test('NSP NotFound means absence only for the exact association or rule GET in t
       url.replace(`/resourceGroups/${f.c.namePrefix}-telemetry/`, '/resourceGroups/missionspec-other-telemetry/'),
       url.replace('/Microsoft.Network/', '/Microsoft.Storage/'),
       `https://management.azure.com${id.slice(0, id.lastIndexOf('/'))}?api-version=${NSP_API}`,
-      `https://management.azure.com${n.perimeter}?api-version=${NSP_API}`,
-      `https://management.azure.com${n.profile}?api-version=${NSP_API}`,
+      `https://management.azure.com${n.perimeter}/profiles/unreviewed-profile?api-version=${NSP_API}`,
+      `https://management.azure.com${n.perimeter}/resourceAssociations/unreviewed-association?api-version=${NSP_API}`,
+      `https://management.azure.com${n.profile}/accessRules/unreviewed-rule?api-version=${NSP_API}`,
       `https://management.azure.com${n.account}?api-version=${NSP_API}`,
-    ]) await assert.rejects(az(args(badUrl), 10, error(absent)), /ARM_OPERATION_FAILED/);
+    ].filter(value => value !== url)) await assert.rejects(az(args(badUrl), 10, error(absent)), /ARM_OPERATION_FAILED/);
     await assert.rejects(az(args(url, 'GET', f.c.tenantId), 10, error(absent)), /ARM_OPERATION_FAILED/);
     await assert.rejects(az(args(url).slice(0, 5), 10, error(absent)), /ARM_OPERATION_FAILED/);
     for (const text of [
@@ -78,6 +79,37 @@ test('NSP NotFound means absence only for the exact association or rule GET in t
       'ERROR: {"error":{"code":"NotFound"}}', 'ERROR: NotFound', '',
     ]) await assert.rejects(az(args(url), 10, error(text)), /ARM_OPERATION_FAILED/);
   }
+});
+
+test('Storage effective-configuration NotFound is scoped to its exact GET family, not collections or mutations', async () => {
+  const { f, evidence } = await initial(), n = evidence.topology.ids;
+  const id = `${n.account}/networkSecurityPerimeterConfigurations/00000000-0000-4000-8000-000000000001.queue-storage-v1`;
+  const url = `https://management.azure.com${id}?api-version=${NSP_STORAGE_API}`;
+  const args = (value = url, method = 'GET', subscription = f.c.subscriptionId) =>
+    ['rest', '--method', method, '--url', value, '--subscription', subscription];
+  const absent = 'ERROR: Not Found({"error":{"code":"NotFound","message":"The effective configuration no longer exists."}})';
+  const error = stderr => async () => { throw Object.assign(new Error('unit response'), { stderr }); };
+  assert.equal(await az(args(), 10, error(absent)), null);
+  for (const method of ['PUT', 'PATCH', 'POST', 'DELETE']) {
+    await assert.rejects(az(args(url, method), 10, error(absent)), /ARM_OPERATION_FAILED/);
+  }
+  for (const value of [
+    url.replace('https:', 'http:'), url.replace('management.azure.com', 'untrusted.invalid'),
+    url.replace(NSP_STORAGE_API, '2024-01-01'), url + '&extra=true',
+    url.replace('queue-storage-v1', 'unreviewed-profile'),
+    url.replace('00000000-0000-4000-8000-000000000001', 'not-a-guid'),
+    url.replace('/storageAccounts/', '/storageAccounts/foreign-'),
+    url.replace('/Microsoft.Storage/', '/Microsoft.Network/'),
+    `https://management.azure.com${n.account}/networkSecurityPerimeterConfigurations?api-version=${NSP_STORAGE_API}`,
+    `https://management.azure.com${n.account}?api-version=${NSP_STORAGE_API}`,
+  ]) await assert.rejects(az(args(value), 10, error(absent)), /ARM_OPERATION_FAILED/);
+  await assert.rejects(az(args(url, 'GET', f.c.tenantId), 10, error(absent)), /ARM_OPERATION_FAILED/);
+  await assert.rejects(az(args().slice(0, 5), 10, error(absent)), /ARM_OPERATION_FAILED/);
+  for (const text of [
+    'ERROR: Forbidden({"error":{"code":"NotFound"}})', 'ERROR: Unauthorized({"error":{"code":"NotFound"}})',
+    'ERROR: Too Many Requests({"error":{"code":"NotFound"}})', 'ERROR: Not Found({"error":{"code":"AuthorizationFailed"}})',
+    'ERROR: {"error":{"code":"NotFound"}}', 'ERROR: NotFound', '',
+  ]) await assert.rejects(az(args(), 10, error(text)), /ARM_OPERATION_FAILED/);
 });
 
 test('empty-boundary readback composes NSP child 404s with complete empty inventories', async () => {

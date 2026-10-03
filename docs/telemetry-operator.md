@@ -151,11 +151,27 @@ Runtime prerequisites require the actual assigned-queue prefix. Synthetic
 reads meet the runtime deadline; that measurement remains a separate gate
 before runtime effects.
 
+Successful control append persists both the revision record and its complete
+aggregate evidence before the canonical resolution and successful head.
+Source, pending-head, review, input and cancellation guards run again after
+those awaited writes. An aggregate storage failure cannot advance the
+successful head; a submitted request still requires read-only recovery, never
+replay. Immutable validation reuse also binds canonical key order, not just
+equivalent property values.
+
 Provider metadata stays byte-preserved. An explicit `+00:00` UTC suffix, as
 returned by ACR, is equivalent to `Z` for 100ns identity comparisons; other
 offsets or an absent zone are not inferred to be UTC. The separately scoped
 timezone-less ACA creation format remains an opaque recorded identity rather
 than a reconstructed timestamp.
+
+An HTTP 404 with ARM code `NotFound` is absence only for GETs of the fixed owned
+NSP perimeter/profile/association/rule at the pinned Network API, or the exact
+owned Storage effective-configuration child at its pinned Storage API.
+The URL subscription must match the selected subscription. Collections,
+foreign targets, other statuses/codes and mutating requests are not normalized.
+A stale effective-configuration listing still blocks retirement qualification
+until the complete listing and individual reads converge.
 
 External governance changes are not folded into the original plan or treated
 as effects of a stopped deployment. `observe-private-link-nsg-adoption` and
@@ -355,19 +371,27 @@ a new cleanup approval must bind its hash. That review authorizes only the
 fixed observed public-probe generation; it neither proves original creation
 nor grants generic resource adoption.
 
-Large runtime and retirement artifacts use a lossless, versioned storage
-envelope for repeated `controlEvidence` and `candidate` blocks. Only the fixed
-runtime record kinds' exact thirteen-stage prefix through `assign-queue-role`
-and version-2 receiver candidate fields can be stored separately, under
+Large control, runtime and retirement artifacts use lossless, versioned storage
+envelopes. Fixed runtime record kinds can reference their exact thirteen-stage
+prefix through `assign-queue-role` and version-2 receiver candidate under
 distinct immutable content-addressed filenames in the private operator root.
-References cannot cross these two types and contain no caller-selected path. Each load checks
-the held file's owner, mode, size and content hash, then restores the full
-logical evidence before ordinary source, history, authority and drift
-validation. A hash is never a substitute for those checks.
+Continued, pre-runtime recovery records in a control chain can also be stored
+separately. Their duplicated `phase` and `preflight` members are reconstructed
+only from byte-identical members of the retained `recovery.original`, preserving
+property order and the complete original canonical digest. Unequal members are
+rejected, not repaired or replaced.
 
-Every file remains bounded by 64 MiB; the total distinct referenced content loaded for
-one artifact is also bounded. Recursive references, unknown reference
-positions, corrupted or aliased blobs and missing evidence fail closed.
+Version-2 evidence blobs may contain only those narrowly typed recovery-record
+references; no general recursive graph or caller-selected path is accepted.
+References cannot cross types or move to unapproved fields. Each load checks
+held-file ownership, mode, size and content hashes and fully hydrates the logical
+evidence before ordinary source, history, authority and drift validation.
+A content hash or storage projection never substitutes for semantic validation.
+
+Every file remains bounded by 64 MiB, as does the total distinct referenced
+content for one artifact. The unchanged 64-reference and eight-blob limits
+include the permitted nested evidence references. Cycles, other nesting,
+unknown positions, corrupt or aliased blobs and missing evidence fail closed.
 Only a single load may share identical frozen evidence objects in memory;
 there is no cross-operation validation cache. Historical plain JSON files
 remain readable and are never rewritten. Streaming canonical hashing

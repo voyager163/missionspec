@@ -246,9 +246,11 @@ export async function az(args, timeout = 60000, run = execute) {
     const queueAssignment = /^https:\/\/management\.azure\.com\/subscriptions\/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\/resourceGroups\/missionspec-[a-z0-9]{2,10}-telemetry\/providers\/Microsoft\.Storage\/storageAccounts\/msrtq[a-z0-9]{8,16}\/queueServices\/default\/queues\/telemetry-events-v1\/providers\/Microsoft\.Authorization\/roleAssignments\/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\?api-version=2022-04-01$/iu.exec(args[args.indexOf('--url') + 1] ?? '');
     if (args[0] === 'rest' && args[args.indexOf('--method') + 1] === 'GET' && status === 404 && code === 'RoleAssignmentNotFound' &&
         queueAssignment && sameId(queueAssignment[1], args[args.indexOf('--subscription') + 1])) return null;
-    const nspChild = /^https:\/\/management\.azure\.com\/subscriptions\/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\/resourceGroups\/(missionspec-[a-z0-9]{2,10})-telemetry\/providers\/Microsoft\.Network\/networkSecurityPerimeters\/\2-queue-[a-z0-9]{8,16}\/(?:resourceAssociations\/queue-storage-v1|profiles\/queue-storage-v1\/accessRules\/same-subscription-v1)\?api-version=2025-09-01$/iu.exec(args[args.indexOf('--url') + 1] ?? '');
+    const nspResource = /^https:\/\/management\.azure\.com\/subscriptions\/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\/resourceGroups\/(missionspec-[a-z0-9]{2,10})-telemetry\/providers\/Microsoft\.Network\/networkSecurityPerimeters\/\2-queue-[a-z0-9]{8,16}(?:\/(?:resourceAssociations\/queue-storage-v1|profiles\/queue-storage-v1(?:\/accessRules\/same-subscription-v1)?))?\?api-version=2025-09-01$/iu.exec(args[args.indexOf('--url') + 1] ?? '');
+    const storageNspConfiguration = /^https:\/\/management\.azure\.com\/subscriptions\/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\/resourceGroups\/missionspec-[a-z0-9]{2,10}-telemetry\/providers\/Microsoft\.Storage\/storageAccounts\/msrtq[a-z0-9]{8,16}\/networkSecurityPerimeterConfigurations\/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.queue-storage-v1\?api-version=2025-01-01$/iu.exec(args[args.indexOf('--url') + 1] ?? '');
+    const nspAbsent = nspResource ?? storageNspConfiguration;
     if (args[0] === 'rest' && args[args.indexOf('--method') + 1] === 'GET' && status === 404 && code === 'NotFound' &&
-        nspChild && sameId(nspChild[1], args[args.indexOf('--subscription') + 1])) return null;
+        nspAbsent && sameId(nspAbsent[1], args[args.indexOf('--subscription') + 1])) return null;
     const safe = new Error('ARM_OPERATION_FAILED'); safe.armCode = code; safe.httpStatus = status;
     safe.diagnostics = processFailureMetadata(error, timeout, performance.now() - started, azureStep(args), status, code);
     throw safe;

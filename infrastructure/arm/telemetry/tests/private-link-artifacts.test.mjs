@@ -35,6 +35,15 @@ function withCandidate(value, reviewedCandidate) {
     if (child !== reviewedCandidate) withCandidate(child, reviewedCandidate);
   }
 }
+function continuedRecovery(stage, phasePadding = '', preflightPadding = '') {
+  const phase = { version: 1, kind: 'fixed-private-link-control-phase', stage,
+    continuation: { version: 1, kind: 'reviewed-private-link-no-submission-continuation' }, unitPadding: phasePadding };
+  const preflight = { kind: 'checked-private-link-phase', runtimeCompletion: null, unitPadding: preflightPadding };
+  const original = { phase, publication: {}, approval: {}, preflight, journal: {}, intent: {} };
+  return { version: 3, kind: 'reviewed-private-link-recovery', stage, phase, publication: {}, approval: {},
+    preflight, intent: {}, intentSha256: digest('UNIT intent'), journal: {}, after: {}, deployment: null, operations: null,
+    completedAt: '2026-10-02T00:00:00.000Z', authority: {}, recovery: { original, proposal: {}, review: {} } };
+}
 async function fixture(t) {
   const directory = join('infrastructure/arm/telemetry/tests', `.artifacts-${randomUUID()}`);
   await mkdir(directory, { mode: 0o700 });
@@ -222,4 +231,133 @@ test('only complete assigned-queue prefixes are externalized and malformed or ov
     /ARTIFACT_TOO_LARGE/);
   const many = Array.from({ length: 65 }, () => ({ kind: 'private-link-runtime-completion', controlEvidence: evidence() }));
   await assert.rejects(f.store.immutable(f.directory, 'too-many.json', many), /REFERENCE_LIMIT/);
+});
+
+test('continued recovery projection restores exact member order and canonical bytes in a partial prefix', async t => {
+  const f = await fixture(t), value = evidence();
+  value.records = value.records.slice(0, 9);
+  value.records[8] = continuedRecovery('retire-nsp-association', 'UNIT phase', 'UNIT preflight');
+  const before = json(value), originalHash = digestJson(value);
+  await f.store.immutable(f.directory, 'result.json', value);
+  const raw = await rawEnvelope(f), reference = raw.payload.records[8];
+  assert.equal(raw.version, 2); assert.equal(raw.referenceCount, 1);
+  assert.equal(reference.kind, 'private-link-continued-recovery-reference');
+  const blobName = (await readdir(f.root))[0], blob = await load(f.root, blobName);
+  assert.equal(blob.kind, 'private-link-continued-recovery-content');
+  assert.equal(blob.payload.phase, null); assert.equal(blob.payload.preflight, null);
+  assert.equal(blob.payloadSha256, digest(JSON.stringify(blob.payload) + '\n'));
+  const restored = await f.store.load(f.directory, 'result.json');
+  assert.equal(json(restored), before); assert.equal(digestJson(restored), originalHash);
+  assert.equal(restored.records[8].phase, restored.records[8].recovery.original.phase);
+  assert.equal(restored.records[8].preflight, restored.records[8].recovery.original.preflight);
+  assert.equal(Object.isFrozen(restored.records[8]), true);
+  assert.equal(Object.isFrozen(value.records[8]), false);
+  assert.equal(json(value), before);
+  assert.throws(() => verifyPrivateLinkControlEvidence({}, {}, restored),
+    'Lossless storage does not make a size-only fixture valid control evidence.');
+});
+
+test('projection never repairs unequal members, key-order drift or out-of-scope recovery records', async t => {
+  for (const [name, mutate] of [
+    ['phase mismatch', r => { r.phase = { ...r.phase, unitPadding: 'changed' }; }],
+    ['preflight mismatch', r => { r.preflight = { ...r.preflight, unitPadding: 'changed' }; }],
+    ['phase key order', r => { r.phase = Object.fromEntries(Object.entries(r.phase).reverse()); }],
+    ['unknown record field', r => { r.extra = true; }],
+    ['unknown original field', r => { r.recovery.original.extra = true; }],
+    ['runtime-bearing recovery', r => { r.preflight.runtimeCompletion = {}; }],
+  ]) await t.test(name, async sub => {
+    const f = await fixture(sub), value = evidence();
+    value.records[8] = continuedRecovery('retire-nsp-association');
+    mutate(value.records[8]);
+    await assert.rejects(f.store.immutable(f.directory, 'result.json', value),
+      /RECOVERY_|CLOSED_INPUT_REQUIRED/);
+  });
+  const f = await fixture(t), plain = continuedRecovery('retire-nsp-association');
+  delete plain.phase.continuation;
+  const value = evidence(); value.records[8] = plain;
+  await f.store.immutable(f.directory, 'legacy-recovery.json', value);
+  assert.equal((await readdir(f.root)).length, 0);
+  assert.deepEqual(await f.store.load(f.directory, 'legacy-recovery.json'), value);
+});
+
+test('recovery references reject misplaced, corrupt, nested and substituted content', async t => {
+  for (const kind of ['scope', 'count', 'missing', 'hash', 'projection', 'nested', 'member']) await t.test(kind, async sub => {
+    const f = await fixture(sub), value = evidence();
+    value.records[8] = continuedRecovery('retire-nsp-association');
+    await f.store.immutable(f.directory, 'result.json', value);
+    const raw = await rawEnvelope(f), ref = raw.payload.records[8], name = (await readdir(f.root))[0];
+    if (kind === 'scope') await replaceEnvelope(f, envelope => { envelope.payload.untrusted = ref; });
+    else if (kind === 'count') await replaceEnvelope(f, envelope => { envelope.referenceCount++; });
+    else if (kind === 'missing') await rm(join(f.root, name));
+    else {
+      const blob = await load(f.root, name);
+      if (kind === 'hash') blob.recordSha256 = digest('UNIT substituted hash');
+      if (kind === 'projection') blob.payload.phase = blob.payload.recovery.original.phase;
+      if (kind === 'nested') blob.payload.recovery.original.phase.unitPadding = ref;
+      if (kind === 'member') blob.payload.recovery.original.phase.stage = 'create-network';
+      blob.payloadSha256 = digest(JSON.stringify(blob.payload) + '\n');
+      const wire = JSON.stringify(blob) + '\n';
+      await writeFile(join(f.root, name), wire, { mode: 0o600 });
+      await replaceEnvelope(f, envelope => { envelope.payload.records[8].bytes = Buffer.byteLength(wire); });
+    }
+    await assert.rejects(f.store.load(f.directory, 'result.json'));
+  });
+});
+
+test('a recovery larger than the file cap is losslessly restored from a bounded projection', async t => {
+  const f = await fixture(t), value = evidence();
+  value.records = value.records.slice(0, 9);
+  value.records[8] = continuedRecovery('retire-nsp-association', 'a'.repeat(24 * 1024 * 1024), 'b'.repeat(12 * 1024 * 1024));
+  assert(Buffer.byteLength(JSON.stringify(value.records[8])) > MAX_PRIVATE_ARTIFACT_BYTES);
+  const before = digestJson(value);
+  await f.store.immutable(f.directory, 'result.json', value);
+  const raw = await rawEnvelope(f);
+  assert(raw.payload.records[8].bytes < MAX_PRIVATE_ARTIFACT_BYTES);
+  assert.equal(digestJson(await f.store.load(f.directory, 'result.json')), before);
+  for (const name of await readdir(f.root)) assert((await readFile(join(f.root, name))).length <= MAX_PRIVATE_ARTIFACT_BYTES);
+});
+
+test('partial-prefix recoveries compose with complete runtime evidence under unchanged byte and reference limits', async t => {
+  const f = await fixture(t), mib = 1024 * 1024, prefix = evidence('x'.repeat(28 * mib));
+  prefix.records[6] = continuedRecovery('create-environment', 'e'.repeat(3 * mib), 'f'.repeat(9 * mib / 4));
+  prefix.records[8] = continuedRecovery('retire-nsp-association', 'a'.repeat(19 * mib / 2), 'b'.repeat(21 * mib / 8));
+  for (let index = 9; index < 13; index++) prefix.records[index].unitPadding = 't'.repeat(3 * mib);
+  const runtime = completion(prefix);
+  withCandidate(runtime, candidate('c'.repeat(5 * mib)));
+  runtime.preflight = { current: { prerequisites: { oldReceiver: { unitPadding: 'r'.repeat(2240000) } },
+    effectivePolicy: { unitPadding: 'p'.repeat(1615000) }, snapshot: { unitPadding: 's'.repeat(208000) } } };
+  runtime.unitOtherFields = 'o'.repeat(256 * 1024);
+  // Size-only future fields include full measured current-proof constituents;
+  // neither this fixture nor a successful codec read grants runtime authority.
+  const final = { ...prefix, records: [...prefix.records, ...Array.from({ length: 5 },
+    () => ({ preflight: { runtimeCompletion: runtime } }))] };
+  const before = digestJson(final);
+  await f.store.immutable(f.directory, 'result.json', final);
+  const raw = await rawEnvelope(f);
+  assert.equal(raw.version, 2); assert.equal(raw.referenceCount, 62);
+  assert.equal((await readdir(f.root)).length, 4);
+  const storedPrefix = await load(f.root, `private-link-evidence-v2-${digestJson(prefix)}.json`);
+  assert.equal(storedPrefix.version, 2); assert.equal(storedPrefix.referenceCount, 2);
+  const sizes = [];
+  for (const name of await readdir(f.root)) sizes.push((await readFile(join(f.root, name))).length);
+  assert(sizes.every(size => size <= MAX_PRIVATE_ARTIFACT_BYTES));
+  assert(sizes.reduce((sum, size) => sum + size, 0) <= MAX_PRIVATE_ARTIFACT_BYTES);
+  assert((await readFile(join(f.directory, 'result.json'))).length <= MAX_PRIVATE_ARTIFACT_BYTES);
+  const restored = await f.store.load(f.directory, 'result.json');
+  assert.equal(digestJson(restored), before);
+  assert.equal(restored.records[6], restored.records[13].preflight.runtimeCompletion.controlEvidence.records[6]);
+  assert.equal(restored.records[8], restored.records[17].preflight.runtimeCompletion.controlEvidence.records[8]);
+  await assert.rejects(f.store.immutable(f.directory, 'too-many-nested.json',
+    { ...final, extra: { kind: 'private-link-runtime-completion', candidate: runtime.candidate } }), /REFERENCE_LIMIT/);
+});
+
+test('new recovery content retains the eight-blob and total distinct-content byte caps', async t => {
+  const f = await fixture(t), many = { ...evidence(), records: Array.from({ length: 9 }, (_, index) => ({
+    ...continuedRecovery('retire-nsp-association'), completedAt: `2026-10-02T00:00:0${index}.000Z`,
+  })) };
+  await assert.rejects(f.store.immutable(f.directory, 'too-many-blobs.json', many), /REFERENCE_LIMIT/);
+  const first = continuedRecovery('create-environment', 'p'.repeat(17 * 1024 * 1024), 'q'.repeat(17 * 1024 * 1024));
+  const second = continuedRecovery('retire-nsp-association', 'p'.repeat(17 * 1024 * 1024), 'q'.repeat(17 * 1024 * 1024));
+  await assert.rejects(f.store.immutable(f.directory, 'too-many-bytes.json', { ...evidence(), records: [first, second] }),
+    /REFERENCE_BYTES_LIMIT/);
 });

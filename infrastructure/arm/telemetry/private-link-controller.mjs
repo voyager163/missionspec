@@ -29,6 +29,7 @@ import { loadPrivateLinkArtifact, savePrivateLinkArtifact, updatePrivateLinkArti
 const here = dirname(fileURLToPath(import.meta.url)), sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const sha = value => typeof value === 'string' && /^[0-9a-f]{64}$/u.test(value);
 const stamp = at => new Date(at).toISOString();
+const operationLock = options => resolve(options.store?.root ?? resolve(here, '../../opentofu/telemetry/.operator-private'), 'controller.lock');
 // Each operation binds its own immutable copies. Nothing is trusted across
 // operations; caller inputs and clocks are checked again after awaits.
 const dispatchValidations = new WeakMap();
@@ -47,11 +48,13 @@ function dispatchValidation(c, context, validation) {
   return state;
 }
 function verifiedHistory(state, evidence) {
-  return state.histories.find(value => isDeepStrictEqual(value, evidence));
+  return state.histories.find(entry => isDeepStrictEqual(entry.value, evidence) && entry.sha256 === hash(evidence))?.value;
 }
 function assertDispatchInputs(state) {
   for (const key of Object.keys(state.callerInputs)) {
     equal(state.callerInputs[key], state[key], 'PRIVATE_LINK_DISPATCH_VALIDATION_CHANGED');
+    if (!state.inputHashes.has(key)) state.inputHashes.set(key, hash(state[key]));
+    if (hash(state.callerInputs[key]) !== state.inputHashes.get(key)) fail('PRIVATE_LINK_DISPATCH_VALIDATION_CHANGED');
   }
 }
 function withDispatchValidation(c, context, values, use) {
@@ -63,7 +66,8 @@ function withDispatchValidation(c, context, values, use) {
   return withPrivateLinkNsgValidation(c, context, externalNsg(evidence), evidence, validation => {
     const copied = immutableDispatchCopy(values);
     const snapshot = { ...copied, evidence: Object.freeze({ ...copied.evidence, externalAdoption: evidence.externalAdoption }) };
-    const state = { c, context, ...snapshot, callerInputs: values, histories: [], continuations: [], originals: [], validated: false };
+    const state = { c, context, ...snapshot, callerInputs: values, inputHashes: new Map(),
+      histories: [], continuations: [], originals: [], validated: false };
     dispatchValidations.set(validation, state);
     try {
       const result = use(snapshot, validation);
@@ -684,7 +688,10 @@ function verifyControlEvidence(c, context, evidence, at, validation) {
   if (externalNsg(evidence) && !validation) return withPrivateLinkNsgValidation(c, context, externalNsg(evidence), evidence,
     proof => verifyControlEvidence(c, context, evidence, at, proof));
   const result = withPrivateLinkControlValidation(c, context, () => verifyControlRecords(c, context, evidence, at, validation));
-  if (state) state.histories.push(immutableDispatchCopy(evidence));
+  if (state) {
+    const value = immutableDispatchCopy(evidence);
+    state.histories.push({ value, sha256: hash(value) });
+  }
   return result;
 }
 function verifyControlRecords(c, context, evidence, at, validation) {
@@ -900,7 +907,7 @@ async function executePhase(c, context, evidence, phase, proof, approval, io, va
         const result = { ...evidence, records: [...evidence.records, record] };
         verifyControlEvidence(c, context, result, io.now(), validation);
         guard();
-        await io.append(pending, record, privateLinkHead(context, result));
+        await io.append(pending, record, privateLinkHead(context, result), guard);
         await io.saveJournal(journal);
         return record;
       }
@@ -984,7 +991,8 @@ function verifyRecovery(c, context, prior, record, validation) {
 }
 export function verifyPrivateLinkOriginalNoSubmission(c, context, evidence, original, validation = null) {
   const state = dispatchValidation(c, context, validation);
-  if (state?.originals.some(value => isDeepStrictEqual(value.evidence, evidence) && isDeepStrictEqual(value.original, original))) return original;
+  if (state?.originals.some(value => isDeepStrictEqual(value.evidence, evidence) && isDeepStrictEqual(value.original, original) &&
+      value.evidenceSha256 === hash(evidence) && value.originalSha256 === hash(original))) return original;
   if (externalNsg(evidence) && !validation) return withDispatchValidation(c, context, { evidence, original }, (snapshot, proof) => {
     verifyPrivateLinkOriginalNoSubmission(c, context, snapshot.evidence, snapshot.original, proof);
     return original;
@@ -1007,7 +1015,8 @@ export function verifyPrivateLinkOriginalNoSubmission(c, context, evidence, orig
   verifyPrivateLinkApproval(c, context, original.phase, original.preflight, original.approval, canonicalInstant(original.intent.at));
   if (original.intent.phaseSha256 !== hash(original.phase) || original.intent.requestSha256 !== hash(original.phase.request) ||
       original.intent.approvalSha256 !== hash(original.approval) || original.intent.previousHeadSha256 !== hash(original.phase.expectedHead)) fail('PRIVATE_LINK_ORIGINAL_INTENT_CHANGED');
-  if (state) state.originals.push(immutableDispatchCopy({ evidence, original }));
+  if (state) state.originals.push(immutableDispatchCopy({ evidence, original,
+    evidenceSha256: hash(evidence), originalSha256: hash(original) }));
   return original;
 }
 function verifyNoSubmissionCurrent(c, context, evidence, original, after, validation = null) {
@@ -1219,7 +1228,8 @@ export function verifyPrivateLinkNoSubmissionResolution(c, context, evidence, re
 export function verifyPrivateLinkContinuation(c, context, evidence, stage, source, continuation, at, validation = null) {
   const state = dispatchValidation(c, context, validation);
   const cached = state?.continuations.find(value => value.stage === stage && value.source === source &&
-    isDeepStrictEqual(value.continuation, continuation) && isDeepStrictEqual(value.evidence, evidence));
+    isDeepStrictEqual(value.continuation, continuation) && isDeepStrictEqual(value.evidence, evidence) &&
+    value.continuationSha256 === hash(continuation) && value.evidenceSha256 === hash(evidence));
   if (cached) {
     boundedReview(continuation.review, at);
     return continuation;
@@ -1250,7 +1260,8 @@ export function verifyPrivateLinkContinuation(c, context, evidence, stage, sourc
       review.pendingHeadSha256 !== hash(resolution.proposal.pendingHead) ||
       review.fixedPhaseSha256 !== hash(fixed) || review.requestSha256 !== hash(fixed.request) ||
       review.sourceSha256 !== source || canonicalInstant(review.approvedAt) < canonicalInstant(resolution.completedAt)) fail('PRIVATE_LINK_CONTINUATION_REVIEW_REQUIRED');
-  if (state) state.continuations.push(immutableDispatchCopy({ stage, source, continuation, evidence }));
+  if (state) state.continuations.push(immutableDispatchCopy({ stage, source, continuation, evidence,
+    continuationSha256: hash(continuation), evidenceSha256: hash(evidence) }));
   return continuation;
 }
 export function verifyPrivateLinkRuntimePrerequisites(c, context, evidence, at) {
@@ -1462,7 +1473,7 @@ export async function runPrivateLinkNsgAdoption(c, context, evidence, operation,
     await savePrivateLinkArtifact(directory, 'private-link-nsg-adoption-proposal.json', proposal);
     return proposal;
   }
-  const lockPath = resolve(here, '../../opentofu/telemetry/.operator-private/controller.lock'), lock = await open(lockPath, 'wx', 0o600);
+  const lockPath = operationLock(options), lock = await open(lockPath, 'wx', 0o600);
   try { return await adoptPrivateLinkNsg(c, context, evidence, inputs.proposal, inputs.review, inputs.publication, io); }
   finally { await lock.close(); await rm(lockPath); }
 }
@@ -1549,18 +1560,23 @@ export function privateLinkAzureIO(c, context, evidence, phase, directory, input
         verifyPrivateLinkCostReview(c, context, proof.costReview, proof.costEvidence, source, io.now());
         verifyPrivateLinkMigrationReview(c, context, proof.migrationReview, io.now(), source);
         if (record.phase.continuation && !record.recovery) boundedReview(record.phase.continuation.review, io.now());
-        if (io.now() >= canonicalInstant(expires) || (!record.recovery &&
+        if (options.cancelled?.() || io.now() >= canonicalInstant(expires) || (!record.recovery &&
             io.now() >= record.journal.rolloutDeadline)) fail('PRIVATE_LINK_APPEND_EXPIRED');
       };
-      guard();
-      await readPrivateLinkHead(context, evidence, { root, read: readStore, pending, continuation });
-      if (await io.sourceDigest() !== publication.sourceSha256) fail('PRIVATE_LINK_SOURCE_CHANGED');
-      guard();
+      const current = async () => {
+        guard();
+        await readPrivateLinkHead(context, evidence, { root, read: readStore, pending, continuation });
+        if (await io.sourceDigest() !== publication.sourceSha256) fail('PRIVATE_LINK_SOURCE_CHANGED');
+        guard();
+      };
+      await current();
       await immutableStore(directory, file(record.recovery ? 'recovered-record' : 'record'), record);
-      await immutableStore(root, `private-link-resolution-${hash(pending)}.json`, { pending, record, next });
-      await readPrivateLinkHead(context, evidence, { root, read: readStore, pending, continuation });
-      if (await io.sourceDigest() !== publication.sourceSha256) fail('PRIVATE_LINK_SOURCE_CHANGED');
       guard();
+      await immutableStore(directory, file(record.recovery ? 'recovered-evidence' : 'evidence'),
+        { ...evidence, records: [...evidence.records, record] });
+      await current();
+      await immutableStore(root, `private-link-resolution-${hash(pending)}.json`, { pending, record, next });
+      await current();
       await saveStore(root, headName(context), next);
     },
     resolveNoSubmission: async (pending, record, operationGuard = null) => {
@@ -1764,13 +1780,10 @@ export async function runPrivateLinkControl(c, context, evidence, stage, operati
   }
   if (!['execute', 'recover', 'retire'].includes(operation)) fail('PRIVATE_LINK_FIXED_COMMAND_REQUIRED');
   if (operation === 'retire' && !stage.startsWith('retire-')) fail('PRIVATE_LINK_RETIREMENT_STAGE_REQUIRED');
-  const lockPath = resolve(here, '../../opentofu/telemetry/.operator-private/controller.lock'), lock = await open(lockPath, 'wx', 0o600);
+  const lockPath = operationLock(options), lock = await open(lockPath, 'wx', 0o600);
   try {
     const record = operation === 'recover' ? await recoverWithValidation(c, context, evidence, inputs.original,
       inputs.proposal, inputs.recoveryReview, io, startedAt) : await executePrivateLinkPhase(c, context, evidence, phase, inputs.proof, inputs.approval, io);
-    if (record.kind === 'reviewed-private-link-no-submission') return record;
-    await savePrivateLinkArtifact(directory, `private-link-${stage}-${operation === 'recover' ? 'recovered-' : ''}evidence.json`,
-      { ...evidence, records: [...evidence.records, record] });
     return record;
   } finally { await lock.close(); await rm(lockPath); }
 }

@@ -166,6 +166,16 @@ test('operation-local validation rejects input/adapter substitution after await 
     ['proof', q => { q.proof.binding.policySha256 = digest('UNIT substitution'); }],
     ['cost review', q => { q.proof.costReview.budgetTargets.migration.project += 1; }],
     ['approval', q => { q.approval.requestSha256 = digest('UNIT substitution'); }],
+    ['phase key order', q => {
+      const entries = Object.entries(q.phase).reverse();
+      for (const key of Object.keys(q.phase)) delete q.phase[key];
+      Object.assign(q.phase, Object.fromEntries(entries));
+    }],
+    ['evidence key order', q => {
+      const entries = Object.entries(q.evidence).reverse();
+      for (const key of Object.keys(q.evidence)) delete q.evidence[key];
+      Object.assign(q.evidence, Object.fromEntries(entries));
+    }],
     ['evidence wrapper', q => { q.evidence.planSha256 = digest('UNIT substitution'); }],
     ['adapter proof swap', q => { q.input.proof = { ...q.proof, phaseSha256: digest('UNIT substitution') }; }],
     ['adapter approval swap', q => { q.input.approval = { ...q.approval, sourceSha256: digest('UNIT substitution') }; }],
@@ -236,7 +246,7 @@ test('public dispatch candidate construction still rejects invalid continuation 
   await assert.rejects(runPrivateLinkControl(f.c, f.context, x.adoptedEvidence, stage, 'execute', directory,
     { continuation: bad, publication: x.io.publication, proof, approval, costReview: proof.costReview,
       costEvidence: proof.costEvidence, migrationReview: proof.migrationReview },
-    { now: () => at, invoke: async () => assert.fail('Invalid continuation must not invoke') }));
+    { now: () => at, store: { root: directory }, invoke: async () => assert.fail('Invalid continuation must not invoke') }));
 });
 
 test('check validation settles before reads and never grants an execute token or cross-operation trust', async t => {
