@@ -5,7 +5,8 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { closed, digest, fail, ids, json, sameId } from './definition.mjs';
 import { canonicalInstant, verifyDeploymentIdentity } from './policy.mjs';
-import { collectEffectivePolicies, verifyEffectivePolicyEvidence } from './effective-policy.mjs';
+import { collectEffectivePolicies, verifyEffectivePolicyEvidence,
+  collectEffectivePoliciesV3, verifyEffectivePolicyEvidenceV3 } from './effective-policy.mjs';
 import { verifyQueueAdoptionSources, queueArmInstant } from './queue-adoption.mjs';
 import { queueDefenderInventory } from './queue-defender.mjs';
 import { nspTargetKey } from './nsp.mjs';
@@ -1718,18 +1719,29 @@ async function currentRuntimeProof(c, context, evidence, directory, invoke, opti
         context.plan.topology.ids.oldEnvironment, context.plan.topology.ids.managedGroup, context.plan.topology.ids.publicProbe,
         context.plan.topology.ids.ingestIdentity, context.plan.topology.ids.pullIdentity].includes(d.id) &&
         !resource.type?.startsWith('Microsoft.Consumption/') && !resource.type?.startsWith('Microsoft.ManagedIdentity/');
-    }).map(d => ({ ...d, type: resources[d.id].type, expected: resources[d.id] }));
+    }).map(d => {
+      const resource = resources[d.id];
+      let type = resource.type;
+      if (sameId(d.id, ids(c).table)) {
+        const tableType = 'Microsoft.OperationalInsights/workspaces/tables';
+        if (!sameId(resource.id, d.id) || Object.hasOwn(resource, 'type') && !sameId(type, tableType)) {
+          fail('PRIVATE_LINK_RUNTIME_POLICY_TYPE_CHANGED');
+        }
+        type = tableType;
+      }
+      return { ...d, type, expected: resource };
+    });
     if (adoption) {
       for (const value of Object.values(privateLinkNsgMembers(targets.externalNsg))) policyResources.push({ id: value.id,
         type: 'Microsoft.Network/networkSecurityGroups', apiVersion: API.network, expected: value });
     }
     if (context.plan.publicProbe) policyResources.push(structuredClone(context.plan.publicProbe));
     const policyPhase = { version: 1, kind: 'private-link-runtime-effective-policy', planSha256: context.plan.planSha256, resources: policyResources };
-    const policy = await collectEffectivePolicies(policyPhase, async (id, apiVersion, filter) => {
+    const policy = await collectEffectivePoliciesV3(policyPhase, async (id, apiVersion, filter) => {
       const request = { id, apiVersion, filter: filter ?? null }; io.allowPolicyRead(request);
       return io.read(request, deadline, /\/(?:policyAssignments|policyExemptions|versions)$/u.test(id));
     }, io.batch, snapshot => io.retain('runtime-effective-policy', snapshot));
-    verifyEffectivePolicyEvidence(policyPhase, policy);
+    verifyEffectivePolicyEvidenceV3(policyPhase, policy);
     return policy;
   })();
   const [head, snapshot, policy] = await Promise.all([readPrivateLinkHead(context, evidence, options.store ?? {}), collection.snapshot, policyTask]);

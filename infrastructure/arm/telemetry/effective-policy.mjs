@@ -114,9 +114,26 @@ function normalizedLocation(value) {
   if (typeof value !== 'string' || !/^[A-Za-z0-9]+(?: +[A-Za-z0-9]+)*$/u.test(value)) return unknown;
   return value.replaceAll(' ', '').toLowerCase();
 }
-const conditionNames = new Map(['allOf', 'anyOf', 'not', 'field', 'value', 'equals', 'notEquals', 'in', 'notIn']
+function workspaceCapacityGreater(rule, params, resource) {
+  const field = expression(rule.field, params), threshold = expression(rule.greater, params);
+  if (typeof field !== 'string' ||
+      field.toLowerCase() !== 'microsoft.operationalinsights/workspaces/sku.capacityreservationlevel' ||
+      resource.type.toLowerCase() !== 'microsoft.operationalinsights/workspaces' ||
+      resource.apiVersion !== '2023-09-01' || !Number.isSafeInteger(threshold) || threshold < 0) return unknown;
+  const sku = resource.expected.properties?.sku;
+  if (!object(sku)) return unknown;
+  if (!Object.hasOwn(sku, 'capacityReservationLevel')) {
+    // The pinned PerGB2018 omission was checked against Azure's non-deploying
+    // restrictions API with the exact >100 rule and positive/negative controls.
+    return sku.name === 'PerGB2018' && threshold === 100 ? false : unknown;
+  }
+  const level = sku.capacityReservationLevel;
+  if (sku.name !== 'CapacityReservation' || !Number.isSafeInteger(level) || level < 100) return unknown;
+  return level > threshold;
+}
+const conditionNames = new Map(['allOf', 'anyOf', 'not', 'field', 'value', 'equals', 'notEquals', 'in', 'notIn', 'greater']
   .map(name => [name.toLowerCase(), name]));
-function condition(rule, params, resource, depth = 0) {
+function condition(rule, params, resource, depth = 0, evaluationVersion = 2) {
   if (depth > POLICY_LIMITS.depth || !object(rule)) return unknown;
   const entries = Object.entries(rule).map(([key, value]) => [conditionNames.get(key.toLowerCase()) ?? key, value]);
   if (new Set(entries.map(([key]) => key)).size !== entries.length) return unknown;
@@ -125,13 +142,16 @@ function condition(rule, params, resource, depth = 0) {
   if (keys.length === 1 && ['allOf', 'anyOf'].includes(keys[0])) {
     const values = rule[keys[0]];
     if (!Array.isArray(values) || !values.length || values.length > POLICY_LIMITS.items) return unknown;
-    const results = values.map(value => condition(value, params, resource, depth + 1));
+    const results = values.map(value => condition(value, params, resource, depth + 1, evaluationVersion));
     if (keys[0] === 'allOf') return results.includes(false) ? false : results.includes(unknown) ? unknown : true;
     return results.includes(true) ? true : results.includes(unknown) ? unknown : false;
   }
   if (keys.length === 1 && keys[0] === 'not') {
-    const result = condition(rule.not, params, resource, depth + 1);
+    const result = condition(rule.not, params, resource, depth + 1, evaluationVersion);
     return result === unknown ? unknown : !result;
+  }
+  if (evaluationVersion === 3 && keys.length === 2 && Object.hasOwn(rule, 'field') && Object.hasOwn(rule, 'greater')) {
+    return workspaceCapacityGreater(rule, params, resource);
   }
   const operators = ['equals', 'notEquals', 'in', 'notIn'];
   const operator = operators.find(key => Object.hasOwn(rule, key));
@@ -182,6 +202,32 @@ function compareVersions(a, b) {
 function evaluate(phase, snapshot, evaluationVersion) {
   const scopes = effectivePolicyScopes(phase), pending = new Map(), entries = new Map(), used = new Set();
   const observations = [], blockers = [];
+  const grouped = evaluationVersion === 3, groups = new Map();
+  const resourceHashes = grouped ? new Map(phase.resources.map(resource => [resource, sha(resource)])) : null;
+  if (grouped && (new Set(phase.resources.map(resource => resource.id.toLowerCase())).size !== phase.resources.length ||
+      new Set(resourceHashes.values()).size !== phase.resources.length)) fail('EFFECTIVE_POLICY_TARGETS_INVALID');
+  let observationCount = 0;
+  const recordObservation = observation => {
+    if (!grouped) {
+      observations.push(observation);
+      if (observation.outcome === 'blocked') blockers.push(observation);
+      return;
+    }
+    const { resourceSha256, ...detail } = observation, key = json(detail);
+    const matches = groups.get(key) ?? [];
+    // Identical operations on the same target remain separate occurrences.
+    // Only different resources can share a group, in phase evaluation order.
+    let group = matches.find(value => !value.resourceSha256s.includes(resourceSha256));
+    if (!group) {
+      if (observations.length >= POLICY_LIMITS.observations) fail('EFFECTIVE_POLICY_EVIDENCE_LIMIT');
+      group = { ...detail, resourceSha256s: [] };
+      matches.push(group); groups.set(key, matches); observations.push(group);
+      if (group.outcome === 'blocked') blockers.push(group);
+    }
+    if (group.resourceSha256s.length >= phase.resources.length) fail('EFFECTIVE_POLICY_EVIDENCE_LIMIT');
+    group.resourceSha256s.push(resourceSha256);
+    observationCount++;
+  };
   if (!object(snapshot) || !Array.isArray(snapshot.reads) || snapshot.reads.length > POLICY_LIMITS.reads ||
       Buffer.byteLength(json(snapshot)) > POLICY_LIMITS.bytes) fail('EFFECTIVE_POLICY_EVIDENCE_LIMIT');
   closed(snapshot, ['reads']);
@@ -226,7 +272,7 @@ function evaluate(phase, snapshot, evaluationVersion) {
         return version;
       }).filter(matches);
       if (!versions.length || new Set(versions).size !== versions.length) fail('EFFECTIVE_POLICY_VERSION_UNRESOLVED');
-      if (evaluationVersion === 2 && /^\d+\.(?:\*|\d+)\.\*(?:-preview)?$/u.test(selector ?? '')) {
+      if (evaluationVersion >= 2 && /^\d+\.(?:\*|\d+)\.\*(?:-preview)?$/u.test(selector ?? '')) {
         // Explicit major/minor wildcards auto-ingest updates. Keep numeric ties
         // conservative and retain the complete catalog in the bound snapshot.
         const latest = versions.reduce((a, b) => compareVersions(a, b) >= 0 ? a : b);
@@ -294,18 +340,17 @@ function evaluate(phase, snapshot, evaluationVersion) {
     for (const resource of resources) {
       const detail = { assignmentSha256: sha(assignment), definitionSha256: sha(definition.value),
         definitionVersion: p.version, versionResolution: definition.resolution, parametersSha256: sha(params),
-        referenceSha256: sha(referenceId), resourceSha256: sha(resource), effect: ['audit', 'auditifnotexists', 'disabled',
+        referenceSha256: sha(referenceId), resourceSha256: grouped ? resourceHashes.get(resource) : sha(resource), effect: ['audit', 'auditifnotexists', 'disabled',
           'deny', 'modify', 'append', 'deployifnotexists', 'denyaction', 'manual'].includes(effect) ? effect : 'unknown' };
-      const match = condition(rule.if, params, resource);
+      const match = condition(rule.if, params, resource, 0, evaluationVersion);
       const relatedExemptions = exemptions.filter(e => sameId(e.properties.policyAssignmentId, assignment.id) &&
         applies(authorizationScope.exec(e.id)[1], resource) &&
         (!e.properties.policyDefinitionReferenceIds?.length || e.properties.policyDefinitionReferenceIds.includes(referenceId)));
       const record = (outcome, reason, extra = {}) => {
-        if (observations.length >= POLICY_LIMITS.observations) fail('EFFECTIVE_POLICY_EVIDENCE_LIMIT');
+        if (!grouped && observations.length >= POLICY_LIMITS.observations) fail('EFFECTIVE_POLICY_EVIDENCE_LIMIT');
         const observation = { ...detail, condition: match === unknown ? 'unknown' : match,
           outcome, reason, exemptionEvidenceSha256: sha(relatedExemptions), exemptionsApplied: false, ...extra };
-        observations.push(observation);
-        if (outcome === 'blocked') blockers.push(observation);
+        recordObservation(observation);
       };
       if (hasContent(assignment.properties.overrides) || hasContent(assignment.properties.resourceSelectors)) {
         record('blocked', 'UNSUPPORTED_ASSIGNMENT_SELECTOR_OR_OVERRIDE'); continue;
@@ -367,30 +412,49 @@ function evaluate(phase, snapshot, evaluationVersion) {
     }
   }
   if (entries.size + pending.size > POLICY_LIMITS.reads || [...entries.keys()].some(key => !used.has(key))) fail('EFFECTIVE_POLICY_EVIDENCE_LIMIT');
-  return { pending: [...pending.values()], analysis: { observations, blockers, exemptionsApplied: false } };
+  return { pending: [...pending.values()], analysis: { observations, blockers, exemptionsApplied: false,
+    ...(grouped ? { observationCount } : {}) } };
 }
 
 export function analyzeEffectivePolicies(phase, snapshot, version = 2) {
   if (![1, 2].includes(version)) fail('EFFECTIVE_POLICY_BINDING_INVALID');
+  return analyze(phase, snapshot, version);
+}
+export function analyzeEffectivePoliciesV3(phase, snapshot) {
+  return analyze(phase, snapshot, 3);
+}
+function analyze(phase, snapshot, version) {
   const result = evaluate(phase, snapshot, version);
   if (result.pending.length) fail('EFFECTIVE_POLICY_EVIDENCE_INCOMPLETE');
   return { version, kind: 'effective-policy-preflight', phaseSha256: sha(phase),
     snapshot, analysis: result.analysis, qualified: result.analysis.blockers.length === 0 };
 }
 export function verifyEffectivePolicyEvidence(phase, evidence) {
+  return verify(phase, evidence, [1, 2]);
+}
+export function verifyEffectivePolicyEvidenceV3(phase, evidence) {
+  return verify(phase, evidence, [3]);
+}
+function verify(phase, evidence, versions) {
   closed(evidence, ['version', 'kind', 'phaseSha256', 'snapshot', 'analysis', 'qualified']);
-  if (![1, 2].includes(evidence.version) || evidence.kind !== 'effective-policy-preflight' ||
+  if (!versions.includes(evidence.version) || evidence.kind !== 'effective-policy-preflight' ||
       evidence.phaseSha256 !== sha(phase) || evidence.qualified !== true ||
-      !isDeepStrictEqual(evidence, analyzeEffectivePolicies(phase, evidence.snapshot, evidence.version))) fail('EFFECTIVE_POLICY_BINDING_INVALID');
+      !isDeepStrictEqual(evidence, analyze(phase, evidence.snapshot, evidence.version))) fail('EFFECTIVE_POLICY_BINDING_INVALID');
   return evidence;
 }
 export async function collectEffectivePolicies(phase, read, readBatch, retain) {
+  return collect(phase, read, readBatch, retain, 2);
+}
+export async function collectEffectivePoliciesV3(phase, read, readBatch, retain) {
+  return collect(phase, read, readBatch, retain, 3);
+}
+async function collect(phase, read, readBatch, retain, version) {
   const snapshot = { reads: [] };
   let bytes = 0;
   try {
     for (let wave = 0; wave < POLICY_LIMITS.waves; wave++) {
-      const { pending } = evaluate(phase, snapshot, 2);
-      if (!pending.length) return analyzeEffectivePolicies(phase, snapshot);
+      const { pending } = evaluate(phase, snapshot, version);
+      if (!pending.length) return analyze(phase, snapshot, version);
       await readBatch(pending, async request => {
         const response = await read(request.id, request.apiVersion, request.filter ?? undefined);
         bytes += Buffer.byteLength(json({ ...request, response }));

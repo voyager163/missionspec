@@ -9,11 +9,12 @@ import { checkPrivateLinkPhase, executePrivateLinkPhase, preparePrivateLinkPhase
   privateLinkHead, privateLinkTargetKey, emptyPrivateLinkControlEvidence, verifyPrivateLinkControlEvidence,
   verifyPrivateLinkRuntimePrerequisites, verifyPrivateLinkPreview, verifyPrivateLinkApproval,
   reconcilePrivateLinkPhase, recoverPrivateLinkPhase, readPrivateLinkHead, verifyPrivateLinkCostReview,
-  verifyPrivateLinkPolicyRevision } from '../private-link-controller.mjs';
+  verifyPrivateLinkPolicyRevision, currentPrivateLinkRuntimeProof } from '../private-link-controller.mjs';
 import { verifyPrivateLinkSnapshot, privateLinkResourceState, privateLinkAcaCreationIdentity, privateLinkGeneration } from '../private-link-readback.mjs';
 import { privateLinkFixture, privateInput, privateControlHarness, privateControlChain, privateSnapshotFixture, privateCostFixture } from './private-link.fixture.mjs';
 import { effectivePolicyFixture } from './effective-policy.fixture.mjs';
 import { whatIfRequestContext, limitReadConcurrency, az } from '../controller.mjs';
+import { retainedReadInvoke } from './private-link-nsg-adoption.fixture.mjs';
 
 const hash = value => digest(json(value));
 const base = await privateLinkFixture({ ...privateInput, version: 2 });
@@ -21,6 +22,42 @@ const chain = await privateControlChain({ ...base });
 function prefix(stage) { return { ...chain, records: chain.records.slice(0, STAGES.indexOf(stage)) }; }
 const at = Date.parse(chain.records.at(-1).completedAt) + 1000;
 function f() { return { ...base, at }; }
+
+test('runtime policy targeting binds the known table type when its exact ARM GET omits that field', async t => {
+  const directory = `infrastructure/arm/telemetry/tests/.private-link-policy-table-${randomUUID()}`;
+  await mkdir(directory, { mode: 0o700 }); t.after(() => rm(directory, { recursive: true }));
+  const evidence = await privateControlChain({ ...base }, 'assign-queue-role', {
+    uncached: true, snapshot: value => { delete value.resources[ids(base.c).table].type; },
+  });
+  const terminal = evidence.records.at(-1), target = privateLinkTargetKey(base.context);
+  const now = Date.parse(terminal.completedAt) + 1000;
+  const files = new Map([
+    [`private-link-head-${target}.json`, privateLinkHead(base.context, evidence)],
+    [`private-link-fence-${target}.json`, { version: 1, targetKey: target, stage: terminal.stage,
+      phase: terminal.phase, intent: terminal.intent, intentSha256: terminal.intentSha256 }],
+    [`private-link-intent-${hash({ target, stage: terminal.stage })}.json`, { phase: terminal.phase, intent: terminal.intent }],
+  ]);
+  const h = await privateControlHarness(f(), prefix('assign-queue-role'), 'assign-queue-role');
+  const snapshot = structuredClone(terminal.after), table = snapshot.resources[ids(base.c).table];
+  delete table.type;
+  h.setLive(snapshot);
+  const options = { now: () => now, sourceDigest: async () => base.source, lookup: async () => base.source,
+    store: { root: directory, read: async (_root, name) => structuredClone(files.get(name) ?? null) } };
+  const collect = () => currentPrivateLinkRuntimeProof(base.c, base.context, evidence, directory,
+    retainedReadInvoke(base, snapshot, h.io.read), options);
+  const before = json(table), proof = await collect();
+  assert.equal(proof.effectivePolicy.version, 3);
+  assert.equal(proof.effectivePolicy.qualified, true);
+  assert.equal(json(proof.snapshot.resources[ids(base.c).table]), before);
+  assert.equal(json(table), before);
+  for (const type of [null, '', 'Microsoft.Storage/storageAccounts']) {
+    table.type = type;
+    await assert.rejects(collect(), /RUNTIME_POLICY_TYPE_CHANGED/);
+  }
+  delete table.type;
+  table.id += '-foreign';
+  await assert.rejects(collect(), /RUNTIME_POLICY_TYPE_CHANGED/);
+});
 
 test('permission preflight asks for denies at or above each target scope, never unrelated descendants', async t => {
   const stage = 'create-queue-role', h = await privateControlHarness(f(), prefix(stage), stage), read = h.io.read;

@@ -173,6 +173,33 @@ Runtime prerequisites require the actual assigned-queue prefix. Synthetic
 13-stage coverage cannot establish that a future live prefix and its fresh
 reads meet the runtime deadline; that measurement remains a separate gate
 before runtime effects.
+The runtime policy target for the exact owned telemetry table uses its fixed
+`Microsoft.OperationalInsights/workspaces/tables` type when the table GET
+omits that field. Its resource ID must still match; explicit null, empty or
+contradictory types are rejected. Raw readback bytes are preserved and the
+table's schema, retention and policy checks remain mandatory.
+
+Runtime current-state policy collection explicitly uses version 3 evidence.
+It groups observations only when all facts except the target resource hash
+are identical, retaining ordered target membership and the uncompressed
+observation count. Duplicate operation occurrences remain distinct. Every
+target, false rule, nonmutating result, unknown, blocker and raw policy read
+is retained and independently recomputed. The 4,096-group, 32-target,
+512-read/item, 8 MiB snapshot, depth and wave bounds are unchanged. Ordinary
+control checks and historical version-1/2 evidence keep their existing format
+and interpretation; neither API silently promotes an older record.
+
+Version 3 also supports the pinned `2023-09-01` workspace capacity-reservation
+alias and numeric `greater` comparison. The exact `PerGB2018` omission against
+`greater: 100` was checked using Azure's
+[non-deploying Policy Restrictions API](https://learn.microsoft.com/en-us/rest/api/policyinsights/policy-restrictions/check-at-resource-group-scope?view=rest-policyinsights-2024-10-01):
+the retained pay-as-you-go content and a hypothetical 100 GB commitment had no
+deny, while a hypothetical 200 GB commitment returned the matching deny and
+`200 Greater 100` expression result. No resource, SKU, assignment or exemption
+was changed. The local subset does not infer a zero value or general absent/null
+semantics: null/string/invalid levels, other APIs/aliases/SKUs and unqualified
+missing-value thresholds remain unknown and blocking. Historical evaluators
+retain their conservative unsupported result for this predicate.
 
 Successful control append persists both the revision record and its complete
 aggregate evidence before the canonical resolution and successful head.
