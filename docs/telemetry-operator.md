@@ -114,6 +114,15 @@ test options from JSON. Checks retain exact preimages, policy, permissions,
 providers, cost evidence and native previews before an independently bound
 phase approval permits the one recorded effect.
 
+Permission preflight queries deny assignments with the documented
+[`$filter=atScope()`](https://learn.microsoft.com/en-us/rest/api/authorization/deny-assignments/list-for-scope?view=rest-authorization-2022-04-01)
+filter, retaining all denies at or above each requested scope. Every returned
+deny still blocks the operation. Unrelated descendant protections, such as
+ACA's system-protected managed-group/load-balancer/public-IP denies, are not
+mistaken for subscription-wide denials and are never removed or bypassed.
+The read allowlist requires that exact filter; unfiltered or principal-filtered
+deny queries cannot substitute for the scope check.
+
 Control dispatch journals distinguish known non-submission, possible
 submission, and an invocation that was reached. A durable version-3
 `dispatchAttempted: null` marker and rollout deadline are saved before the

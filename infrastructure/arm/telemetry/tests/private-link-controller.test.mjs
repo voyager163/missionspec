@@ -22,6 +22,47 @@ function prefix(stage) { return { ...chain, records: chain.records.slice(0, STAG
 const at = Date.parse(chain.records.at(-1).completedAt) + 1000;
 function f() { return { ...base, at }; }
 
+test('permission preflight asks for denies at or above each target scope, never unrelated descendants', async t => {
+  const stage = 'create-queue-role', h = await privateControlHarness(f(), prefix(stage), stage), read = h.io.read;
+  const seen = new Set();
+  h.io.read = async (request, ...args) => {
+    if (!request.id.endsWith('/denyAssignments')) return read(request, ...args);
+    seen.add(request.id);
+    return { value: request.filter === '$filter=atScope()' ? [] :
+      [{ id: 'UNIT unrelated managed-resource protection', properties: { scope: base.context.plan.topology.ids.managedGroup } }] };
+  };
+  await checkPrivateLinkPhase(base.c, base.context, prefix(stage), h.phase, h.io);
+  assert(seen.has(`${ids(base.c).sub}/providers/Microsoft.Authorization/denyAssignments`));
+  for (const scope of [ids(base.c).sub, '/providers/Microsoft.Management/managementGroups/unit-parent']) {
+    await t.test(`deny retained at ${scope}`, async () => {
+      h.io.read = async (request, ...args) => {
+        if (!request.id.endsWith('/denyAssignments')) return read(request, ...args);
+        assert.equal(request.filter, '$filter=atScope()');
+        return { value: [{ id: 'UNIT applicable deny', properties: { scope } }] };
+      };
+      await assert.rejects(checkPrivateLinkPhase(base.c, base.context, prefix(stage), h.phase, h.io), /DENY_ASSIGNMENT/);
+    });
+  }
+});
+
+test('production deny-read allowlist requires the exact atScope filter and rejects broader or principal-filtered reads', async t => {
+  const directory = `infrastructure/arm/telemetry/tests/.private-link-deny-scope-${randomUUID()}`;
+  await mkdir(directory, { mode: 0o700 }); t.after(() => rm(directory, { recursive: true }));
+  let invoked = 0;
+  const io = privateLinkReadIO(base.c, base.context, directory, async args => {
+    invoked++;
+    assert.equal(new URL(args[args.indexOf('--url') + 1]).searchParams.get('$filter'), 'atScope()');
+    return { value: [] };
+  });
+  const request = { id: `${ids(base.c).sub}/providers/Microsoft.Authorization/denyAssignments`,
+    apiVersion: '2022-04-01', filter: '$filter=atScope()' };
+  assert.deepEqual(await io.read(request, Date.now() + 120000, true), { value: [] });
+  for (const filter of [null, '$filter=principalId eq \'unit-principal\'', '$filter=denyAssignmentName eq \'unit\'']) {
+    await assert.rejects(io.read({ ...request, filter }, Date.now() + 120000, true), /READ_SCOPE_FORBIDDEN/);
+  }
+  assert.equal(invoked, 1);
+});
+
 test('missing effective-configuration GET does not qualify retirement while its listing is stale', () => {
   const before = chain.records.find(value => value.stage === 'disable-storage-public').after;
   const after = structuredClone(chain.records.find(value => value.stage === 'retire-nsp-association').after);

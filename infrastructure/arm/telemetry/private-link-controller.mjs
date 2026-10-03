@@ -340,6 +340,10 @@ function verifyPermissions(c, context, phase, evidence) {
       value.actions.some(pattern => matches(pattern, action)) && !value.notActions.some(pattern => matches(pattern, action)))) fail('PRIVATE_LINK_OPERATOR_PERMISSION_REQUIRED');
   }
 }
+function permissionRequest(scope, suffix) {
+  return { id: `${scope}/providers/Microsoft.Authorization/${suffix}`, apiVersion: API.authorization,
+    filter: suffix === 'denyAssignments' ? '$filter=atScope()' : null };
+}
 function verifyProviders(context, catalogs, phase) {
   closed(catalogs, ['network', 'storage', 'app']);
   for (const [key, namespace] of [['network', 'Microsoft.Network'], ['storage', 'Microsoft.Storage'], ['app', 'Microsoft.App']]) {
@@ -517,7 +521,7 @@ async function governance(c, context, phase, snapshot, io, deadline) {
   const scopes = [...new Set(privateLinkPermissions(c, context, phase).map(value => value.scope))];
   const permissionTask = io.batch(scopes, async scope => [scope,
     Object.fromEntries(await io.batch([['permissions', 'permissions'], ['denies', 'denyAssignments']], async ([key, suffix]) => [key,
-      await io.read({ id: `${scope}/providers/Microsoft.Authorization/${suffix}`, apiVersion: API.authorization, filter: null }, deadline, true)]))]);
+      await io.read(permissionRequest(scope, suffix), deadline, true)]))]);
   const policyTask = (async () => {
     const independent = !phase.externalAdoptionSha256 && phase.resources.length && phase.request?.method !== 'DELETE' && phase.stage !== 'disable-storage-public';
     const targets = independent ? null : await snapshot;
@@ -1309,7 +1313,7 @@ function readIO(c, context, directory, invoke, options) {
       allow({ id, apiVersion: API.deployment, filter: null });
     }
     for (const { scope } of privateLinkPermissions(c, context, phase)) for (const suffix of ['permissions', 'denyAssignments']) {
-      allow({ id: `${scope}/providers/Microsoft.Authorization/${suffix}`, apiVersion: API.authorization, filter: null });
+      allow(permissionRequest(scope, suffix));
     }
   }
   const dispatch = (args, timeout, deadline) => {
