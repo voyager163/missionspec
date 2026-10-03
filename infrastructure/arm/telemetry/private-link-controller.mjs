@@ -18,10 +18,12 @@ import { PRIVATE_LINK_API as API, PRIVATE_LINK_CONTROL_STAGES as STAGES, PRIVATE
   privateLinkRuntimeResources, verifyPrivateLinkNameProjection, privateLinkNameBinding, withPrivateLinkAssignedPrefixHash,
   PRIVATE_LINK_RUNTIME_STAGES, privateLinkAtLeast, privateLinkCost, privateLinkPhase,
   verifyPrivateLinkControlContext, verifyPrivateLinkEnvironmentWire, withPrivateLinkControlValidation } from './private-link.mjs';
-import { collectPrivateLinkSnapshot, privateLinkGeneration, privateLinkHash as hash, privateLinkReadRequests,
+import { collectPrivateLinkSnapshot, privateLinkGeneration, privateLinkReadRequests,
   privateLinkResourceDescriptors, privateLinkResourceState, verifyPrivateLinkSnapshot, verifyPrivateLinkEndpoint,
   plEqual as equal, plList, plOnly } from './private-link-readback.mjs';
-import { verifyPrivateLinkRuntimeCompletion } from './private-link-runtime.mjs';
+import { verifyPrivateLinkRuntimeCompletion, withPrivateLinkCompletionValidation, assertPrivateLinkCompletionInputs,
+  privateLinkValidationCopy, privateLinkValidationInputCheck, privateLinkValidationIsImmutable,
+  privateLinkValidationHash as hash, sameOrderedJson } from './private-link-runtime.mjs';
 import { privateLinkNsgTarget, privateLinkNsgTargets, privateLinkNsgReadRequests, privateLinkNsgRegionalWatchers,
   verifyPrivateLinkNsgAdoption, verifyPrivateLinkNsgCurrent, verifyPrivateLinkNsgEvidenceBinding,
   privateLinkNsgOriginalBaseline, observePrivateLinkNsgAdoption, adoptPrivateLinkNsg, withPrivateLinkNsgValidation,
@@ -36,6 +38,21 @@ const operationLock = options => resolve(options.store?.root ?? resolve(here, '.
 // Each operation binds its own immutable copies. Nothing is trusted across
 // operations; caller inputs and clocks are checked again after awaits.
 const dispatchValidations = new WeakMap();
+const activeDispatchValidation = new AsyncLocalStorage();
+const controlPureValidations = new AsyncLocalStorage();
+function pureValidation(c, context) {
+  const value = controlPureValidations.getStore();
+  return value?.c === c && value.context === context && value.active ? value : null;
+}
+function withPureValidation(c, context, use) {
+  if (pureValidation(c, context)) return use();
+  const state = { c, context, active: true, histories: new WeakSet(), proofs: new WeakMap() };
+  try {
+    const result = controlPureValidations.run(state, use);
+    if (result && typeof result.then === 'function') return Promise.resolve(result).finally(() => { state.active = false; });
+    state.active = false; return result;
+  } catch (error) { state.active = false; throw error; }
+}
 const runtimeValidations = new AsyncLocalStorage();
 const activeRuntimeValidations = new WeakSet();
 function runtimeValidation(c, context, evidence) {
@@ -51,7 +68,7 @@ function runtimeValidation(c, context, evidence) {
 // No token is accepted from JSON/options, and no mutable observation is cached here.
 export function withPrivateLinkRuntimeValidation(c, context, evidence, use) {
   if (runtimeValidations.getStore()) fail('PRIVATE_LINK_RUNTIME_VALIDATION_NESTED');
-  return withDispatchValidation(c, context, { evidence }, (snapshot, validation) => {
+  const run = (snapshot, validation) => {
     const state = { c, context, evidence: snapshot.evidence, validation, prerequisites: null,
       statistics: { immutableHistoryVerifications: 0, prerequisiteVerifications: 0, prerequisiteReuses: 0 },
       check: () => {
@@ -65,15 +82,17 @@ export function withPrivateLinkRuntimeValidation(c, context, evidence, use) {
       if (result && typeof result.then === 'function') return Promise.resolve(result).finally(() => activeRuntimeValidations.delete(state));
       activeRuntimeValidations.delete(state); return result;
     } catch (error) { activeRuntimeValidations.delete(state); throw error; }
-  });
+  };
+  const dispatch = activeDispatchValidation.getStore();
+  if (dispatch && dispatch.c === c && dispatch.context === context &&
+      dispatchValidations.get(dispatch.validation) === dispatch && isDeepStrictEqual(evidence, dispatch.evidence)) {
+    privateLinkValidationInputCheck(evidence, dispatch.evidence, 'PRIVATE_LINK_RUNTIME_VALIDATION_SCOPE_CHANGED')();
+    return run(dispatch, dispatch.validation);
+  }
+  return withDispatchValidation(c, context, { evidence }, run);
 }
 function immutableDispatchCopy(value) {
-  const copy = structuredClone(value), seen = new WeakSet();
-  function freeze(entry) {
-    if (!entry || typeof entry !== 'object' || seen.has(entry)) return;
-    seen.add(entry); Object.values(entry).forEach(freeze); Object.freeze(entry);
-  }
-  freeze(copy); return copy;
+  return privateLinkValidationCopy(value);
 }
 function dispatchValidation(c, context, validation) {
   const state = validation && dispatchValidations.get(validation);
@@ -83,17 +102,18 @@ function dispatchValidation(c, context, validation) {
 }
 function verifiedHistory(state, evidence) {
   if (evidence === state.evidence && state.verifiedEvidence) return state.verifiedEvidence;
-  return state.histories.find(entry => isDeepStrictEqual(entry.value, evidence) && entry.sha256 === hash(evidence))?.value;
+  return state.histories.find(entry => isDeepStrictEqual(entry.value, evidence) &&
+    (entry.sha256 === null ? sameOrderedJson(entry.value, evidence) : entry.sha256 === hash(evidence)))?.value;
 }
 function assertDispatchInputs(state) {
-  for (const key of Object.keys(state.callerInputs)) {
-    if (state.immutableCallerInputs?.get(key) === state.callerInputs[key]) continue;
-    equal(state.callerInputs[key], state[key], 'PRIVATE_LINK_DISPATCH_VALIDATION_CHANGED');
-    if (!state.inputHashes.has(key)) state.inputHashes.set(key, hash(state[key]));
-    if (hash(state.callerInputs[key]) !== state.inputHashes.get(key)) fail('PRIVATE_LINK_DISPATCH_VALIDATION_CHANGED');
-  }
+  assertPrivateLinkCompletionInputs(state.c, state.context);
+  state.checkCallerInputs();
 }
 function withDispatchValidation(c, context, values, use) {
+  return withPrivateLinkCompletionValidation(c, context, () => withPureValidation(c, context,
+    () => dispatchWithValidation(c, context, values, use)));
+}
+function dispatchWithValidation(c, context, values, use) {
   const { evidence } = values;
   if (!externalNsg(evidence)) {
     return withPrivateLinkNsgValidation(c, context, externalNsg(evidence), evidence,
@@ -102,23 +122,14 @@ function withDispatchValidation(c, context, values, use) {
   return withPrivateLinkNsgValidation(c, context, externalNsg(evidence), evidence, validation => {
     const copied = immutableDispatchCopy(values);
     const snapshot = { ...copied, evidence: Object.freeze({ ...copied.evidence, externalAdoption: evidence.externalAdoption }) };
-    const state = { c, context, ...snapshot, callerInputs: values, inputHashes: new Map(),
-      histories: [], continuations: [], originals: [], validated: false };
-    const frozen = (value, seen = new WeakSet()) => {
-      if (value === null || typeof value !== 'object' || seen.has(value)) return true;
-      if (!Object.isFrozen(value)) return false;
-      const descriptors = Object.values(Object.getOwnPropertyDescriptors(value));
-      if (descriptors.some(descriptor => !Object.hasOwn(descriptor, 'value'))) return false;
-      seen.add(value); return descriptors.every(descriptor => frozen(descriptor.value, seen));
-    };
-    state.immutableCallerInputs = new Map();
-    for (const [key, value] of Object.entries(values)) if (value !== null && typeof value === 'object' && frozen(value)) {
-      equal(value, state[key], 'PRIVATE_LINK_DISPATCH_VALIDATION_CHANGED');
-      state.immutableCallerInputs.set(key, value);
-    }
+    const state = { c, context, validation, ...snapshot, callerInputs: values,
+      checkCallerInputs: privateLinkValidationInputCheck(values, snapshot, 'PRIVATE_LINK_DISPATCH_VALIDATION_CHANGED'),
+      histories: [], proofs: new WeakMap(), continuations: [], originals: [], validated: false };
+    state.checkCallerInputs();
     dispatchValidations.set(validation, state);
     try {
-      const result = withPrivateLinkAssignedPrefixHash(snapshot.evidence, () => use(snapshot, validation));
+      const result = activeDispatchValidation.run(state, () =>
+        withPrivateLinkAssignedPrefixHash(snapshot.evidence, () => use(snapshot, validation)));
       if (result && typeof result.then === 'function') return Promise.resolve(result).finally(() => dispatchValidations.delete(validation));
       dispatchValidations.delete(validation); return result;
     } catch (error) { dispatchValidations.delete(validation); throw error; }
@@ -530,6 +541,16 @@ function verifyProof(c, context, evidence, phase, proof, at, validation = null) 
   fresh(proof, at); fresh(proof.before, at);
   const source = phaseSource(c, context, phase, at);
   if (phase.continuation) verifyPrivateLinkContinuation(c, context, evidence, phase.stage, source, phase.continuation, at, validation);
+  const state = dispatchValidation(c, context, validation), proofs = state?.proofs ?? pureValidation(c, context)?.proofs;
+  const cached = proofs?.get(proof);
+  if (cached && cached.phase === phase && cached.records === evidence.records.length &&
+      cached.last === evidence.records.at(-1) && cached.adoption === externalNsg(evidence)) {
+    verifyCostScope(c, context, evidence, proof.before, at);
+    verifyPrivateLinkCostReview(c, context, proof.costReview, proof.costEvidence, proof.sourceSha256, at);
+    verifyPrivateLinkMigrationReview(c, context, proof.migrationReview, at, source);
+    if (proof.before.nameProjection) verifyPrivateLinkNameProjection(c, context, proof.before.nameProjection, at, evidence);
+    return;
+  }
   if (phase.continuation && proof.deploymentBefore !== null) fail('PRIVATE_LINK_CONTINUATION_DEPLOYMENT_PRESENT');
   if (proof.version !== 1 || proof.kind !== 'checked-private-link-phase' || proof.sourceSha256 !== source ||
       proof.phaseSha256 !== hash(phase) || proof.planSha256 !== context.plan.planSha256 ||
@@ -572,6 +593,9 @@ function verifyProof(c, context, evidence, phase, proof, at, validation = null) 
   if (proof.before.nameProjection && !privateLinkAtLeast(phase.stage, 'retire-old-receiver')) fail('PRIVATE_LINK_NAME_STAGE_FORBIDDEN');
   if (phase.deploymentId && (proof.validation?.properties?.provisioningState !== 'Succeeded' ||
       proof.validation.error || proof.validation.properties.error || proof.validation.nextLink)) fail('PRIVATE_LINK_TEMPLATE_VALIDATION_REQUIRED');
+  if (proofs && privateLinkValidationIsImmutable(proof) && privateLinkValidationIsImmutable(phase)) {
+    proofs.set(proof, { phase, records: evidence.records.length, last: evidence.records.at(-1), adoption: externalNsg(evidence) });
+  }
 }
 function policyTargetPhase(c, context, phase, snapshot) {
   const resources = phase.resources.length ? structuredClone(phase.resources) : [{
@@ -630,6 +654,7 @@ async function checkPhase(c, context, evidence, phase, io, startedAt, validation
   let reviewed = null;
   const guard = () => {
     if (state) assertDispatchInputs(state);
+    io.checkRuntimeCompletion?.();
     if (hash(io.nameProjection ?? null) !== nameReviewSha256) fail('PRIVATE_LINK_NAME_REVIEW_CHANGED');
     if (reviewed) {
       equal(io.costReview, reviewed.costReview, 'PRIVATE_LINK_PREFLIGHT_BINDING_CHANGED');
@@ -661,15 +686,15 @@ async function checkPhase(c, context, evidence, phase, io, startedAt, validation
     phase.continuation && phase.deploymentId ? io.read({ id: phase.deploymentId, apiVersion: API.deployment, filter: null }, deadline) : null,
   ]);
   guard();
-  verifyPrivateLinkSnapshot(c, context, before, originalState(evidence), environmentWireVersion(evidence),
-    privateLinkNsgValidationFor(c, context, externalNsg(evidence), validation), evidence);
+  // verifyProof below validates this same fresh snapshot before preflight retention.
   if (phase.stage === 'review-migration') equal(await io.nspHead(), context.origin.pendingHead, 'PRIVATE_LINK_ORIGINAL_PENDING_HEAD_CHANGED');
   const preview = phase.deploymentId ? deploymentPreview : { validation: null, preview: {
     version: 1, kind: 'exact-private-link-request-preimage', request: phase.request,
     preimageSha256: hash(phase.request ? before.resources[phase.request.id] : null), nativeArmWhatIf: false,
   } };
-  const runtimeCompletion = privateLinkAtLeast(phase.stage, 'retire-old-receiver') ? structuredClone(await io.runtimeCompletion(deadline)) : null;
-  if (runtimeCompletion) io.verifyRuntimeCompletion(runtimeCompletion, io.now());
+  const runtimeInput = privateLinkAtLeast(phase.stage, 'retire-old-receiver') ? await io.runtimeCompletion(deadline) : null;
+  if (runtimeInput) io.verifyRuntimeCompletion(runtimeInput, io.now());
+  const runtimeCompletion = runtimeInput ? immutableDispatchCopy(runtimeInput) : null;
   const proof = { version: 1, kind: 'checked-private-link-phase', startedAt, completedAt: io.now(),
     sourceSha256: source, phaseSha256: hash(phase), planSha256: context.plan.planSha256, contextSha256: hash(context.origin),
     head, before, ...controls, costReview: io.costReview, costEvidence: io.costEvidence,
@@ -780,13 +805,25 @@ function verifyControlEvidence(c, context, evidence, at, validation) {
         (externalNsg(prior) && canonicalInstant(prior.externalAdoption.adoptedAt) > at))) fail('PRIVATE_LINK_RECORD_INVALID');
     return evidence.records.at(-1) ?? null;
   }
+  const pure = pureValidation(c, context);
+  if (!state && pure && !externalNsg(evidence)) {
+    const copy = immutableDispatchCopy(evidence);
+    if (!pure.histories.has(copy)) {
+      const scope = runtimeValidations.getStore();
+      if (scope && activeRuntimeValidations.has(scope) && evidence === scope.evidence) scope.statistics.immutableHistoryVerifications++;
+      withPrivateLinkControlValidation(c, context, () => verifyControlRecords(c, context, copy, at, null));
+      pure.histories.add(copy);
+    }
+    if (at !== undefined && copy.records.some(record => canonicalInstant(record.completedAt) > at)) fail('PRIVATE_LINK_RECORD_INVALID');
+    return evidence.records.at(-1) ?? null;
+  }
   if (externalNsg(evidence) && !validation) return withPrivateLinkNsgValidation(c, context, externalNsg(evidence), evidence,
     proof => verifyControlEvidence(c, context, evidence, at, proof));
   const scope = runtimeValidations.getStore();
   if (scope && activeRuntimeValidations.has(scope) && evidence === scope.evidence) scope.statistics.immutableHistoryVerifications++;
   const result = withPrivateLinkControlValidation(c, context, () => verifyControlRecords(c, context, evidence, at, validation));
   if (state) {
-    const value = immutableDispatchCopy(evidence);
+    const value = evidence === state.evidence ? state.evidence : immutableDispatchCopy(evidence);
     state.histories.push({ value, sha256: hash(value) });
     if (evidence === state.evidence) state.verifiedEvidence = value;
   }
@@ -806,6 +843,16 @@ function verifyControlRecords(c, context, evidence, at, validation) {
     equal(evidence.records.slice(0, 6), anchor.records, 'PRIVATE_LINK_NSG_ANCHOR_CHANGED');
     if (at !== undefined && canonicalInstant(adoption.adoptedAt) > at) fail('PRIVATE_LINK_NSG_ADOPTION_FROM_FUTURE');
     prior.records.push(...anchor.records);
+  }
+  const verified = dispatchValidation(c, context, validation)?.verifiedEvidence;
+  if (verified && verified.records.length > prior.records.length &&
+      verified.records.length <= evidence.records.length &&
+      verified.records.every((record, index) => record === evidence.records[index]) &&
+      externalNsg(verified) === externalNsg(evidence)) {
+    if (at !== undefined && verified.records.some(record => canonicalInstant(record.completedAt) > at)) fail('PRIVATE_LINK_RECORD_INVALID');
+    prior.records = [...verified.records];
+    prior.version = verified.version;
+    if (verified.version === 2) prior.externalAdoption = verified.externalAdoption;
   }
   for (const record of evidence.records.slice(prior.records.length)) {
     if (adoption && prior.records.length === adoption.proposal.anchor.records) {
@@ -889,6 +936,8 @@ function verifyControlRecords(c, context, evidence, at, validation) {
       }
     }
     prior.records.push(record);
+    const state = dispatchValidation(c, context, validation);
+    if (state) state.histories.push({ value: Object.freeze({ ...prior, records: Object.freeze([...prior.records]) }), sha256: null });
   }
   return evidence.records.at(-1) ?? null;
 }
@@ -947,6 +996,7 @@ async function executePhase(c, context, evidence, phase, proof, approval, io, va
   await io.saveJournal(journal);
   const guard = () => {
     if (state) assertDispatchInputs(state);
+    io.checkRuntimeCompletion?.();
     if (hash(io.nameProjection ?? null) !== hash(proof.before.nameProjection ?? null)) fail('PRIVATE_LINK_NAME_REVIEW_CHANGED');
     verifyPrivateLinkApproval(c, context, phase, proof, approval, io.now());
     verifyPrivateLinkCostReview(c, context, proof.costReview, proof.costEvidence, phase.sourceSha256, io.now());
@@ -1626,6 +1676,7 @@ export function privateLinkAzureIO(c, context, evidence, phase, directory, input
   const readStore = options.store?.read ?? loadPrivateLinkArtifact, saveStore = options.store?.save ?? updatePrivateLinkArtifact;
   const immutableStore = options.store?.saveImmutable ?? savePrivateLinkArtifact;
   const publication = inputs.publication;
+  const runtimeInput = inputs.runtimeCompletion;
   const policyRevision = inputs.policyRevision ?? phase.policyRevision ?? null;
   const continuation = inputs.continuation ?? phase.continuation ?? null;
   if (!isDeepStrictEqual(continuation, phase.continuation ?? null)) fail('PRIVATE_LINK_CONTINUATION_CHANGED');
@@ -1672,6 +1723,10 @@ export function privateLinkAzureIO(c, context, evidence, phase, directory, input
     runtimeCompletion: async () => {
       if (!inputs.runtimeCompletion) fail('PRIVATE_LINK_RUNTIME_QUALIFICATION_REQUIRED');
       return inputs.runtimeCompletion;
+    },
+    checkRuntimeCompletion: () => {
+      if (inputs.runtimeCompletion !== runtimeInput) fail('PRIVATE_LINK_RUNTIME_QUALIFICATION_CHANGED');
+      assertPrivateLinkCompletionInputs(c, context);
     },
     verifyRuntimeCompletion: (record, at) => {
       return verifyPrivateLinkRuntimeCompletion(c, context, record, at);
@@ -1924,6 +1979,10 @@ async function currentRuntimeProof(c, context, evidence, directory, invoke, opti
 }
 export async function runPrivateLinkControl(c, context, evidence, stage, operation, directoryArg, inputs = {}, options = {}) {
   const startedAt = (options.now ?? Date.now)();
+  return withPrivateLinkCompletionValidation(c, context, () =>
+    runControl(c, context, evidence, stage, operation, directoryArg, inputs, options, startedAt));
+}
+async function runControl(c, context, evidence, stage, operation, directoryArg, inputs, options, startedAt) {
   if (Object.hasOwn(inputs, 'nameProjection')) {
     if (!privateLinkAtLeast(stage, 'retire-old-receiver')) fail('PRIVATE_LINK_NAME_STAGE_FORBIDDEN');
     verifyPrivateLinkNameProjection(c, context, inputs.nameProjection, startedAt, evidence);
@@ -1950,6 +2009,7 @@ export async function runPrivateLinkControl(c, context, evidence, stage, operati
   if (operation === 'check') {
     const proof = await checkWithValidation(c, context, evidence, phase, io, startedAt);
     await savePrivateLinkArtifact(directory, `private-link-${stage}-preflight.json`, proof);
+    io.checkRuntimeCompletion();
     const at = io.now();
     if (io.cancelled?.() || at >= startedAt + LIMITS.checkMs) fail('PRIVATE_LINK_CHECK_EXPIRED');
     phaseSource(c, context, phase, at);

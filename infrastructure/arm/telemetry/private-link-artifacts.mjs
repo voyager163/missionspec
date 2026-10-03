@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
+import { createHash } from 'node:crypto';
 import { closed, digest, digestJson, fail } from './definition.mjs';
 import { PRIVATE_LINK_CONTROL_STAGES } from './private-link.mjs';
 import { load, save, saveImmutable, privateDirectory, MAX_PRIVATE_ARTIFACT_BYTES } from './controller.mjs';
@@ -11,6 +12,7 @@ const recoveryContentKind = 'private-link-continued-recovery-content';
 const completionReferenceKind = 'private-link-runtime-completion-reference';
 const completionTemplateKind = 'private-link-runtime-completion-template';
 const localPrefixKind = 'private-link-local-control-prefix-reference';
+const localCompletionKind = 'private-link-local-completion-reference';
 const controlKind = 'reviewed-private-link-control-chain';
 const owners = new Set(['private-link-runtime-completion', 'private-link-disabled-receiver',
   'private-link-reconciled-disabled-receiver', 'private-link-receiver-create-intent', 'private-link-window-intent']);
@@ -23,13 +25,116 @@ const prefixStages = PRIVATE_LINK_CONTROL_STAGES.slice(0, PRIVATE_LINK_CONTROL_S
 const recoveryKeys = ['version', 'kind', 'stage', 'phase', 'publication', 'approval', 'preflight', 'intent',
   'intentSha256', 'journal', 'after', 'deployment', 'operations', 'completedAt', 'authority', 'recovery'];
 const reservedKinds = new Set([envelopeKind, referenceKind, candidateReferenceKind, recoveryReferenceKind, recoveryContentKind,
-  completionReferenceKind, completionTemplateKind, localPrefixKind]);
+  completionReferenceKind, completionTemplateKind, localPrefixKind, localCompletionKind]);
 const completionName = hash => `private-link-completion-template-${hash}.json`;
 
 function compact(value) {
   const bytes = JSON.stringify(value) + '\n';
   if (Buffer.byteLength(bytes) > MAX_PRIVATE_ARTIFACT_BYTES) fail('PRIVATE_LINK_ARTIFACT_TOO_LARGE');
   return bytes;
+}
+// Per-operation cache only. Native JSON blocks keep exact legacy indentation;
+// larger objects stream through bounded reusable blocks, never a giant string.
+function canonicalDigest() {
+  const sizes = new WeakMap(), blocks = new WeakMap(), hashes = new WeakMap(), strings = new Map(), active = new Set();
+  const blockLimit = 64 * 1024;
+  let cachedBytes = 0;
+  const scalar = value => {
+    if (value !== null && !['string', 'boolean'].includes(typeof value) &&
+        !(typeof value === 'number' && Number.isFinite(value))) fail('PRIVATE_LINK_ARTIFACT_JSON_REQUIRED');
+    if (typeof value === 'string' && strings.has(value)) return strings.get(value);
+    const text = JSON.stringify(value);
+    if (typeof value === 'string' && cachedBytes + Buffer.byteLength(text) <= MAX_PRIVATE_ARTIFACT_BYTES) {
+      cachedBytes += Buffer.byteLength(text); strings.set(value, text);
+    }
+    return text;
+  };
+  const size = (value, depth) => {
+    if (depth > maximumDepth) fail('PRIVATE_LINK_ARTIFACT_STRUCTURE_LIMIT');
+    if (value === null || typeof value !== 'object') return { bytes: Buffer.byteLength(scalar(value)), lines: 0, height: 0 };
+    if (active.has(value) || !Array.isArray(value) && ![Object.prototype, null].includes(Object.getPrototypeOf(value))) {
+      fail('PRIVATE_LINK_ARTIFACT_JSON_REQUIRED');
+    }
+    const prior = sizes.get(value);
+    if (prior) {
+      if (prior.height + depth > maximumDepth) fail('PRIVATE_LINK_ARTIFACT_STRUCTURE_LIMIT');
+      return prior;
+    }
+    active.add(value);
+    try {
+      const keys = Array.isArray(value) ? Array.from({ length: value.length }, (_, index) => index) : Object.keys(value);
+      let bytes = 2 + (keys.length ? keys.length * 4 : 0), lines = keys.length ? keys.length + 1 : 0, height = 0;
+      for (const key of keys) {
+        const child = size(value[key], depth + 1);
+        bytes += child.bytes + child.lines * 2 + (Array.isArray(value) ? 0 : Buffer.byteLength(JSON.stringify(key)) + 2);
+        lines += child.lines; height = Math.max(height, child.height + 1);
+      }
+      if (!Number.isSafeInteger(bytes) || !Number.isSafeInteger(lines)) fail('PRIVATE_LINK_ARTIFACT_STRUCTURE_LIMIT');
+      const result = { bytes, lines, height }; sizes.set(value, result); return result;
+    } finally { active.delete(value); }
+  };
+  return value => {
+    if (value && typeof value === 'object' && hashes.has(value)) return hashes.get(value);
+    size(value, 0);
+    const hash = createHash('sha256');
+    const visit = (entry, depth) => {
+      if (entry === null || typeof entry !== 'object') { hash.update(scalar(entry)); return; }
+      const measured = sizes.get(entry), length = measured.bytes + measured.lines * depth * 2;
+      if (length <= blockLimit) {
+        let depths = blocks.get(entry), bytes = depths?.get(depth);
+        if (!bytes) {
+          const text = JSON.stringify(entry, null, 2);
+          bytes = Buffer.from(depth ? text.replaceAll('\n', '\n' + '  '.repeat(depth)) : text);
+          if (bytes.length !== length) fail('PRIVATE_LINK_ARTIFACT_CANONICAL_SIZE_CHANGED');
+          if (cachedBytes + bytes.length <= MAX_PRIVATE_ARTIFACT_BYTES) {
+            depths ??= new Map(); depths.set(depth, bytes); blocks.set(entry, depths); cachedBytes += bytes.length;
+          }
+        }
+        hash.update(bytes); return;
+      }
+      const array = Array.isArray(entry), keys = array ? Array.from({ length: entry.length }, (_, i) => i) : Object.keys(entry);
+      hash.update(array ? '[' : '{');
+      for (let index = 0; index < keys.length; index++) {
+        hash.update((index ? ',\n' : '\n') + '  '.repeat(depth + 1));
+        if (!array) hash.update(JSON.stringify(keys[index]) + ': ');
+        visit(entry[keys[index]], depth + 1);
+      }
+      if (keys.length) hash.update('\n' + '  '.repeat(depth));
+      hash.update(array ? ']' : '}');
+    };
+    visit(value, 0); hash.update('\n');
+    const result = hash.digest('hex');
+    if (value && typeof value === 'object') hashes.set(value, result);
+    return result;
+  };
+}
+function privateJsonCopy(value) {
+  const heights = new WeakMap(), active = new Set();
+  const validate = (entry, depth) => {
+    if (depth > maximumDepth) fail('PRIVATE_LINK_ARTIFACT_STRUCTURE_LIMIT');
+    if (entry === null || ['string', 'boolean'].includes(typeof entry) ||
+        typeof entry === 'number' && Number.isFinite(entry)) return 0;
+    if (typeof entry !== 'object' || active.has(entry) ||
+        !Array.isArray(entry) && ![Object.prototype, null].includes(Object.getPrototypeOf(entry))) fail('PRIVATE_LINK_ARTIFACT_JSON_REQUIRED');
+    if (heights.has(entry)) {
+      const height = heights.get(entry);
+      if (depth + height > maximumDepth) fail('PRIVATE_LINK_ARTIFACT_STRUCTURE_LIMIT');
+      return height;
+    }
+    active.add(entry);
+    let height = 0;
+    try {
+      const keys = Array.isArray(entry) ? Array.from({ length: entry.length }, (_, i) => i) : Object.keys(entry);
+      for (const key of keys) {
+        if (!Object.hasOwn(entry, key)) fail('PRIVATE_LINK_ARTIFACT_JSON_REQUIRED');
+        height = Math.max(height, validate(entry[key], depth + 1) + 1);
+      }
+    } finally { active.delete(entry); }
+    heights.set(entry, height); return height;
+  };
+  validate(value, 0);
+  try { return structuredClone(value); }
+  catch (error) { if (error.name !== 'DataCloneError') throw error; fail('PRIVATE_LINK_ARTIFACT_JSON_REQUIRED'); }
 }
 function evidenceShape(value) {
   closed(value, ['version', 'kind', 'planSha256', 'originSha256', 'records',
@@ -54,7 +159,7 @@ function continuedRecovery(value) {
   return value?.version === 3 && value.kind === 'reviewed-private-link-recovery' &&
     prefixStages.includes(value.stage) && value.phase?.continuation !== undefined;
 }
-function recoveryShape(value) {
+function recoveryShape(value, hash = digestJson) {
   closed(value, recoveryKeys);
   const original = value.recovery?.original;
   if (!continuedRecovery(value) || value.phase?.kind !== 'fixed-private-link-control-phase' ||
@@ -64,7 +169,7 @@ function recoveryShape(value) {
       !isObject(original)) fail('PRIVATE_LINK_ARTIFACT_RECOVERY_SCOPE');
   closed(original, ['phase', 'publication', 'approval', 'preflight', 'journal', 'intent']);
   for (const key of ['phase', 'preflight']) {
-    if (!isDeepStrictEqual(value[key], original[key]) || digestJson(value[key]) !== digestJson(original[key])) {
+    if (!isDeepStrictEqual(value[key], original[key]) || hash(value[key]) !== hash(original[key])) {
       fail('PRIVATE_LINK_ARTIFACT_RECOVERY_MEMBER_CHANGED');
     }
   }
@@ -170,7 +275,14 @@ function aggregateSlots(value) {
       value.records.length > PRIVATE_LINK_CONTROL_STAGES.length ||
       value.records.some((record, index) => record?.stage !== PRIVATE_LINK_CONTROL_STAGES[index] &&
         !(index < prefixStages.length && record?.kind === recoveryReferenceKind))) fail('PRIVATE_LINK_ARTIFACT_AGGREGATE_SCOPE');
-  const slots = new Set(), active = new Set();
+  const slots = new Set();
+  for (let index = prefixStages.length; index < value.records.length; index++) {
+    controlRecordSlots(value.records[index], ['records', index], slots);
+  }
+  return slots;
+}
+function controlRecordSlots(record, path, slots) {
+  const active = new Set();
   const original = (value, stage, path, depth) => {
     if (depth > 8 || active.has(value)) fail('PRIVATE_LINK_ARTIFACT_AGGREGATE_HISTORY_LIMIT');
     closed(value, ['phase', 'publication', 'approval', 'preflight', 'journal', 'intent']);
@@ -197,19 +309,44 @@ function aggregateSlots(value) {
       ...(value.continuation.resolution.version === 2 ? ['externalAdoptionSha256'] : [])]);
     original(value.continuation.resolution.original, stage, [...path, 'continuation', 'resolution', 'original'], depth + 1);
   };
-  for (let index = prefixStages.length; index < value.records.length; index++) {
-    const record = value.records[index], path = ['records', index];
-    closed(record, recoveryKeys);
-    if (![1, 2, 3].includes(record.version) || !['reviewed-private-link-phase', 'reviewed-private-link-recovery'].includes(record.kind)) {
-      fail('PRIVATE_LINK_ARTIFACT_AGGREGATE_RECORD');
-    }
-    preflight(record.preflight, [...path, 'preflight']);
-    phase(record.phase, record.stage, [...path, 'phase'], 0);
-    if (record.kind === 'reviewed-private-link-recovery') {
-      closed(record.recovery, ['original', 'proposal', 'review', 'costReview', 'costEvidence', 'migrationReview', 'currentPublication', 'policyRevision']);
-      original(record.recovery.original, record.stage, [...path, 'recovery', 'original'], 0);
-    } else if (record.recovery !== null) fail('PRIVATE_LINK_ARTIFACT_AGGREGATE_RECORD');
+  closed(record, recoveryKeys);
+  if (![1, 2, 3].includes(record.version) || !['reviewed-private-link-phase', 'reviewed-private-link-recovery'].includes(record.kind) ||
+      !PRIVATE_LINK_CONTROL_STAGES.slice(prefixStages.length).includes(record.stage)) {
+    fail('PRIVATE_LINK_ARTIFACT_AGGREGATE_RECORD');
   }
+  preflight(record.preflight, [...path, 'preflight']);
+  phase(record.phase, record.stage, [...path, 'phase'], 0);
+  if (record.kind === 'reviewed-private-link-recovery') {
+    closed(record.recovery, ['original', 'proposal', 'review', 'costReview', 'costEvidence', 'migrationReview', 'currentPublication', 'policyRevision']);
+    original(record.recovery.original, record.stage, [...path, 'recovery', 'original'], 0);
+  } else if (record.recovery !== null) fail('PRIVATE_LINK_ARTIFACT_AGGREGATE_RECORD');
+}
+function standaloneCandidate(value) {
+  const record = value?.record ?? value;
+  return ['reviewed-private-link-phase', 'reviewed-private-link-recovery'].includes(record?.kind) &&
+    PRIVATE_LINK_CONTROL_STAGES.slice(prefixStages.length).includes(record.stage);
+}
+function standaloneSlots(value, hash = null) {
+  const slots = new Set();
+  if (Object.hasOwn(value, 'record')) {
+    closed(value, ['pending', 'record', 'next']);
+    closed(value.pending, ['version', 'kind', 'targetKey', 'previous', 'intentSha256']);
+    closed(value.next, ['version', 'kind', 'targetKey', 'planSha256', 'originSha256', 'records', 'stage', 'recordSha256',
+      ...(value.next.externalAdoptionSha256 === undefined ? [] : ['externalAdoptionSha256'])]);
+    if (value.pending.version !== 1 || value.pending.kind !== 'private-link-pending-head' ||
+        value.next.version !== 1 || value.next.kind !== 'private-link-terminal-head' ||
+        value.pending.targetKey !== value.next.targetKey || !sha(value.pending.targetKey) ||
+        value.pending.intentSha256 !== value.record.intentSha256 || value.next.stage !== value.record.stage ||
+        value.next.records !== PRIVATE_LINK_CONTROL_STAGES.indexOf(value.record.stage) + 1 ||
+        !sha(value.next.planSha256) || !sha(value.next.originSha256) || !sha(value.next.recordSha256) ||
+        value.next.externalAdoptionSha256 !== value.record.phase?.externalAdoptionSha256 ||
+        value.next.externalAdoptionSha256 !== undefined && !sha(value.next.externalAdoptionSha256) ||
+        !isDeepStrictEqual(value.pending.previous, value.record.phase.expectedHead) ||
+        hash && (hash(value.record) !== value.next.recordSha256 || hash(value.record.intent) !== value.record.intentSha256)) {
+      fail('PRIVATE_LINK_ARTIFACT_STANDALONE_SCOPE');
+    }
+    controlRecordSlots(value.record, ['record'], slots);
+  } else controlRecordSlots(value, [], slots);
   return slots;
 }
 function aggregatePrefix(value) {
@@ -259,7 +396,7 @@ export function createPrivateLinkArtifactStore({ root, read = load, immutable = 
     countReference(state);
     if (state.candidates.has(value)) return state.candidates.get(value);
     candidateShape(value); noReferences(value);
-    const hash = digestJson(value);
+    const hash = state.hash(value);
     const bytes = await writeBlob(candidateName(hash), async () => { noReferences(value, state); return compact(value); }, state);
     const reference = { version: 1, kind: candidateReferenceKind, candidateSha256: hash, bytes };
     state.candidates.set(value, reference); return reference;
@@ -267,7 +404,7 @@ export function createPrivateLinkArtifactStore({ root, read = load, immutable = 
   const writeCompletion = async (value, aggregate, state) => {
     completionShape(value); countReference(state);
     if (state.completions.has(value)) return state.completions.get(value);
-    const hash = digestJson(value), name = completionName(hash);
+    const hash = state.hash(value), name = completionName(hash);
     const bytes = await writeBlob(name, async () => {
       let referenceCount = 0;
       const payload = await walker(state)(value, async (entry, parent, key) => {
@@ -275,7 +412,7 @@ export function createPrivateLinkArtifactStore({ root, read = load, immutable = 
         if (!owners.has(parent?.kind)) return undefined;
         if (key === 'controlEvidence') {
           evidenceShape(entry);
-          if (!isDeepStrictEqual(entry, aggregate.prefix) || digestJson(entry) !== aggregate.prefixSha256) {
+          if (!isDeepStrictEqual(entry, aggregate.prefix) || state.hash(entry) !== aggregate.prefixSha256) {
             fail('PRIVATE_LINK_ARTIFACT_LOCAL_PREFIX_CHANGED');
           }
           referenceCount++; countReference(state);
@@ -332,7 +469,7 @@ export function createPrivateLinkArtifactStore({ root, read = load, immutable = 
       });
       if (references !== template.referenceCount) fail('PRIVATE_LINK_ARTIFACT_REFERENCE_COUNT_CHANGED');
       completionShape(value);
-      if (!isDeepStrictEqual(value.controlEvidence, aggregate.prefix) || digestJson(value) !== reference.completionSha256) {
+      if (!isDeepStrictEqual(value.controlEvidence, aggregate.prefix) || state.hash(value) !== reference.completionSha256) {
         fail('PRIVATE_LINK_ARTIFACT_COMPLETION_CONTENT_CHANGED');
       }
       const frozen = freeze(value);
@@ -362,12 +499,56 @@ export function createPrivateLinkArtifactStore({ root, read = load, immutable = 
         if (stored?.kind !== envelopeKind || stored.version !== 2) fail('PRIVATE_LINK_ARTIFACT_ENVELOPE_INVALID');
         value = await decodeEnvelope(stored, state, true);
       } else { noReferences(stored, state.aggregate ? state : null); value = stored; }
-      type.verify(value);
-      if (digestJson(value) !== reference[type.hashField]) fail('PRIVATE_LINK_ARTIFACT_CONTENT_CHANGED');
+      type.verify(value, state.hash);
+      if (state.hash(value) !== reference[type.hashField]) fail('PRIVATE_LINK_ARTIFACT_CONTENT_CHANGED');
       value = freeze(value);
       state.loaded.set(name, { bytes: reference.bytes, value });
       return value;
     } finally { state.active.delete(name); }
+  };
+  const legacyReferenceCount = async (value, state) => {
+    let count = 0;
+    const visited = new Set();
+    const visit = async (value, recoveryOnly = false) => walker()(value, async (entry, parent, key, owner) => {
+      if (count > maximumReferences) return entry;
+      if (reservedKinds.has(entry.kind)) fail('PRIVATE_LINK_ARTIFACT_ALREADY_ENCODED');
+      const type = eligible(parent, key, owner);
+      if (!type || type === recoveryType && !continuedRecovery(entry)) return undefined;
+      if (recoveryOnly && type !== recoveryType) fail('PRIVATE_LINK_ARTIFACT_REFERENCE_SCOPE');
+      if (state.entries.get(entry) !== type) { type.verify(entry, state.hash); noReferences(entry); state.entries.set(entry, type); }
+      count++;
+      if (type === referenceTypes.controlEvidence && entry.records.some(continuedRecovery)) {
+        const key = state.hash(entry);
+        if (!visited.has(key)) { visited.add(key); await visit(entry, true); }
+      }
+      return entry;
+    });
+    await visit(value); return count;
+  };
+  const encodeStandalone = async (value, state) => {
+    const slots = standaloneSlots(value, state.hash), completions = [], selected = new Map();
+    Object.assign(state, { aggregate: true, nodes: 0 });
+    let references = 0;
+    const payload = await walker(state)(value, async (entry, parent, key, owner) => {
+      if (reservedKinds.has(entry.kind)) fail('PRIVATE_LINK_ARTIFACT_ALREADY_ENCODED');
+      if (!slots.has(memberPath(key, owner))) {
+        const type = eligible(parent, key, owner);
+        if (type && (type !== recoveryType || continuedRecovery(entry))) fail('PRIVATE_LINK_ARTIFACT_STANDALONE_SCOPE');
+        return undefined;
+      }
+      completionShape(entry);
+      const hash = state.hash(entry);
+      countReference(state); references++;
+      if (!selected.has(hash)) {
+        if (completions.length >= maximumDistinctReferences) fail('PRIVATE_LINK_ARTIFACT_REFERENCE_LIMIT');
+        const content = JSON.parse(await encodePayload(entry, state));
+        const stored = { completionSha256: hash, contentSha256: digest(compact(content)), content };
+        selected.set(hash, stored); completions.push(stored);
+      }
+      return { version: 1, kind: localCompletionKind, completionSha256: hash };
+    });
+    return compact({ version: 4, kind: envelopeKind, referenceCount: references,
+      rootSha256: state.hash(value), payloadSha256: digest(compact(payload)), payload, completions });
   };
   const encodePayload = async (value, state, recoveryOnly = false, aggregate = null) => {
     let references = 0, modern = false;
@@ -380,11 +561,12 @@ export function createPrivateLinkArtifactStore({ root, read = load, immutable = 
       const type = eligible(parent, key, owner);
       if (!type || type === recoveryType && !continuedRecovery(entry)) return undefined;
       if (recoveryOnly && type !== recoveryType) fail('PRIVATE_LINK_ARTIFACT_REFERENCE_SCOPE');
-      const snapshot = structuredClone(entry);
-      type.verify(snapshot); noReferences(snapshot);
+      const snapshot = entry;
+      const known = state.entries.get(snapshot);
+      if (known !== type) { type.verify(snapshot, state.hash); noReferences(snapshot); }
       if (++state.references > maximumReferences) fail('PRIVATE_LINK_ARTIFACT_REFERENCE_LIMIT');
       references++;
-      const hash = digestJson(snapshot);
+      const hash = state.hash(snapshot);
       const version = type === referenceTypes.controlEvidence && snapshot.records.some(continuedRecovery) ? 2 : 1;
       modern ||= type === recoveryType || version === 2;
       const name = type.name(hash, version);
@@ -408,7 +590,9 @@ export function createPrivateLinkArtifactStore({ root, read = load, immutable = 
       }
       const bytes = state.written.get(name);
       if (bytes === null) fail('PRIVATE_LINK_ARTIFACT_NESTED_REFERENCE');
-      return { version, kind: type.kind, [type.hashField]: hash, bytes };
+      const reference = { version, kind: type.kind, [type.hashField]: hash, bytes };
+      state.entries.set(snapshot, type);
+      return reference;
     });
     if (aggregate) return compact({ version: 3, kind: envelopeKind, referenceCount: references,
       rootSha256: aggregate.rootSha256, prefixSha256: aggregate.prefixSha256, payloadSha256: digest(compact(payload)), payload });
@@ -416,14 +600,20 @@ export function createPrivateLinkArtifactStore({ root, read = load, immutable = 
     const bytes = compact(payload);
     return compact({ version: modern ? 2 : 1, kind: envelopeKind, referenceCount: references, payloadSha256: digest(bytes), payload });
   };
-  const encode = value => {
-    const state = { references: 0, bytes: 0, written: new Map() };
-    if (!aggregateCandidate(value)) return encodePayload(value, state);
+  const encode = async value => {
+    const state = { references: 0, bytes: 0, written: new Map(), hash: canonicalDigest(), entries: new WeakMap() };
+    const snapshot = privateJsonCopy(value);
+    if (!aggregateCandidate(snapshot)) {
+      if (standaloneCandidate(snapshot) && await legacyReferenceCount(snapshot, state) > maximumReferences) {
+        return encodeStandalone(snapshot, state);
+      }
+      return encodePayload(snapshot, state);
+    }
     // Private copies let repeated object identities share hashing only inside
     // this write, without freezing caller data or trusting a prior operation.
-    const snapshot = structuredClone(value), slots = aggregateSlots(snapshot), prefix = aggregatePrefix(snapshot);
+    const slots = aggregateSlots(snapshot), prefix = aggregatePrefix(snapshot);
     Object.assign(state, { aggregate: true, nodes: 0, candidates: new WeakMap(), completions: new WeakMap() });
-    return encodePayload(snapshot, state, false, { slots, prefix, prefixSha256: digestJson(prefix), rootSha256: digestJson(snapshot) });
+    return encodePayload(snapshot, state, false, { slots, prefix, prefixSha256: state.hash(prefix), rootSha256: state.hash(snapshot) });
   };
   const decodeEnvelope = async (value, state, recoveryOnly = false) => {
     closed(value, ['version', 'kind', 'referenceCount', 'payloadSha256', 'payload']);
@@ -447,7 +637,53 @@ export function createPrivateLinkArtifactStore({ root, read = load, immutable = 
   };
   const decode = async value => {
     if (!isObject(value) || value.kind !== envelopeKind) { noReferences(value); return value; }
-    const state = { references: 0, bytes: 0, loaded: new Map(), active: new Set() };
+    const state = { references: 0, bytes: 0, loaded: new Map(), active: new Set(), hash: canonicalDigest() };
+    if (value.version === 4) {
+      closed(value, ['version', 'kind', 'referenceCount', 'rootSha256', 'payloadSha256', 'payload', 'completions']);
+      if (!Number.isSafeInteger(value.referenceCount) || value.referenceCount < 1 || value.referenceCount > maximumReferences ||
+          !sha(value.rootSha256) || value.payloadSha256 !== digest(compact(value.payload)) ||
+          !Array.isArray(value.completions) || !value.completions.length || value.completions.length > maximumDistinctReferences) {
+        fail('PRIVATE_LINK_ARTIFACT_ENVELOPE_INVALID');
+      }
+      const slots = standaloneSlots(value.payload), table = new Map(), restored = new Map(), seen = [];
+      Object.assign(state, { aggregate: true, nodes: 0 });
+      for (const item of value.completions) {
+        closed(item, ['completionSha256', 'contentSha256', 'content']);
+        if (!sha(item.completionSha256) || item.contentSha256 !== digest(compact(item.content)) || table.has(item.completionSha256)) {
+          fail('PRIVATE_LINK_ARTIFACT_COMPLETION_CONTENT_CHANGED');
+        }
+        if (item.content?.kind !== envelopeKind || ![1, 2].includes(item.content.version)) fail('PRIVATE_LINK_ARTIFACT_REFERENCE_SCOPE');
+        table.set(item.completionSha256, item);
+      }
+      let references = 0;
+      const result = await walker(state)(value.payload, async (entry, parent, key, owner) => {
+        if (slots.has(memberPath(key, owner))) {
+          closed(entry, ['version', 'kind', 'completionSha256']);
+          if (entry.version !== 1 || entry.kind !== localCompletionKind || !table.has(entry.completionSha256)) fail('PRIVATE_LINK_ARTIFACT_REFERENCE_SCOPE');
+          countReference(state); references++;
+          if (!restored.has(entry.completionSha256)) {
+            const item = table.get(entry.completionSha256);
+            const content = await decodeEnvelope(item.content, state);
+            completionShape(content);
+            if (state.hash(content) !== item.completionSha256) fail('PRIVATE_LINK_ARTIFACT_COMPLETION_CONTENT_CHANGED');
+            restored.set(item.completionSha256, freeze(content)); seen.push(item.completionSha256);
+          }
+          return restored.get(entry.completionSha256);
+        }
+        if (reservedKinds.has(entry.kind)) fail('PRIVATE_LINK_ARTIFACT_REFERENCE_SCOPE');
+        const type = eligible(parent, key, owner);
+        if (type && (type !== recoveryType || continuedRecovery(entry))) fail('PRIVATE_LINK_ARTIFACT_STANDALONE_SCOPE');
+        return undefined;
+      });
+      if (references !== value.referenceCount || references !== slots.size ||
+          !isDeepStrictEqual(seen, [...table.keys()])) fail('PRIVATE_LINK_ARTIFACT_REFERENCE_COUNT_CHANGED');
+      standaloneSlots(result, state.hash);
+      if (state.hash(result) !== value.rootSha256) fail('PRIVATE_LINK_ARTIFACT_CONTENT_CHANGED');
+      if (await legacyReferenceCount(result, { hash: state.hash, entries: new WeakMap() }) <= maximumReferences) {
+        fail('PRIVATE_LINK_ARTIFACT_STANDALONE_SELECTION');
+      }
+      return result;
+    }
     if (value.version !== 3) return decodeEnvelope(value, state);
     closed(value, ['version', 'kind', 'referenceCount', 'rootSha256', 'prefixSha256', 'payloadSha256', 'payload']);
     if (!Number.isSafeInteger(value.referenceCount) || value.referenceCount < 1 || value.referenceCount > maximumReferences ||
@@ -474,7 +710,7 @@ export function createPrivateLinkArtifactStore({ root, read = load, immutable = 
     });
     if (references !== value.referenceCount || deferred.length !== slots.size) fail('PRIVATE_LINK_ARTIFACT_REFERENCE_COUNT_CHANGED');
     const prefix = freeze(aggregatePrefix(result));
-    if (digestJson(prefix) !== value.prefixSha256) fail('PRIVATE_LINK_ARTIFACT_LOCAL_PREFIX_CHANGED');
+    if (state.hash(prefix) !== value.prefixSha256) fail('PRIVATE_LINK_ARTIFACT_LOCAL_PREFIX_CHANGED');
     const aggregate = { prefix, prefixSha256: value.prefixSha256 };
     for (const item of deferred) {
       const path = JSON.parse(item.path), leaf = path.pop();
@@ -482,7 +718,7 @@ export function createPrivateLinkArtifactStore({ root, read = load, immutable = 
       for (const key of path) parent = parent[key];
       parent[leaf] = await readCompletion(item.reference, aggregate, state);
     }
-    if (digestJson(result) !== value.rootSha256) fail('PRIVATE_LINK_ARTIFACT_AGGREGATE_CONTENT_CHANGED');
+    if (state.hash(result) !== value.rootSha256) fail('PRIVATE_LINK_ARTIFACT_AGGREGATE_CONTENT_CHANGED');
     return result;
   };
   return {

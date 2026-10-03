@@ -27,12 +27,92 @@ const privateRoot = fileURLToPath(new URL('./.operator-private/', import.meta.ur
 const appApi = '2025-07-01';
 const forwardRuntime = new AsyncLocalStorage();
 const runtimeScopes = new WeakSet();
+function immutableJsonDigest(value, scope) {
+  scope.jsonNodes ??= new WeakMap();
+  scope.jsonStrings ??= new Map();
+  const ancestors = new WeakSet(), local = new WeakMap(), limit = 65536;
+  function shape(entry, depth = 0) {
+    if (depth > 128) fail('CANONICAL_JSON_DEPTH_LIMIT');
+    if (entry === null || typeof entry === 'boolean') return { size: 5, height: 0 };
+    if (typeof entry === 'string') return { size: Math.min(limit + 1, entry.length * 6 + 2), height: 0 };
+    if (typeof entry === 'number' && Number.isFinite(entry)) return { size: 32, height: 0 };
+    if (typeof entry !== 'object' || ancestors.has(entry) || types.isProxy(entry) ||
+        !Array.isArray(entry) && ![Object.prototype, null].includes(Object.getPrototypeOf(entry))) fail('CANONICAL_JSON_DATA_REQUIRED');
+    if (scope.immutable.has(entry) && scope.jsonNodes.has(entry)) return scope.jsonNodes.get(entry);
+    if (local.has(entry)) return local.get(entry);
+    ancestors.add(entry);
+    const array = Array.isArray(entry), keys = array ? Array.from({ length: entry.length }, (_, i) => i) : Object.keys(entry);
+    let size = 2, height = 0;
+    for (const key of keys) {
+      if (!Object.hasOwn(Object.getOwnPropertyDescriptor(entry, key) ?? {}, 'value')) fail('CANONICAL_JSON_DATA_REQUIRED');
+      const child = shape(entry[key], depth + 1);
+      height = Math.max(height, child.height + 1);
+      // Conservative, depth-independent bound, including maximum permitted indentation.
+      size = Math.min(limit + 1, size + child.size + 260 + (array ? 0 : String(key).length * 6 + 4));
+    }
+    if (height > 128) fail('CANONICAL_JSON_DEPTH_LIMIT');
+    ancestors.delete(entry);
+    const result = { size, height, keys, array, depths: new Map() };
+    if (scope.immutable.has(entry)) scope.jsonNodes.set(entry, result);
+    else local.set(entry, result);
+    return result;
+  }
+  shape(value);
+  const checksum = createHash('sha256');
+  let chunks = [], length = 0;
+  const flush = () => {
+    if (length) checksum.update(Buffer.concat(chunks, length));
+    chunks = []; length = 0;
+  };
+  const emit = value => {
+    const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value);
+    if (bytes.length >= limit) { flush(); checksum.update(bytes); return; }
+    chunks.push(bytes); length += bytes.length;
+    if (length >= limit) flush();
+  };
+  const retain = (map, key, bytes) => {
+    if ((scope.jsonSegmentBytes ?? 0) + bytes.length <= 16 * 1024 * 1024) {
+      scope.jsonSegmentBytes = (scope.jsonSegmentBytes ?? 0) + bytes.length;
+      map.set(key, bytes);
+    }
+    return bytes;
+  };
+  function visit(entry, depth) {
+    if (depth > 128) fail('CANONICAL_JSON_DEPTH_LIMIT');
+    if (typeof entry === 'string') {
+      emit(scope.jsonStrings.get(entry) ?? retain(scope.jsonStrings, entry, Buffer.from(JSON.stringify(entry)))); return;
+    }
+    if (entry === null || typeof entry !== 'object') { emit(JSON.stringify(entry)); return; }
+    const node = local.get(entry) ?? scope.jsonNodes.get(entry);
+    if (depth + node.height > 128) fail('CANONICAL_JSON_DEPTH_LIMIT');
+    if (node.size <= limit) {
+      emit(node.depths.get(depth) ?? retain(node.depths, depth,
+        Buffer.from(JSON.stringify(entry, null, 2).replaceAll('\n', `\n${'  '.repeat(depth)}`))));
+      return;
+    }
+    emit(node.array ? '[' : '{');
+    for (const [index, key] of node.keys.entries()) {
+      emit(`${index ? ',\n' : '\n'}${'  '.repeat(depth + 1)}`);
+      if (!node.array) emit(`${JSON.stringify(key)}: `);
+      visit(entry[key], depth + 1);
+    }
+    if (node.keys.length) emit(`\n${'  '.repeat(depth)}`);
+    emit(node.array ? ']' : '}');
+  }
+  visit(value, 0); emit('\n');
+  flush();
+  return checksum.digest('hex');
+}
 const hash = value => {
   const scope = forwardRuntime.getStore();
   if (scope?.immutable.has(value)) {
     if (!runtimeScopes.has(scope)) fail('PRIVATE_RUNTIME_OPERATION_SCOPE_CLOSED');
-    if (!scope.hashes.has(value)) scope.hashes.set(value, digestJson(value));
+    if (!scope.hashes.has(value)) scope.hashes.set(value, scope.completion ? immutableJsonDigest(value, scope) : digestJson(value));
     return scope.hashes.get(value);
+  }
+  if (scope?.completion) {
+    if (!runtimeScopes.has(scope)) fail('PRIVATE_RUNTIME_OPERATION_SCOPE_CLOSED');
+    return immutableJsonDigest(value, scope);
   }
   return digestJson(value);
 };
@@ -41,7 +121,7 @@ function immutableRuntime(value, seen) {
   seen.add(value); Object.values(value).forEach(entry => immutableRuntime(entry, seen));
   return Object.freeze(value);
 }
-function runtimeInputCheck(original, copy) {
+function runtimeInputCheck(original, copy, code = 'PRIVATE_RUNTIME_OPERATION_INPUT_CHANGED') {
   const stable = new WeakMap();
   const remember = (map, value, expected, frozen) => {
     if (!map.has(value)) map.set(value, new WeakMap());
@@ -50,22 +130,22 @@ function runtimeInputCheck(original, copy) {
   return () => {
     const checked = new WeakMap();
     const compare = (value, expected, depth) => {
-      if (depth > 128) fail('PRIVATE_RUNTIME_OPERATION_INPUT_CHANGED');
+      if (depth > 128) fail(code);
       if (expected === null || typeof expected !== 'object') {
-        if (!Object.is(value, expected)) fail('PRIVATE_RUNTIME_OPERATION_INPUT_CHANGED');
+        if (!Object.is(value, expected)) fail(code);
         return true;
       }
       if (value === null || typeof value !== 'object' || types.isProxy(value) ||
           Array.isArray(value) !== Array.isArray(expected) ||
-          !Array.isArray(value) && ![Object.prototype, null].includes(Object.getPrototypeOf(value))) fail('PRIVATE_RUNTIME_OPERATION_INPUT_CHANGED');
+          !Array.isArray(value) && ![Object.prototype, null].includes(Object.getPrototypeOf(value))) fail(code);
       if (stable.get(value)?.has(expected)) return true;
       if (checked.get(value)?.has(expected)) return checked.get(value).get(expected);
       const keys = Object.keys(value), expectedKeys = Object.keys(expected);
-      if (keys.length !== expectedKeys.length || Array.isArray(value) && value.length !== expected.length) fail('PRIVATE_RUNTIME_OPERATION_INPUT_CHANGED');
+      if (keys.length !== expectedKeys.length || Array.isArray(value) && value.length !== expected.length) fail(code);
       let frozen = Object.isFrozen(value);
       for (let index = 0; index < keys.length; index++) {
         const key = keys[index], descriptor = Object.getOwnPropertyDescriptor(value, key);
-        if (key !== expectedKeys[index] || !Object.hasOwn(descriptor, 'value')) fail('PRIVATE_RUNTIME_OPERATION_INPUT_CHANGED');
+        if (key !== expectedKeys[index] || !Object.hasOwn(descriptor, 'value')) fail(code);
         frozen = compare(descriptor.value, expected[key], depth + 1) && frozen;
       }
       remember(checked, value, expected, frozen);
@@ -74,6 +154,100 @@ function runtimeInputCheck(original, copy) {
     };
     compare(original, copy, 0);
   };
+}
+function frozenJson(value, members, seen = new WeakSet()) {
+  if (value === null || typeof value !== 'object' || seen.has(value)) return true;
+  if (types.isProxy(value) || !Object.isFrozen(value) ||
+      !Array.isArray(value) && ![Object.prototype, null].includes(Object.getPrototypeOf(value))) return false;
+  seen.add(value);
+  const descriptors = Object.values(Object.getOwnPropertyDescriptors(value));
+  if (descriptors.some(d => !Object.hasOwn(d, 'value') || !frozenJson(d.value, members, seen))) return false;
+  members.push(value);
+  return true;
+}
+export const privateLinkValidationHash = value => {
+  const scope = forwardRuntime.getStore();
+  if (scope && !scope.immutable.has(value)) {
+    const members = [];
+    if (frozenJson(value, members)) members.forEach(member => scope.immutable.add(member));
+  }
+  return hash(value);
+};
+export const privateLinkValidationInputCheck = (value, copy, code) => runtimeInputCheck(value, copy, code);
+export const privateLinkValidationIsImmutable = value => {
+  const scope = forwardRuntime.getStore();
+  return Boolean(scope && runtimeScopes.has(scope) && scope.immutable.has(value));
+};
+export function sameOrderedJson(a, b, seen = new WeakMap()) {
+  if (Object.is(a, b)) return true;
+  if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object' ||
+      Array.isArray(a) !== Array.isArray(b)) return false;
+  if (seen.get(a)?.has(b)) return true;
+  if (!seen.has(a)) seen.set(a, new WeakSet());
+  seen.get(a).add(b);
+  const keys = Object.keys(a), other = Object.keys(b);
+  return keys.length === other.length && (!Array.isArray(a) || a.length === b.length) &&
+    keys.every((key, index) => key === other[index] && sameOrderedJson(a[key], b[key], seen));
+}
+function internValidationCopy(value, scope) {
+  scope.interned ??= new Map();
+  const seen = new WeakMap();
+  const kinds = new Set(['reviewed-private-link-control-chain', 'private-link-reconciled-disabled-receiver',
+    'private-link-disabled-receiver', 'private-link-receiver-create-intent', 'private-link-window-intent']);
+  function visit(entry) {
+    if (entry === null || typeof entry !== 'object') return entry;
+    if (seen.has(entry)) return seen.get(entry);
+    seen.set(entry, entry);
+    for (const key of Object.keys(entry)) entry[key] = visit(entry[key]);
+    const kind = kinds.has(entry.kind) ? entry.kind :
+      entry.version === 2 && entry.profile?.kind === 'reviewed-durable-queue-receiver' ? 'receiver-candidate' : null;
+    if (!kind) return entry;
+    if (!scope.interned.has(kind)) scope.interned.set(kind, []);
+    const bucket = scope.interned.get(kind);
+    const prior = bucket.find(value => isDeepStrictEqual(value, entry) && sameOrderedJson(value, entry));
+    if (prior) { seen.set(entry, prior); return prior; }
+    bucket.push(entry);
+    return entry;
+  }
+  return visit(value);
+}
+export function privateLinkValidationCopy(value) {
+  const scope = forwardRuntime.getStore(), prior = scope?.completion?.records.get(value);
+  if (prior) {
+    if (!runtimeScopes.has(scope)) fail('PRIVATE_RUNTIME_OPERATION_SCOPE_CLOSED');
+    prior.check(); return prior.copy;
+  }
+  const copy = structuredClone(value);
+  return immutableRuntime(scope?.completion ? internValidationCopy(copy, scope) : copy, scope?.immutable ?? new WeakSet());
+}
+function completionScope(c, context) {
+  const scope = forwardRuntime.getStore();
+  if (!scope?.completion) return null;
+  if (!runtimeScopes.has(scope)) fail('PRIVATE_RUNTIME_OPERATION_SCOPE_CLOSED');
+  const b = scope.completion;
+  return (b.c === c && b.context === context || b.copy.c === c && b.copy.context === context) ? scope : null;
+}
+export function assertPrivateLinkCompletionInputs(c, context) {
+  const scope = completionScope(c, context);
+  if (!scope) return;
+  scope.completion.check();
+  for (const entry of scope.completion.records.values()) entry.check();
+}
+export function withPrivateLinkCompletionValidation(c, context, use) {
+  const forward = forwardRuntime.getStore();
+  if (forward && !forward.completion && runtimeScopes.has(forward)) return use();
+  const existing = completionScope(c, context);
+  if (existing) return use();
+  const scope = { immutable: new WeakSet(), hashes: new WeakMap(), candidates: new WeakMap(),
+    statistics: { immutableCandidateVerifications: 0, immutableCandidateReuses: 0 } };
+  const originals = { c, context }, copy = immutableRuntime(structuredClone(originals), scope.immutable);
+  scope.completion = { c, context, copy, check: runtimeInputCheck(originals, copy), records: new Map(), verified: [] };
+  runtimeScopes.add(scope);
+  try {
+    const result = forwardRuntime.run(scope, use);
+    if (result && typeof result.then === 'function') return Promise.resolve(result).finally(() => runtimeScopes.delete(scope));
+    runtimeScopes.delete(scope); return result;
+  } catch (error) { runtimeScopes.delete(scope); throw error; }
 }
 function verifyImmutableCandidate(c, candidate) {
   const scope = forwardRuntime.getStore();
@@ -86,6 +260,19 @@ function verifyImmutableCandidate(c, candidate) {
     candidates.set(candidate, verifyReceiverCandidate(c, candidate));
   } else scope.statistics.immutableCandidateReuses++;
   return candidates.get(candidate);
+}
+function immutableRuntimeFact(name, value, bindings, verify) {
+  const scope = forwardRuntime.getStore();
+  if (!scope?.completion || !privateLinkValidationIsImmutable(value)) return verify();
+  assertPrivateLinkCompletionInputs(bindings[0], bindings[1]);
+  scope.facts ??= new Map();
+  if (!scope.facts.has(name)) scope.facts.set(name, new WeakMap());
+  const values = scope.facts.get(name), prior = values.get(value);
+  if (prior && prior.bindings.length === bindings.length &&
+      prior.bindings.every((item, index) => item === bindings[index])) return prior.result;
+  const result = verify();
+  values.set(value, { bindings, result });
+  return result;
 }
 const equal = (a, b, code) => { if (!isDeepStrictEqual(a, b)) fail(code); };
 const sha = value => typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value);
@@ -924,6 +1111,10 @@ function verifyHttp(response, status) {
 }
 
 function verifyDisabledReceiver(c, context, evidence, candidate, record) {
+  return immutableRuntimeFact('disabled', record, [c, context, evidence, candidate],
+    () => verifyDisabledReceiverRecord(c, context, evidence, candidate, record));
+}
+function verifyDisabledReceiverRecord(c, context, evidence, candidate, record) {
   if (record?.kind === 'private-link-reconciled-disabled-receiver') {
     closed(record, ['version', 'kind', 'intent', 'target', 'candidate', 'controlEvidence', 'observation', 'deployment', 'operations',
       'reconciliationId', 'completedAt', 'originalFailure', 'ingestionEnabled', 'creationAnchor']);
@@ -957,6 +1148,9 @@ function verifyDisabledReceiver(c, context, evidence, candidate, record) {
 }
 
 export function verifyCreateIntent(c, context, evidence, intent) {
+  return immutableRuntimeFact('create-intent', intent, [c, context, evidence], () => verifyCreateIntentRecord(c, context, evidence, intent));
+}
+function verifyCreateIntentRecord(c, context, evidence, intent) {
   closed(intent, ['version', 'kind', 'binding', 'target', 'candidate', 'phase', 'approval',
     'controlEvidence', 'intentAt', 'effectDeadline', 'outcome']);
   if (intent.version !== 2 || intent.kind !== 'private-link-receiver-create-intent' || intent.outcome !== 'write-possible') fail('PRIVATE_CREATE_INTENT_CHANGED');
@@ -1045,6 +1239,16 @@ function windowBinding(c, context, evidence, candidate, disabled, instanceId, tr
 
 const continuationAction = 'private-link-continue-never-enabled-window';
 function continuationFacts(value) {
+  const scope = forwardRuntime.getStore();
+  if (scope?.immutable.has(value)) {
+    if (!runtimeScopes.has(scope)) fail('PRIVATE_RUNTIME_OPERATION_SCOPE_CLOSED');
+    scope.continuationFacts ??= new WeakMap();
+    if (!scope.continuationFacts.has(value)) {
+      const { approval, admission, ...facts } = value;
+      scope.continuationFacts.set(value, immutableRuntime(facts, scope.immutable));
+    }
+    return scope.continuationFacts.get(value);
+  }
   const { approval, admission, ...facts } = value;
   return facts;
 }
@@ -1704,6 +1908,9 @@ async function qualifyWindow(c, context, evidence, candidate, disabled, instance
 }
 
 export function verifyWindowIntent(c, context, evidence, intent) {
+  return immutableRuntimeFact('window-intent', intent, [c, context, evidence], () => verifyWindowIntentRecord(c, context, evidence, intent));
+}
+function verifyWindowIntentRecord(c, context, evidence, intent) {
   closed(intent, ['version', 'kind', 'contextSha256', 'binding', 'approvals', 'phases', 'disabled', 'candidate',
     'controlEvidence', 'transport', 'target', 'publicTarget', 'incarnation', 'physicalKey', 'intentAt', 'rollbackRequest',
     'publicPhase', 'publicCleanupRequest', 'outcome', ...(intent?.version === 4 ? ['continuation'] : [])]);
@@ -1833,6 +2040,37 @@ export async function recoverPrivateLinkDisabled(c, context, evidence, recoveryI
 }
 
 export function verifyPrivateLinkRuntimeCompletion(c, context, record, at) {
+  const active = forwardRuntime.getStore();
+  if (!active?.completion && active && runtimeScopes.has(active)) return verifyRuntimeCompletion(c, context, record, at);
+  const scope = completionScope(c, context);
+  if (!scope) return withPrivateLinkCompletionValidation(c, context, () => verifyPrivateLinkRuntimeCompletion(c, context, record, at));
+  assertPrivateLinkCompletionInputs(c, context);
+  const state = scope.completion;
+  let entry = state.records.get(record);
+  if (!entry) {
+    const copy = privateLinkValidationCopy(record), check = runtimeInputCheck(record, copy);
+    check();
+    const prior = state.verified.find(value => isDeepStrictEqual(value.record, copy));
+    if (prior) runtimeInputCheck(copy, prior.record)();
+    entry = { copy, check, result: prior?.result ?? null };
+    state.records.set(record, entry);
+  }
+  if (!Number.isSafeInteger(at) || canonicalInstant(entry.copy.completedAt) > at) fail('PRIVATE_RUNTIME_COMPLETION_UNQUALIFIED');
+  if (!entry.result) {
+    const selected = frozenJson(state.c, []) && frozenJson(state.context, []) ? state : state.copy;
+    const selectedC = selected.c, selectedContext = selected.context;
+    entry.result = withPrivateLinkRuntimeValidation(selectedC, selectedContext, entry.copy.controlEvidence, selectedEvidence => {
+      const selected = immutableRuntime({ ...entry.copy, controlEvidence: selectedEvidence }, scope.immutable);
+      return verifyRuntimeCompletion(selectedC, selectedContext, selected, at);
+    });
+    state.verified.push({ record: entry.copy, result: entry.result });
+  }
+  scope.hashes.set(entry.copy, entry.result.recordSha256);
+  if (scope.immutable.has(record)) scope.hashes.set(record, entry.result.recordSha256);
+  entry.check();
+  return { ...entry.result };
+}
+function verifyRuntimeCompletion(c, context, record, at) {
   closed(record, ['version', 'kind', 'binding', 'approvals', 'disabled', 'candidate', 'controlEvidence', 'transport', 'target', 'publicTarget', 'phases',
     'preflight', 'probe', 'publicProbe', 'requests', 'queries', 'drain', 'enableIntentAt', 'disable', 'failure', 'outcome',
     'terminalFalse', 'terminal503', 'enabledWindowExceeded', 'publicLifetimeExceeded', 'completedAt', 'enabled', 'intent', 'enableIntent', 'publicInitial',

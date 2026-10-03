@@ -467,6 +467,17 @@ collects and verifies fresh source, head, policy, NSG, privacy, generation,
 permission, cost and scan evidence. No scope or serialized token is accepted
 from operator JSON, and no trust survives into a separate operation.
 
+Control dispatch and independent runtime-completion validation also use
+operation-local private copies. The first full validation checks the complete
+history, candidate, original intents and completion; later passes may reuse
+only verified immutable prefixes, proofs and fixed intents with exact
+configuration/context bindings. Ordered caller-mutation checks run after
+awaits. Time, source, cost, name, head and current-state checks remain live.
+Canonical UTF-8 byte segments use a bounded 16 MiB cache, not substitute
+digests; every original canonical byte is still hashed. The same fresh snapshot
+is fully checked by `verifyProof` before retention rather than being checked
+twice without a new collection.
+
 The public `qualify-private-link-window` route constructs its normal IO inside
 that scope; it does not bypass validation sharing by preconstructing an adapter.
 The 420-second work bound, 600-second enabled bound, 900-second public-probe
@@ -582,9 +593,26 @@ decoded thirteen-stage prefix, not a second prefix blob. Candidate references
 retain their existing representation. The prefix, template, completion and
 complete root hashes are independently checked before ordinary semantic
 validation; the original failed predecessor remains a failed nested record.
-Standalone records and existing raw/version-1/version-2 wire encodings are
-unchanged. Writes use private per-operation snapshots without freezing caller
+Previously valid standalone records and raw/version-1/version-2 wire encodings
+are unchanged. Writes use private per-operation snapshots without freezing caller
 objects; read-side sharing remains confined to one load.
+
+Some standalone post-runtime records exceed the reference cap when late
+recovery and control-continuation originals repeat a full runtime completion.
+Only those closed records and their exact `{pending, record, next}` resolution
+wrappers can use version 4. A dry traversal of the same private snapshot must
+prove that the legacy representation exceeds 64 references; a valid legacy
+representation stays byte-identical. There is no catch-and-retry fallback.
+Each distinct legacy-encoded completion appears once inline in an ordered,
+hash-bound table, with local completion references only at the existing fixed
+preflight/original slots. This avoids adding another external blob.
+
+Version-4 decoding checks the closed scope, table order, every local and nested
+reference, full hydrated canonical hashes and the legacy-over-limit condition
+again. Inline content counts toward the root file cap, and external content
+keeps its existing shared ledger. Full semantics still determine authority.
+Deeper histories can still exceed a byte or depth limit; the codec reports
+that failure without producing a successful outer artifact or relaxing a cap.
 
 Every file remains bounded by 64 MiB, as does the total distinct referenced
 content for one artifact. The unchanged 64-reference and eight-blob limits
@@ -596,6 +624,11 @@ there is no cross-operation validation cache. Historical plain JSON files
 remain readable and are never rewritten. Streaming canonical hashing
 preserves the existing JSON-plus-newline digests while avoiding Node's
 single-string limit for large restored records.
+
+Codec writes validate the JSON domain before cloning, then use per-operation
+canonical byte blocks of at most 64 KiB with at most 64 MiB of reusable byte
+storage. Key order, Unicode, indentation and old wire hashes remain exact;
+neither serialization reuse nor private snapshots freeze caller-owned data.
 
 Storage capacity alone does not qualify retirement timing. Include serialization,
 held-file loading, complete validation and aggregate-before-head persistence in
