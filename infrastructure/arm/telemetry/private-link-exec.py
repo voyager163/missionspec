@@ -24,12 +24,13 @@ def main():
     require(len(raw) <= 65536)
     value = json.loads(raw)
     require(set(value) == {"version", "endpoint", "token", "command", "payload", "payloadSha256", "remainingMs"})
-    require(value["version"] == 1 and type(value["remainingMs"]) is int and 0 < value["remainingMs"] <= 30000)
+    require(value["version"] == 2 and type(value["remainingMs"]) is int and 0 < value["remainingMs"] <= 30000)
     endpoint = urlparse(value["endpoint"])
     require(endpoint.scheme == "wss" and endpoint.hostname == "australiaeast.azurecontainerapps.dev" and
             not endpoint.username and not endpoint.password and not endpoint.query and not endpoint.fragment and not endpoint.port)
     payload = value["payload"].encode("utf-8")
-    require(len(payload) <= 16384 and hashlib.sha256(payload).hexdigest() == value["payloadSha256"])
+    require(0 < len(payload) <= 16384 and payload.isascii() and
+            hashlib.sha256(payload).hexdigest() == value["payloadSha256"])
     require(value["command"].startswith("/usr/local/bin/node --no-turbofan --no-maglev --disable-sigusr1 --max-old-space-size=64 --eval "))
     require(type(value["token"]) is str and 20 <= len(value["token"]) <= 32768 and
             "\r" not in value["token"] and "\n" not in value["token"])
@@ -46,9 +47,10 @@ def main():
                    header=["Authorization: Bearer " + value["token"]], timeout=min(5, until - time.monotonic()), redirect_limit=0)
         require(ws.handshake_response.status == 101)
         value["token"] = None
-        ws.send_binary(b'\x00\x04{"Width":80,"Height":24}')
+        ws.send(b'\x00\x04{"Width":80,"Height":24}', opcode=websocket.ABNF.OPCODE_TEXT)
         startup, output = bytearray(), bytearray()
         sent = False
+        payload_frames = 0
         for _ in range(32):
             remaining = until - time.monotonic()
             require(remaining > 0)
@@ -66,7 +68,10 @@ def main():
                 marker = b"MSP_PRIVATE_READY\r\n" if b"\r" in startup else b"MSP_PRIVATE_READY\n"
                 require(marker.startswith(startup) or startup == marker)
                 if startup == marker:
-                    ws.send_binary(b"\x00\x00" + payload)
+                    for offset in range(0, len(payload), 2048):
+                        require(time.monotonic() < until)
+                        ws.send(b"\x00\x00" + payload[offset:offset + 2048], opcode=websocket.ABNF.OPCODE_TEXT)
+                        payload_frames += 1
                     sent = True
             else:
                 output.extend(frame[2:])
@@ -96,8 +101,8 @@ def main():
         require(result["metadataStatus"] is None or type(result["metadataStatus"]) is int and 100 <= result["metadataStatus"] <= 599)
     finally:
         ws.close(timeout=1)
-    print(json.dumps({"version": 1, "kind": "bounded-private-queue-exec", "sessions": 1,
-                      "payloadFrames": 1, "sessionClosed": True, "result": result}, separators=(",", ":")))
+    print(json.dumps({"version": 2, "kind": "bounded-private-queue-exec", "sessions": 1,
+                      "payloadFrames": payload_frames, "sessionClosed": True, "result": result}, separators=(",", ":")))
 
 
 if __name__ == "__main__":

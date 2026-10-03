@@ -8,7 +8,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 import test from 'node:test';
-import { privateQueueProbeCode, verifyPrivateQueueProbe, privateLinkExecEndpoint, runPrivateLinkProbe } from '../private-link-runtime.mjs';
+import { privateQueueProbeCode, verifyPrivateQueueProbe, privateLinkExecEndpoint, runPrivateLinkProbe,
+  verifyPrivateProbeEvidence, privateProbeProgram } from '../private-link-runtime.mjs';
 import { digest } from '../definition.mjs';
 import { runtimeFixture } from './private-link-runtime.fixture.mjs';
 
@@ -116,11 +117,13 @@ result = {"version":1,"kind":"same-container-private-queue-metadata","nodeVersio
 "tokenIdentityMatched":True,"metadataStatus":200,"storageErrorCode":None,"tokenRequests":1,"metadataRequests":1,
 "enqueues":0,"elapsedMs":100,"failureCode":None}
 if mode == "extra": result["rawToken"] = "UNIT-secret"
-payload = "UNIT inert payload"
-data = {"version":1,"endpoint":"wss://australiaeast.azurecontainerapps.dev/UNIT",
+payload = "x" * 7152 if mode in ("chunked", "chunk-drop") else "UNIT inert payload"
+data = {"version":1 if mode == "legacy-request" else 2,"endpoint":"wss://australiaeast.azurecontainerapps.dev/UNIT",
 "token":"UNIT-secret-session-token-not-output","command":"/usr/local/bin/node --no-turbofan --no-maglev --disable-sigusr1 --max-old-space-size=64 --eval UNIT",
 "payload":payload,"payloadSha256":hashlib.sha256(payload.encode()).hexdigest(),"remainingMs":30000}
 calls = []
+received = bytearray()
+payload_frames = []
 class Socket:
     def __init__(self, **kwargs):
         assert kwargs["sslopt"]["check_hostname"] is True
@@ -131,13 +134,22 @@ class Socket:
         assert kwargs["redirect_limit"] == 0
         assert kwargs["header"] == ["Authorization: Bearer " + data["token"]]
         calls.append("connect")
-    def send_binary(self, value):
-        assert value.startswith(bytes([0,4])) or value == bytes([0,0]) + payload.encode()
+    def send(self, value, opcode):
+        assert opcode == 1
+        assert value.startswith(bytes([0,4])) or value.startswith(bytes([0,0]))
+        if value.startswith(bytes([0,0])):
+            assert 2 < len(value) <= 2050
+            payload_frames.append(value[2:])
+            if mode != "chunk-drop" or len(payload_frames) != 2: received.extend(value[2:])
         calls.append("send")
-    def recv(self): return self.frames.pop(0)
+    def recv(self):
+        if len(self.frames) == 1:
+            if received != payload.encode(): return b""
+        return self.frames.pop(0)
     def settimeout(self, value): assert 0 < value <= 30
     def close(self, **kwargs): calls.append("close")
-sys.modules["websocket"] = types.SimpleNamespace(WebSocket=Socket, enableTrace=lambda value: None)
+sys.modules["websocket"] = types.SimpleNamespace(WebSocket=Socket, enableTrace=lambda value: None,
+    ABNF=types.SimpleNamespace(OPCODE_TEXT=1))
 importlib.metadata.version = lambda name: "1.8.0"
 sys.stdin = io.TextIOWrapper(io.BytesIO(json.dumps(data).encode()))
 bridge = runpy.run_path(sys.argv[1])
@@ -146,12 +158,17 @@ with contextlib.redirect_stdout(output):
     try: bridge["main"]()
     except ValueError: print('{"status":"PRIVATE_EXEC_UNCONFIRMED"}')
 assert "UNIT-secret" not in output.getvalue()
-assert calls.count("connect") == 1 and calls[-1] == "close"
+if mode == "legacy-request": assert not calls
+else: assert calls.count("connect") == 1 and calls[-1] == "close"
 parsed = json.loads(output.getvalue())
-assert (parsed.get("sessionClosed") is True) if mode == "valid" else (parsed.get("status") == "PRIVATE_EXEC_UNCONFIRMED")
+if mode in ("valid", "chunked"):
+    assert parsed["version"] == 2 and parsed["sessionClosed"] is True
+    assert parsed["payloadFrames"] == (len(payload.encode()) + 2047) // 2048
+    assert b"".join(payload_frames) == payload.encode()
+else: assert parsed.get("status") == "PRIVATE_EXEC_UNCONFIRMED"
 print("offline-bridge-fixture-passed")
 `;
-  for (const mode of ['valid', 'frame', 'extra']) {
+  for (const mode of ['valid', 'chunked', 'chunk-drop', 'legacy-request', 'frame', 'extra']) {
     const { stdout, stderr } = await promisify(execFile)('python3', ['-I', '-c', source, helper, mode],
       { timeout: 10000, maxBuffer: 4096 });
     assert.equal(stdout.trim(), 'offline-bridge-fixture-passed');
@@ -190,8 +207,9 @@ test('concrete probe keeps each 60s control proof outside the 30s process budget
         const input = JSON.parse(bytes);
         assert(input.token.startsWith('UNIT-secret'));
         now += 2000;
-        settle({ stdout: JSON.stringify({ version: 1, kind: 'bounded-private-queue-exec', sessions: 1,
-          payloadFrames: 1, sessionClosed: true, result: f.probe.result }) });
+        assert.equal(input.version, 2);
+        settle({ stdout: JSON.stringify({ version: 2, kind: 'bounded-private-queue-exec', sessions: 1,
+          payloadFrames: Math.ceil(Buffer.byteLength(input.payload) / 2048), sessionClosed: true, result: f.probe.result }) });
       } } };
       return promise;
     },
@@ -199,10 +217,28 @@ test('concrete probe keeps each 60s control proof outside the 30s process budget
   const cap = f.at + 600000, guard = () => { if (now >= cap) throw new Error('UNIT_REVIEW_EXPIRED'); };
   const probe = await runPrivateLinkProbe(f.c, f.target, observation, f.candidate, f.prerequisites, transport, io, cap, guard);
   assert.equal(proofs, 2);
+  assert.equal(probe.version, 2);
   assert.equal(processBudget, 30000);
   assert.equal(Date.parse(probe.processCompletedAt) - Date.parse(probe.processStartedAt), 2000);
   assert(now - f.at > 120000);
   now = f.at; proofs = 0; late = true;
   await assert.rejects(runPrivateLinkProbe(f.c, f.target, observation, f.candidate, f.prerequisites, transport, io, cap, guard),
     /UNIT_REVIEW_EXPIRED|PRIVATE_RUNTIME_DEADLINE/);
+});
+
+test('chunked probe evidence binds the exact frame count while historical single-frame records stay readable', () => {
+  const f = runtimeFixture(), identity = f.observation('false').identities;
+  const legacy = f.probe;
+  verifyPrivateProbeEvidence(f.c, f.target, f.candidate, identity, legacy, f.observation('false').app,
+    Date.parse(legacy.observedAt));
+  const expected = Math.ceil(Buffer.byteLength(privateProbeProgram(f.c, f.prerequisites, 'private').payload) / 2048);
+  const current = { ...structuredClone(legacy), version: 2, payloadFrames: expected };
+  verifyPrivateProbeEvidence(f.c, f.target, f.candidate, identity, current, f.observation('false').app,
+    Date.parse(current.observedAt));
+  for (const frames of [0, expected - 1, expected + 1, 9, 1.5]) {
+    assert.throws(() => verifyPrivateProbeEvidence(f.c, f.target, f.candidate, identity,
+      { ...current, payloadFrames: frames }, f.observation('false').app, Date.parse(current.observedAt)));
+  }
+  assert.throws(() => verifyPrivateProbeEvidence(f.c, f.target, f.candidate, identity,
+    { ...legacy, payloadFrames: expected }, f.observation('false').app, Date.parse(legacy.observedAt)));
 });

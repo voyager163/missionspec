@@ -2608,6 +2608,8 @@ export const PRIVATE_LINK_RUNTIME_COMMANDS = Object.freeze({
   'prepare-private-link-image': 'prepare-image', 'publish-private-link-image': 'publish-image',
   'prepare-private-link-receiver': 'prepare-receiver', 'create-private-link-receiver': 'create-receiver',
   'prepare-private-link-window': 'prepare-window', 'qualify-private-link-window': 'qualify-window',
+  'prepare-private-link-window-continuation': 'prepare-window-continuation',
+  'qualify-private-link-window-continuation': 'qualify-window-continuation',
   'prepare-private-link-disable-recovery': 'prepare-disable-recovery',
   'recover-private-link-disable': 'recover-disable', 'reconcile-private-link-receiver': 'reconcile-receiver',
   'prepare-private-link-public-cleanup': 'prepare-public-cleanup',
@@ -2662,7 +2664,7 @@ export async function dispatchPrivateLinkOperation(c, operation, stage, director
   const inputs = await io.read(directory, 'private-link-runtime-inputs.json');
   const result = await io.runtime(c, context, evidence, action, directoryArg, inputs);
   if (action === 'publish-image') await io.immutable(directory, 'private-link-published-candidate.json', result);
-  if (action === 'qualify-window' && result?.outcome !== 'qualified-private-delivery-disabled') {
+  if (['qualify-window', 'qualify-window-continuation'].includes(action) && result?.outcome !== 'qualified-private-delivery-disabled') {
     fail('PRIVATE_LINK_WINDOW_STOPPED_INSPECT_RETAINED_RESULT');
   }
   return result;

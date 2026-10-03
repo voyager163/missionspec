@@ -163,6 +163,7 @@ test('public-control cleanup and reconciliation routes use only the runtime fami
 test('runtime held errors propagate and successful cleanup does not become window qualification', async () => {
   for (const [command, code] of [
     ['qualify-private-link-window', 'PRIVATE_RUNTIME_QUALIFICATION_HELD'],
+    ['qualify-private-link-window-continuation', 'PRIVATE_RUNTIME_QUALIFICATION_HELD'],
     ['recover-private-link-disable', 'PRIVATE_DISABLE_RECOVERY_HELD'],
     ['recover-private-link-public-cleanup', 'PRIVATE_PUBLIC_CLEANUP_RECOVERY_HELD'],
     ['reconcile-private-link-public-probe', 'PRIVATE_PUBLIC_CONTROL_STILL_PRESENT'],
@@ -181,6 +182,26 @@ test('runtime held errors propagate and successful cleanup does not become windo
     f.result(record);
     assert.equal(await dispatchPrivateLinkOperation(c, command, 'private-link-runtime', 'unit', f.io), record);
     assert.deepEqual(f.writes, []);
+  }
+});
+
+test('never-enabled continuation routes only fixed runtime operations and does not reclassify stopped results', async () => {
+  for (const [command, action] of [
+    ['prepare-private-link-window-continuation', 'prepare-window-continuation'],
+    ['qualify-private-link-window-continuation', 'qualify-window-continuation'],
+  ]) {
+    const f = fixture({ continuationApproval: { checkedByRuntime: true } });
+    await assert.rejects(dispatchPrivateLinkOperation(c, command, 'retire-old-receiver', 'unit', f.io), /FIXED_PHASE_COMMAND_REQUIRED/);
+    assert.deepEqual(f.calls, []);
+    f.result({ outcome: 'qualified-private-delivery-disabled' });
+    await dispatchPrivateLinkOperation(c, command, 'private-link-runtime', 'unit', f.io);
+    assert.deepEqual(f.calls.at(-1).slice(0, 6), ['runtime', c, f.context, f.evidence, action, 'unit']);
+    assert.equal(f.calls.at(-1).length, 7);
+    assert.deepEqual(f.writes, []);
+    if (action === 'qualify-window-continuation') {
+      f.result({ outcome: 'stopped-disabled-unqualified' });
+      await assert.rejects(dispatchPrivateLinkOperation(c, command, 'private-link-runtime', 'unit', f.io), /PRIVATE_LINK_WINDOW_STOPPED/);
+    }
   }
 });
 

@@ -342,7 +342,7 @@ approval. Publication preserves both original manifests and separately records
 the returned third-image candidate as `private-link-published-candidate.json`.
 Preparation never implies publication, deployment or enabled ingestion.
 
-The six forward runtime commands accept an optional `runtimeReview` containing
+The six original forward runtime commands accept an optional `runtimeReview` containing
 `policyRevision`, `costReview`, and `costEvidence`, plus the optional typed
 `imageProfileRevision` described below. This supports a
 freshly reviewed policy source or renewed cost evidence without rewriting the
@@ -442,6 +442,16 @@ result with retained evidence, never a success-shaped CLI response.
 The temporary app has no enable action or synthetic event requests. Its exact
 creation and cleanup are reviewed and journaled separately; confirmed absence
 is required before qualification and retirement of the old environment.
+The current exec bridge uses protocol version 2: one authenticated, verified-TLS
+WebSocket session sends the fixed ASCII diagnostic in at most eight 2 KiB
+stdin chunks. Each frame retains the console channel prefix; the unchanged
+bootstrap checks the complete byte length and SHA-256 before executing it.
+The result binds the exact chunk count derived from that payload. The total
+16 KiB payload, 30-second process bound and output limits are unchanged.
+Historical version-1 single-frame evidence remains readable. This avoids the
+observed truncation of a larger stdin frame; missing, reordered or changed
+bytes cannot become a qualified probe. Credentials and raw console frames
+are never logged or retained as diagnostic output.
 The window approval object has exactly `enable`, `disable`, `publicCreate`
 and `publicDelete` reviews. Preparation binds both the fixed
 `create-public-probe` phase and the exact bodyless app DELETE; the immutable
@@ -473,6 +483,48 @@ retain their original failure behavior; authorization errors, different codes,
 foreign targets, missing/changed parents and expired deadlines still fail.
 Healthy readiness keeps its original reads, without a new environment
 dependency for frozen false-only recovery.
+
+A stopped, never-enabled window has a separate, single-successor path:
+`prepare-private-link-window-continuation` and
+`qualify-private-link-window-continuation`, both with the fixed
+`private-link-runtime` selector. Preparation takes `candidate`, `disabled`,
+`instanceId`, `transport`, `originalDirectory` and `runtimeReview`.
+Qualification takes the same fields except `originalDirectory`, plus the four
+ordinary `approvals` and a separate `continuationApproval`. It reloads the fixed
+`private-window-continuation-preparation.json`; arbitrary prepared data or IO
+options cannot be supplied through JSON.
+
+The predecessor must be one complete failed window result with a version-3 intent,
+with verified false/503 compensation, no enable or public-create intent, no
+public creation, no product requests and verified public absence. Preparation
+checks the original files in an already-existing canonical private directory,
+the effective physical head, current receiver incarnation, false/503 and
+absence of the old enable/public deployments. Unknown submission, incomplete
+cleanup, a replaced receiver or an already-continued predecessor blocks this
+path. Neither receiver creation nor image publication is repeated.
+Both continuation commands require a current `runtimeReview`.
+
+Preparation retains immutable observations and facts but grants no execution
+authority. Its facts-only digest is `binding.continuationSha256`; the separate
+`private-link-continue-never-enabled-window` review binds the prepared
+`continuationBinding`. After preparation, obtain a genuinely new readiness
+measurement under the exact retained source and runtime review before signing
+the five reviews. Do not refresh old report timestamps or regenerate approved
+facts. Qualification independently collects a new admission after that review:
+the collection and its age at the new intent are each at most 120 seconds.
+Historical prepared observations never replace fresh admission. Review, source,
+scan, readiness and all existing window/cleanup limits remain unchanged.
+
+The new version-4 intent retains the complete failed predecessor once in
+`continuation.original`, plus the original prepared facts, continuation approval
+and fresh admission. The original window fence and history remain immutable.
+A per-physical admission mutex covers preparation or execution through cleanup;
+exclusive creation of a single successor head occurs before any effect or
+compensation attempt. A competing attempt cannot clean up another attempt.
+Crash-held mutexes are not automatically cleared. Only separately reviewed
+false/public recovery for the fully verified current effective intent can
+bypass a held mutex; old-intent recovery remains blocked, and neither recovery
+path grants enable authority or changes the fence.
 
 Interrupted enabled windows have separate
 `prepare-private-link-disable-recovery` and `recover-private-link-disable`
@@ -520,15 +572,36 @@ held-file ownership, mode, size and content hashes and fully hydrates the logica
 evidence before ordinary source, history, authority and drift validation.
 A content hash or storage projection never substitutes for semantic validation.
 
+Complete control-chain roots with 14 through 18 ordered stages and typed
+post-runtime preflights use a root-only version-3 envelope. Only the fixed
+post-runtime `preflight.runtimeCompletion` slots, their late-recovery originals
+and bounded same-stage control-continuation originals may reference a
+content-addressed completion template. Literal `controlEvidence` members of
+the existing runtime record kinds resolve from the containing root's fully
+decoded thirteen-stage prefix, not a second prefix blob. Candidate references
+retain their existing representation. The prefix, template, completion and
+complete root hashes are independently checked before ordinary semantic
+validation; the original failed predecessor remains a failed nested record.
+Standalone records and existing raw/version-1/version-2 wire encodings are
+unchanged. Writes use private per-operation snapshots without freezing caller
+objects; read-side sharing remains confined to one load.
+
 Every file remains bounded by 64 MiB, as does the total distinct referenced
 content for one artifact. The unchanged 64-reference and eight-blob limits
-include the permitted nested evidence references. Cycles, other nesting,
+include the permitted nested evidence and local-prefix references. Depth and
+node traversal limits remain unchanged. Cycles, other nesting,
 unknown positions, corrupt or aliased blobs and missing evidence fail closed.
 Only a single load may share identical frozen evidence objects in memory;
 there is no cross-operation validation cache. Historical plain JSON files
 remain readable and are never rewritten. Streaming canonical hashing
 preserves the existing JSON-plus-newline digests while avoiding Node's
 single-string limit for large restored records.
+
+Storage capacity alone does not qualify retirement timing. Include serialization,
+held-file loading, complete validation and aggregate-before-head persistence in
+the relevant phase measurements before admitting retirement effects. Offline
+future-record size models are not successful control records or live authority,
+and codec costs do not extend an effect deadline.
 
 The existing NSP failure remains an original failure. Supersession and
 retirement records are appended separately, bound to its physical target and

@@ -60,6 +60,13 @@ The temporary public-control app has separate
 `prepare-private-link-public-cleanup`, `recover-private-link-public-cleanup`
 and read-only `reconcile-private-link-public-probe` routes, with the same
 fixed runtime selector. Cleanup never enables ingestion.
+An explicitly reviewed never-enabled predecessor uses
+`prepare-private-link-window-continuation` and
+`qualify-private-link-window-continuation`. Preparation is non-authorizing;
+qualification requires a new readiness measurement under the retained review,
+a separate continuation approval and fresh native admission. One immutable
+successor preserves the original failed result and physical fence; this is not
+a retry of an unknown or previously enabled window.
 Neither a local plan nor a successful setup stage authorizes runtime work.
 Effects require exact reviewed bindings, published source, fresh evidence,
 durable physical-target intent fencing and retained outcomes. Unknown

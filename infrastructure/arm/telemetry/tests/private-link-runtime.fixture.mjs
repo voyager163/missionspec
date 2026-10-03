@@ -4,6 +4,7 @@ import { baseFixture, queueCandidateFixture } from './durable-queue.fixture.mjs'
 import { privateLinkRuntimeTarget, privateRuntimePhase, createPrivateLinkReceiver,
   qualifyPrivateLinkDelivery, privateLinkWindowBinding, verifyPrivateLinkRuntimeCompletion,
   privateProbeProgram, privateLinkExecEndpoint, publicControlTarget, privateLinkRuntimeBinding } from '../private-link-runtime.mjs';
+import { privateLinkHead } from '../private-link-controller.mjs';
 
 // Generated offline evidence only. No fixture is a live approval, publication or Azure observation.
 export function runtimeFixture() {
@@ -164,6 +165,7 @@ export async function privateRuntimeCompletionFixture(f, evidence, prerequisites
       store.set(name, structuredClone(value)); },
     windowHead: async intent => store.get(`window-${intent.physicalKey}`),
     current: async () => ({ sourceSha256: activeSource, headSha256: prerequisites.controlHeadSha256, prerequisites,
+      ...(options.withHistoryHead ? { head: privateLinkHead(context, evidence), checkedAt: new Date(now).toISOString() } : {}),
       preservedResourceIds: Object.keys(evidence.records.at(-1).after.resources).filter(id =>
         evidence.records.at(-1).after.resources[id] !== null) }),
     identities: async () => identityValues,
@@ -192,6 +194,7 @@ export async function privateRuntimeCompletionFixture(f, evidence, prerequisites
     },
     probe: async (selected, observation, image, _prereq, _transport, _until, guard, mode = 'private') => {
       guard();
+      if (options.failFirstProbe && mode === 'private') throw new Error('PRIVATE_EXEC_TRANSPORT_UNCONFIRMED');
       return runtimeProbeFixture(c, selected, observation, image, prerequisites, activeSource, prerequisites.controlHeadSha256, now, mode);
     },
   };
@@ -209,9 +212,9 @@ export async function privateRuntimeCompletionFixture(f, evidence, prerequisites
   const approvals = { enable: approval('private-link-bounded-enable', binding), disable: approval('private-link-false-only-disable', binding),
     publicCreate: approval('private-link-create-public-control', binding), publicDelete: approval('private-link-delete-public-control', binding) };
   const completion = await qualifyPrivateLinkDelivery(c, context, evidence, candidate, disabled, instanceId, approvals, transport, '/UNIT', { io, runtimeReview: windowReview });
-  if (completion.outcome !== 'qualified-private-delivery-disabled') throw new Error(JSON.stringify({
+  if (completion.outcome !== 'qualified-private-delivery-disabled' && !options.failFirstProbe) throw new Error(JSON.stringify({
     failure: completion.failure, disableFailure: completion.disableFailure, outcome: completion.outcome,
   }));
-  verifyPrivateLinkRuntimeCompletion(c, context, completion, now);
+  if (!options.failFirstProbe) verifyPrivateLinkRuntimeCompletion(c, context, completion, now);
   return { completion, disabled, target, at: now, store, io };
 }
