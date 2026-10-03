@@ -422,6 +422,14 @@ export function verifyPrivateLinkPreview(phase, preview, snapshot, known) {
         isDeepStrictEqual(expected.properties.appLogsConfiguration, { destination: null, logAnalyticsConfiguration: null })) {
       delete expected.properties.appLogsConfiguration;
     }
+    if (phase.stage === 'create-queue-role' && d.type === 'Microsoft.Authorization/roleDefinitions' &&
+        Array.isArray(actual.properties?.permissions) && actual.properties.permissions.length === 1 &&
+        expected.properties.permissions.length === 1) {
+      for (const key of ['notActions', 'notDataActions']) {
+        if (!Object.hasOwn(actual.properties.permissions[0] ?? {}, key) &&
+            isDeepStrictEqual(expected.properties.permissions[0][key], [])) delete expected.properties.permissions[0][key];
+      }
+    }
     for (const key of ['apiVersion', 'dependsOn']) {
       if (Object.hasOwn(actual, key)) equal(actual[key], expected[key], 'PRIVATE_LINK_WHATIF_CONTRADICTION');
       delete actual[key]; delete expected[key];

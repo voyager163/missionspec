@@ -6,6 +6,41 @@ import { privateLinkPreservedIds, verifyPrivateLinkPreview } from '../private-li
 import { privateLinkFixture, privateInput, privateSnapshotFixture } from './private-link.fixture.mjs';
 import { queueDefenderFixture } from './queue-defender.fixture.mjs';
 
+test('native queue-role Create preview may omit only its two empty exclusion arrays', async () => {
+  const f = await privateLinkFixture({ ...privateInput, version: 2 });
+  const phase = privateLinkPhase(f.c, f.context, 'create-queue-role'), descriptor = phase.resources[0];
+  const preview = { status: 'Succeeded', changes: [{ resourceId: descriptor.id, changeType: 'Create',
+    after: { ...structuredClone(descriptor.expected), id: descriptor.id } }] };
+  const permission = preview.changes[0].after.properties.permissions[0];
+  delete permission.notActions; delete permission.notDataActions;
+  const original = json(preview), phaseBytes = json(phase);
+  assert.equal(verifyPrivateLinkPreview(phase, preview, {}, []), digest(original));
+  assert.equal(json(preview), original); assert.equal(json(phase), phaseBytes);
+  for (const mutate of [
+    p => { p.changes[0].after.properties.permissions[0].notActions = null; },
+    p => { p.changes[0].after.properties.permissions[0].notDataActions = null; },
+    p => { p.changes[0].after.properties.permissions[0].notActions = ['*']; },
+    p => { p.changes[0].after.properties.permissions[0].notDataActions = ['*']; },
+    p => { delete p.changes[0].after.properties.permissions[0].actions; },
+    p => { delete p.changes[0].after.properties.permissions[0].dataActions; },
+    p => { p.changes[0].after.properties.permissions[0].actions.push('*'); },
+    p => { p.changes[0].after.properties.permissions[0].dataActions.push('Microsoft.Storage/storageAccounts/queueServices/queues/messages/write'); },
+    p => { p.changes[0].after.properties.permissions.push(structuredClone(p.changes[0].after.properties.permissions[0])); },
+    p => { p.changes[0].after.properties.permissions = []; },
+    p => { p.changes[0].after.properties.assignableScopes = [`/subscriptions/${f.c.subscriptionId}`]; },
+    p => { p.changes[0].after.properties.type = 'BuiltInRole'; },
+    p => { p.changes[0].resourceId += '-foreign'; },
+    p => { p.changes[0].changeType = 'Modify'; },
+  ]) {
+    const changed = structuredClone(preview); mutate(changed);
+    assert.throws(() => verifyPrivateLinkPreview(phase, changed, {}, []));
+  }
+  const changedPhase = structuredClone(phase);
+  changedPhase.resources[0].expected.properties.permissions[0].notActions = ['*'];
+  assert.throws(() => verifyPrivateLinkPreview(changedPhase, preview, {}, []), /WHATIF_CONTRADICTION/);
+  assert.throws(() => verifyPrivateLinkPreview({ ...phase, stage: 'create-network' }, preview, {}, []), /WHATIF_CONTRADICTION/);
+});
+
 test('native network preview binds exact aggregated subnets plus both separate child creates without changing bytes', async () => {
   const f = await privateLinkFixture({ ...privateInput, version: 2 });
   const phase = privateLinkPhase(f.c, f.context, 'create-network');

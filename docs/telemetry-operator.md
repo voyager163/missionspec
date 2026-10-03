@@ -123,6 +123,13 @@ mistaken for subscription-wide denials and are never removed or bypassed.
 The read allowlist requires that exact filter; unfiltered or principal-filtered
 deny queries cannot substitute for the scope check.
 
+Native ARM Create preview may omit the queue role's two empty permission
+exclusion arrays, `notActions` and `notDataActions`. Only that exact fixed role
+and those absent empty fields have an equivalent preview representation.
+Null/nonempty exclusions, missing or changed grants, additional permission
+blocks and broader assignable scopes remain contradictions. The submitted
+template and subsequent role readback checks are unchanged.
+
 Control dispatch journals distinguish known non-submission, possible
 submission, and an invocation that was reached. A durable version-3
 `dispatchAttempted: null` marker and rollout deadline are saved before the
