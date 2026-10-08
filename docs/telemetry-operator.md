@@ -546,10 +546,26 @@ history, candidate, original intents and completion; later passes may reuse
 only verified immutable prefixes, proofs and fixed intents with exact
 configuration/context bindings. Ordered caller-mutation checks run after
 awaits. Time, source, cost, name, head and current-state checks remain live.
-Canonical UTF-8 byte segments use a bounded 16 MiB cache, not substitute
-digests; every original canonical byte is still hashed. The same fresh snapshot
+Pure plan validation is shared only for the exact private immutable
+configuration/context pair; the scope closes on success or failure.
+After the initial full plan check, helper digests of members of that same
+immutable graph may be reused within the scope. Retained hexadecimal digests
+are capped at 64 KiB, conservatively charged by UTF-16 length; saturation
+falls back to normal hashing. Mutable and foreign objects are not memoized,
+and closure discards the memo.
+Canonical text uses a bounded 16 MiB cache, conservatively charged by its
+UTF-16 length. Cached text is reindented at its emission depth, not replaced
+with substitute digests; every original canonical byte is still hashed.
+The same fresh snapshot
 is fully checked by `verifyProof` before retention rather than being checked
 twice without a new collection.
+
+The default control CHECK constructs its adapter inside the existing dispatch
+scope, using that scope's owned evidence and phase. Naming checks can reuse
+the exact scoped prefix digest without trusting mutable caller evidence.
+Both preflight retentions and final reviews remain inside the same operation;
+original caller inputs are rechecked after retention and before the final
+cancellation/deadline guard. Direct custom-IO checks keep their existing path.
 
 The public `qualify-private-link-window` route constructs its normal IO inside
 that scope; it does not bypass validation sharing by preconstructing an adapter.
@@ -567,6 +583,20 @@ retain their original failure behavior; authorization errors, different codes,
 foreign targets, missing/changed parents and expired deadlines still fail.
 Healthy readiness keeps its original reads, without a new environment
 dependency for frozen false-only recovery.
+
+Readiness now retains complete or partial raw app, revision, identity, privacy
+and old-app observations before validation errors escape. A separate record
+binds the raw artifact hash to the qualified, pending or failed outcome. These
+private artifacts include the fixed target, admitted effect context, deadline
+and per-response timing; raw responses are not printed to the console.
+For a newly created private receiver or public control, the effect, intent,
+canonical request, target, approval and deadline must agree before deployment
+or operation reads. Canonical creation requests have no caller-supplied method
+field: the fixed creation phase implies PUT. Readiness additionally retains and
+validates the exact deployment and settled Create operations against the
+observed app generation before returning success. Configured target drift is
+still fatal; this does not normalize missing FQDNs, reconstruct a lost old
+response, or introduce a general drift retry.
 
 A stopped, never-enabled window has a separate, single-successor path:
 `prepare-private-link-window-continuation` and
@@ -610,6 +640,73 @@ false/public recovery for the fully verified current effective intent can
 bypass a held mutex; old-intent recovery remains blocked, and neither recovery
 path grants enable authority or changes the fence.
 
+A failed attested first successor that created a public control but never
+enabled ingestion has one additional, separately reviewed path:
+
+```sh
+node infrastructure/arm/telemetry/controller.mjs prepare-private-link-cleaned-window-successor private-link-runtime <new-private-revision>
+node infrastructure/arm/telemetry/controller.mjs qualify-private-link-cleaned-window-successor private-link-runtime <new-private-revision>
+```
+
+Preparation takes `candidate`, `disabled`, a new `instanceId`, `transport`,
+current `runtimeReview`, `publishedScanAttestation`, `originalDirectory` and
+four UUIDv4 selectors: `cleanupRecoveryId`, `publicReconciliationId`,
+`terminalObservationId` and `parentAbsenceObservationId`. The selectors load
+fixed filenames, not caller-selected paths. The new revision must contain the
+exact retained decision in `private-cleaned-window-user-decision.json`.
+Preparation retains `private-cleaned-window-successor-preparation.json` and
+grants no execution authority. Qualification takes only `candidate`, `disabled`,
+`instanceId`, `transport`, `runtimeReview`, the four ordinary `approvals` and
+`successorApproval`; it reloads that fixed preparation. Replacement history,
+cleanup, observation or scan facts cannot be supplied in qualification JSON.
+
+This path accepts only the complete failed version-5 first successor with its
+original version-3 predecessor, verified same-incarnation false/503 compensation,
+a valid private probe and no enable intent, public-deny probe, delivery, queries
+or drain. Both held outcomes remain held. Complete cleanup includes the original
+generation-bound preparation, admitted DELETE intent, held post-DELETE GET
+failure, read-only core reconciliation, native terminal Activity Log and
+parent-bracketed absence inventories. The held failure must specifically be
+the subsequent `arm.get` HTTP 404 `ContainerAppNotFound`, not a failed DELETE,
+timeout or missing diagnostic; its recorded completion cannot follow either
+reconciliation or the verification time.
+
+The exact Started/Accepted/Succeeded delete group is bound by correlation ID,
+target, action, tenant, subscription, operator, request fields and native
+100-nanosecond ordering within the original effect deadline. Terminal operation
+IDs may differ. The old DELETE intent has no retained wire correlation:
+the new fifth review explicitly binds independent native terminal evidence,
+not a fabricated transport receipt. Later strict absence may resolve cleanup
+after the old approval expires without backdating that approval or creating a
+missing original success receipt.
+
+The fifth action is `private-link-continue-cleaned-never-enabled-window-once`.
+After preparation, obtain genuinely new readiness under the retained review
+before signing it and the four window approvals. Qualification separately
+collects fresh admission: its collection and age are each bounded by 120 seconds.
+Both preparation and admission check the complete current control head, source,
+policy, permissions, NSG, privacy, exact private incarnation, false/POST503,
+strict public absence and absence of both earlier enable deployments.
+
+The version-6 intent retains ordinal `2`, the full failed version-5 result once
+with its version-3 predecessor already inside, all six cleanup members, the
+decision, prepared observation, fifth approval and separate fresh admission.
+Current scan facts occur once at the new intent; old scan facts remain in old
+history. Completion remains version 1. The window continuation hash binds
+prepared facts only; the second head's resolution hash binds the full reviewed
+continuation including its approval and admission.
+
+Original and first-successor fences remain unchanged. The physical mutex
+protects exclusive append of `private-link-runtime-window-successor-2-<physicalKey>.json`
+before effects or compensation. Both append and current-head resolution compare
+the actual first fence against the approved hash and reconstructed history.
+The old app-only public reservation is also preserved: version 6 alone appends
+`private-link-runtime-public-probe-successor-2-<key>.json`, binding that old
+reservation, prior create, approved cleanup and new intent/head/resolution.
+Duplicate reservations, stale ancestor recovery and a third successor reject.
+Current-head reviewed false/public recovery remains possible through a
+crash-held mutex; it cannot clear fences or enable ingestion.
+
 Interrupted enabled windows have separate
 `prepare-private-link-disable-recovery` and `recover-private-link-disable`
 routes, using the fixed original intent and preplanned false request rather
@@ -638,6 +735,14 @@ read-only cleanup preparation must retain the exact observed generation and
 a new cleanup approval must bind its hash. That review authorizes only the
 fixed observed public-probe generation; it neither proves original creation
 nor grants generic resource adoption.
+
+After an admitted public DELETE, an exact target GET returning HTTP 404
+`ContainerAppNotFound` is retained as not-yet-confirmed, never as null or
+qualified absence. Polling can continue only within the same original effect
+deadline and 40-poll limit, without another DELETE. Later strict native absence
+is required; other HTTP, authorization or scope failures remain fatal.
+Perpetual unconfirmed observations hold the result. Late read-only
+reconciliation does not replay the DELETE or rewrite the held outcome.
 
 Large control, runtime and retirement artifacts use lossless, versioned storage
 envelopes. Fixed runtime record kinds can reference their exact thirteen-stage
@@ -708,6 +813,12 @@ held-file loading, complete validation and aggregate-before-head persistence in
 the relevant phase measurements before admitting retirement effects. Offline
 future-record size models are not successful control records or live authority,
 and codec costs do not extend an effect deadline.
+
+If CHECK fails or expires after retaining preflight files, those files are
+diagnostic evidence, not successful admission. Their existence, canonical hash
+or codec roundtrip does not prove that the remaining review gates passed.
+Do not proceed to EXECUTE from that failed CHECK; preserve the original result
+and require separately authorized correction and requalification.
 
 The existing NSP failure remains an original failure. Supersession and
 retirement records are appended separately, bound to its physical target and

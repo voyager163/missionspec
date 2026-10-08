@@ -164,6 +164,7 @@ test('runtime held errors propagate and successful cleanup does not become windo
   for (const [command, code] of [
     ['qualify-private-link-window', 'PRIVATE_RUNTIME_QUALIFICATION_HELD'],
     ['qualify-private-link-window-continuation', 'PRIVATE_RUNTIME_QUALIFICATION_HELD'],
+    ['qualify-private-link-cleaned-window-successor', 'PRIVATE_RUNTIME_QUALIFICATION_HELD'],
     ['recover-private-link-disable', 'PRIVATE_DISABLE_RECOVERY_HELD'],
     ['recover-private-link-public-cleanup', 'PRIVATE_PUBLIC_CLEANUP_RECOVERY_HELD'],
     ['reconcile-private-link-public-probe', 'PRIVATE_PUBLIC_CONTROL_STILL_PRESENT'],
@@ -189,6 +190,8 @@ test('never-enabled continuation routes only fixed runtime operations and does n
   for (const [command, action] of [
     ['prepare-private-link-window-continuation', 'prepare-window-continuation'],
     ['qualify-private-link-window-continuation', 'qualify-window-continuation'],
+    ['prepare-private-link-cleaned-window-successor', 'prepare-cleaned-window-successor'],
+    ['qualify-private-link-cleaned-window-successor', 'qualify-cleaned-window-successor'],
   ]) {
     const f = fixture({ continuationApproval: { checkedByRuntime: true } });
     await assert.rejects(dispatchPrivateLinkOperation(c, command, 'retire-old-receiver', 'unit', f.io), /FIXED_PHASE_COMMAND_REQUIRED/);
@@ -198,7 +201,7 @@ test('never-enabled continuation routes only fixed runtime operations and does n
     assert.deepEqual(f.calls.at(-1).slice(0, 6), ['runtime', c, f.context, f.evidence, action, 'unit']);
     assert.equal(f.calls.at(-1).length, 7);
     assert.deepEqual(f.writes, []);
-    if (action === 'qualify-window-continuation') {
+    if (['qualify-window-continuation', 'qualify-cleaned-window-successor'].includes(action)) {
       f.result({ outcome: 'stopped-disabled-unqualified' });
       await assert.rejects(dispatchPrivateLinkOperation(c, command, 'private-link-runtime', 'unit', f.io), /PRIVATE_LINK_WINDOW_STOPPED/);
     }

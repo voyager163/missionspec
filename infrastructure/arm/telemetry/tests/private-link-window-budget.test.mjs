@@ -1,14 +1,15 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, readdir, readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import os from 'node:os';
 import test from 'node:test';
 import { runtimeFixture, privateRuntimeCompletionFixture } from './private-link-runtime.fixture.mjs';
 import { privateLinkRuntimeIO, readyPrivateLinkRuntime, qualifyPrivateLinkDelivery, verifyPrivateLinkRuntimeCompletion,
-  runPrivateLinkRuntime } from '../private-link-runtime.mjs';
+  runPrivateLinkRuntime, privateRuntimePhase, privateLinkWindowBinding } from '../private-link-runtime.mjs';
 import { withPrivateLinkRuntimeValidation, currentPrivateLinkRuntimeProof, verifyPrivateLinkRuntimePrerequisites } from '../private-link-controller.mjs';
 import { privateLinkFixture, privateControlChain, privateInput } from './private-link.fixture.mjs';
+import { digestJson as hash } from '../definition.mjs';
 
 async function readinessFixture(t, behavior) {
   const f = runtimeFixture(), directory = await mkdtemp(path.join(os.tmpdir(), 'msr-ready-propagation-'));
@@ -90,6 +91,130 @@ test('healthy readiness keeps its original reads and has no new environment prer
   assert.equal(result.app.id, f.target.appId);
   assert(!f.calls.includes(f.target.environmentId));
   assert.equal(f.observations.length, 0);
+});
+
+test('raw readiness drift and partial read errors are retained without normalizing observed values', async t => {
+  for (const mode of ['drift', 'partial-auth']) {
+    let bad;
+    const f = await readinessFixture(t, ({ id }) => {
+      if (mode === 'drift' && id.endsWith('/missionspec-test-private-ingest')) return bad;
+      if (mode === 'partial-auth' && id.endsWith('/revisions')) throw missing('AuthorizationFailed', 403);
+    });
+    bad = f.observation('false').app;
+    bad.properties.configuration.ingress.fqdn = 'UNQUALIFIED.invalid';
+    const effect = { intentSha256: 'a'.repeat(64), request: { method: 'PUT', id: '/UNIT-exact-deployment' }, incarnation: null };
+    await assert.rejects(readyPrivateLinkRuntime(f.c, f.target, f.candidate, f.io, 'false', f.at + 10000, effect));
+    const files = await readdir(f.directory), rawName = files.find(name => name.startsWith('private-runtime-readiness-raw-'));
+    assert(rawName);
+    const raw = JSON.parse(await readFile(path.join(f.directory, rawName), 'utf8'));
+    assert.deepEqual(raw.effect, effect); assert.equal(raw.effectDeadline, f.at + 10000);
+    assert(raw.responses.app);
+    if (mode === 'drift') {
+      assert.equal(raw.responses.app.value.value.properties.configuration.ingress.fqdn, 'UNQUALIFIED.invalid');
+      const validated = JSON.parse(await readFile(path.join(f.directory, files.find(name => name.startsWith('private-runtime-readiness-validation-'))), 'utf8'));
+      assert.equal(validated.state, 'failed'); assert.equal(validated.failure.code, 'PRIVATE_RUNTIME_TARGET_DRIFT');
+    } else {
+      assert.equal(raw.complete, false); assert.equal(raw.failure.httpStatus, 403);
+      assert.equal(raw.failure.armCode, 'AuthorizationFailed'); assert(!raw.responses.revisions);
+    }
+  }
+});
+
+test('post-delete ContainerAppNotFound is explicit unconfirmed evidence, never null or successful absence', async t => {
+  let calls = 0;
+  const f = await readinessFixture(t, ({ id }) => {
+    if (id.endsWith('/missionspec-test-public-probe')) {
+      if (calls++ === 0) throw missing();
+      return null;
+    }
+  });
+  const intent = { request: { method: 'DELETE', id: f.publicTarget.appId }, effectDeadline: f.at + 10000 };
+  const pending = await f.io.observeDeletion(f.publicTarget, intent, intent.effectDeadline);
+  assert.equal(pending.state, 'not-yet-confirmed');
+  assert.equal(pending.response.armCode, 'ContainerAppNotFound');
+  assert(!Object.hasOwn(pending.response, 'value'));
+  const absent = await f.io.observeDeletion(f.publicTarget, intent, intent.effectDeadline);
+  assert.equal(absent.state, 'observed'); assert.equal(absent.response.value, null);
+  assert.equal((await readdir(f.directory)).filter(name => name.startsWith('private-public-delete-observation-')).length, 2);
+  await assert.rejects(f.io.observeDeletion(f.target, intent, intent.effectDeadline), /DELETE_SCOPE/);
+  const unauth = await readinessFixture(t, ({ id }) => { if (id.endsWith('/missionspec-test-public-probe')) throw missing('AuthorizationFailed', 403); });
+  await assert.rejects(unauth.io.observeDeletion(unauth.publicTarget, { ...intent, request: { method: 'DELETE', id: unauth.publicTarget.appId } },
+    intent.effectDeadline), error => error.httpStatus === 403);
+});
+
+test('newly-created readiness binds the admitted exact deployment Create operation before returning', async t => {
+  for (const wrong of [false, true]) {
+    const f = await readinessFixture(t, () => undefined);
+    const { candidate, controlEvidence, ...intent } = structuredClone(f.disabled.intent);
+    intent.effectDeadline = f.at + 10000;
+    const effect = { intentSha256: hash(intent), request: intent.phase.request, incarnation: null, createIntent: intent };
+    let observed = 0;
+    f.io.observeCreation = async (target, retained, until) => {
+      assert.equal(target.appId, f.target.appId); assert.deepEqual(retained, effect);
+      observed++; assert.equal(until, f.at + 10000);
+      return { deployment: { id: wrong ? `${intent.phase.request.id}-foreign` : intent.phase.request.id,
+        properties: { provisioningState: 'Succeeded', mode: 'Incremental', timestamp: new Date(f.at).toISOString() } },
+      operations: { value: [{ properties: { provisioningOperation: 'Create', provisioningState: 'Succeeded', targetResource: { id: f.target.appId } } }] },
+      completedAt: new Date(f.at).toISOString() };
+    };
+    const promise = readyPrivateLinkRuntime(f.c, f.target, f.candidate, f.io, 'false', f.at + 10000,
+      effect);
+    if (wrong) await assert.rejects(promise, /CREATION_DEPLOYMENT/);
+    else assert.equal((await promise).app.id, f.target.appId);
+    assert.equal(observed, 1);
+  }
+});
+
+test('concrete creation reads admit only a coherent fixed effect and reject foreign coordinates before GETs', async t => {
+  for (const publicCreate of [false, true]) {
+  for (const variant of ['valid', 'foreign-deployment', 'request', 'target', 'hash', 'action', 'deadline', 'method', 'swap']) {
+    let current;
+    const f = await readinessFixture(t, async ({ id }) => {
+      if (id === current?.createIntent.phase.request.id) {
+        if (variant === 'swap') {
+          await Promise.resolve();
+          current.createIntent.phase.request.id += '-changed';
+        }
+        return { id, properties: { provisioningState: 'Succeeded' } };
+      }
+      if (id === `${current?.createIntent.phase.request.id}/operations`) return { value: [] };
+    });
+    const target = publicCreate ? f.publicTarget : f.target;
+    const binding = publicCreate ? privateLinkWindowBinding(f.c, f.context, f.evidence, f.candidate, f.disabled,
+      f.instanceId, { pythonPath: '/UNIT', pythonSha256: 'a'.repeat(64), bridgeSha256: 'b'.repeat(64) }) : null;
+    const intent = publicCreate ? { version: 1, kind: 'private-link-public-control-create-intent',
+      windowIntentSha256: 'c'.repeat(64), phase: privateRuntimePhase(f.c, target, f.instanceId, 'create-public-probe', hash(f.disabled)),
+      target, approval: f.approval('private-link-create-public-control', binding), binding,
+      intentAt: new Date(f.at).toISOString(), outcome: 'create-possible' } : structuredClone(f.disabled.intent);
+    intent.effectDeadline = f.at + 10000;
+    current = { intentSha256: hash(intent), request: structuredClone(intent.phase.request), incarnation: null, createIntent: intent };
+    if (variant === 'foreign-deployment') {
+      current.createIntent.phase.request.id = '/subscriptions/foreign/providers/Microsoft.Resources/deployments/foreign';
+      current.request = structuredClone(current.createIntent.phase.request);
+    }
+    if (variant === 'request') current.request.id += '-unapproved';
+    if (variant === 'target') current.createIntent.target = { ...current.createIntent.target, environmentId: '/foreign-environment' };
+    if (variant === 'action') current.createIntent.phase.action = 'enable';
+    if (variant === 'deadline') current.createIntent.effectDeadline++;
+    if (variant === 'method') { current.createIntent.phase.request.method = 'PUT'; current.request.method = 'PUT'; }
+    if (variant !== 'hash') current.intentSha256 = hash(current.createIntent);
+    else current.intentSha256 = '0'.repeat(64);
+    const invoke = () => f.io.observeCreation(target, current, f.at + 10000);
+    if (variant === 'valid') {
+      assert.equal(Object.hasOwn(intent.phase.request, 'method'), false, 'canonical requests imply PUT via the fixed phase');
+      const observation = await invoke();
+      assert.equal(observation.deploymentId, intent.phase.request.id);
+      assert.deepEqual(f.calls, [intent.phase.request.id, `${intent.phase.request.id}/operations`]);
+    } else {
+      await assert.rejects(invoke());
+      assert.equal(f.calls.length, variant === 'swap' ? 1 : 0, variant);
+      if (variant !== 'swap') {
+        await assert.rejects(readyPrivateLinkRuntime(f.c, target, f.candidate, f.io, 'false', f.at + 10000, current));
+        assert.equal(f.calls.length, 0, variant);
+      }
+    }
+  }
+  }
 });
 
 test('readiness rejects unknown or mismatched app/environment coordinates before any GET', async t => {

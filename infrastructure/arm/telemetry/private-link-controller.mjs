@@ -1979,8 +1979,8 @@ async function currentRuntimeProof(c, context, evidence, directory, invoke, opti
 }
 export async function runPrivateLinkControl(c, context, evidence, stage, operation, directoryArg, inputs = {}, options = {}) {
   const startedAt = (options.now ?? Date.now)();
-  return withPrivateLinkCompletionValidation(c, context, () =>
-    runControl(c, context, evidence, stage, operation, directoryArg, inputs, options, startedAt));
+  return withPrivateLinkCompletionValidation(c, context, (ownedC, ownedContext) =>
+    runControl(ownedC, ownedContext, evidence, stage, operation, directoryArg, inputs, options, startedAt));
 }
 async function runControl(c, context, evidence, stage, operation, directoryArg, inputs, options, startedAt) {
   if (Object.hasOwn(inputs, 'nameProjection')) {
@@ -1999,25 +1999,34 @@ async function runControl(c, context, evidence, stage, operation, directoryArg, 
     await savePrivateLinkArtifact(directory, `private-link-${stage}-plan.json`, phase);
     return phase;
   }
+  if (operation === 'check') {
+    return withDispatchValidation(c, context, { evidence, phase }, async (snapshot, validation) => {
+      const state = dispatchValidation(c, context, validation);
+      const checkInputs = () => { if (state) assertDispatchInputs(state); };
+      checkInputs();
+      const io = privateLinkAzureIO(c, context, snapshot.evidence, snapshot.phase, directory, inputs, options.invoke ?? az, options);
+      const proof = await checkPhase(c, context, snapshot.evidence, snapshot.phase, io, startedAt, validation);
+      checkInputs();
+      await savePrivateLinkArtifact(directory, `private-link-${stage}-preflight.json`, proof);
+      checkInputs();
+      io.checkRuntimeCompletion();
+      const at = io.now();
+      if (io.cancelled?.() || at >= startedAt + LIMITS.checkMs) fail('PRIVATE_LINK_CHECK_EXPIRED');
+      phaseSource(c, context, snapshot.phase, at);
+      if (snapshot.phase.continuation) boundedReview(snapshot.phase.continuation.review, at);
+      verifyPrivateLinkCostReview(c, context, proof.costReview, proof.costEvidence, proof.sourceSha256, at);
+      verifyPrivateLinkMigrationReview(c, context, proof.migrationReview, at, proof.sourceSha256);
+      checkInputs();
+      if (io.cancelled?.() || io.now() >= startedAt + LIMITS.checkMs) fail('PRIVATE_LINK_CHECK_EXPIRED');
+      return proof;
+    });
+  }
   const io = privateLinkAzureIO(c, context, evidence, phase, directory, inputs, options.invoke ?? az, options);
   if (['reconcile', 'recover'].includes(operation) && externalNsg(evidence)) {
     const originalDirectory = await privateDirectory(inputs.originalDirectory);
     if (originalDirectory === directory) fail('PRIVATE_LINK_NSG_NEW_REVISION_DIRECTORY_REQUIRED');
     io.verifyOriginal = original => verifyOriginalArtifacts(context, original, originalDirectory,
       options.store?.root ?? resolve(here, '.operator-private'), options.store?.read ?? loadPrivateLinkArtifact);
-  }
-  if (operation === 'check') {
-    const proof = await checkWithValidation(c, context, evidence, phase, io, startedAt);
-    await savePrivateLinkArtifact(directory, `private-link-${stage}-preflight.json`, proof);
-    io.checkRuntimeCompletion();
-    const at = io.now();
-    if (io.cancelled?.() || at >= startedAt + LIMITS.checkMs) fail('PRIVATE_LINK_CHECK_EXPIRED');
-    phaseSource(c, context, phase, at);
-    if (phase.continuation) boundedReview(phase.continuation.review, at);
-    verifyPrivateLinkCostReview(c, context, proof.costReview, proof.costEvidence, proof.sourceSha256, at);
-    verifyPrivateLinkMigrationReview(c, context, proof.migrationReview, at, proof.sourceSha256);
-    if (io.cancelled?.() || io.now() >= startedAt + LIMITS.checkMs) fail('PRIVATE_LINK_CHECK_EXPIRED');
-    return proof;
   }
   if (operation === 'reconcile') {
     return reconcileWithValidation(c, context, evidence, inputs.original, io, startedAt, proposal =>

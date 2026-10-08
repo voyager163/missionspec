@@ -20,6 +20,32 @@ import { privateCostFixture } from './private-link.fixture.mjs';
 import { runtimeFixture, runtimeProbeFixture } from './private-link-runtime.fixture.mjs';
 
 const hash = value => digest(json(value));
+test('post-delete unconfirmed observations never become absence and never replay DELETE', async () => {
+  for (const mode of ['later-absence', 'always-unconfirmed', 'authorization']) {
+    const f = windowFixture();
+    let reads = 0;
+    f.io.observeDeletion = async (target, intent, until) => {
+      assert.equal(target.appId, f.publicTarget.appId);
+      assert.equal(until, intent.effectDeadline);
+      reads++;
+      if (mode === 'authorization') throw Object.assign(new Error('ARM_OPERATION_FAILED'), { httpStatus: 403, armCode: 'AuthorizationFailed' });
+      if (mode === 'later-absence' && reads === 3) return { state: 'observed', response: { state: 'observed', value: null } };
+      return { state: 'not-yet-confirmed', response: { state: 'propagating', id: target.appId,
+        httpStatus: 404, armCode: 'ContainerAppNotFound' } };
+    };
+    const result = await f.run();
+    assert.equal(f.events.filter(value => value === 'delete:public').length, 1);
+    if (mode === 'later-absence') {
+      assert.equal(result.outcome, 'qualified-private-delivery-disabled');
+      assert.equal(reads, 3);
+    } else {
+      assert.equal(result.outcome, 'held-terminal-state-unproven');
+      assert.equal(result.publicCleanup, null);
+      assert(result.publicCleanupFailure);
+      assert(reads <= 40);
+    }
+  }
+});
 function windowFixture(f = runtimeFixture(), runtimeReview = null) {
   let now = f.at, flag = 'false', posted = 0, publicPresent = false, publicCreatedAt = f.at;
   const events = [], files = new Map();

@@ -16,6 +16,7 @@ import { verifyPrivateLinkPolicyRevision, verifyPrivateLinkCostReview, withPriva
   verifyPrivateLinkRuntimePrerequisites, privateLinkHead } from './private-link-controller.mjs';
 import { verifyPrivateLinkNameProjection, privateLinkNameBinding, verifyPrivateLinkNameBinding,
   privateLinkRuntimeResources, privateLinkRuntimeNameIds, verifyPrivateLinkRuntimeName } from './private-link.mjs';
+import { withPrivateLinkImmutableControlValidation } from './private-link.mjs';
 import { loadPrivateLinkArtifact, savePrivateLinkArtifact, updatePrivateLinkArtifact } from './private-link-artifacts.mjs';
 import { az, sourceDigest, publishedSourceDigest, verifyReceiverSource, saveImmutable, save, load,
   emptyAcrReferrers, safeOperationFailure, syntheticHttp, readSyntheticQuery, asyncWhatIf, privateDirectory,
@@ -32,6 +33,7 @@ const activePublishedScans = new WeakSet();
 function immutableJsonDigest(value, scope) {
   scope.jsonNodes ??= new WeakMap();
   scope.jsonStrings ??= new Map();
+  scope.jsonTextSegments ??= new Map();
   const ancestors = new WeakSet(), local = new WeakMap(), limit = 65536;
   function shape(entry, depth = 0) {
     if (depth > 128) fail('CANONICAL_JSON_DEPTH_LIMIT');
@@ -54,7 +56,7 @@ function immutableJsonDigest(value, scope) {
     }
     if (height > 128) fail('CANONICAL_JSON_DEPTH_LIMIT');
     ancestors.delete(entry);
-    const result = { size, height, keys, array, depths: new Map() };
+    const result = { size, height, keys, array };
     if (scope.immutable.has(entry)) scope.jsonNodes.set(entry, result);
     else local.set(entry, result);
     return result;
@@ -63,33 +65,43 @@ function immutableJsonDigest(value, scope) {
   const checksum = createHash('sha256');
   let chunks = [], length = 0;
   const flush = () => {
-    if (length) checksum.update(Buffer.concat(chunks, length));
+    if (length) checksum.update(chunks.join(''));
     chunks = []; length = 0;
   };
-  const emit = value => {
-    const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value);
-    if (bytes.length >= limit) { flush(); checksum.update(bytes); return; }
-    chunks.push(bytes); length += bytes.length;
+  const emit = text => {
+    if (text.length >= limit) { flush(); checksum.update(text); return; }
+    chunks.push(text); length += text.length;
     if (length >= limit) flush();
   };
-  const retain = (map, key, bytes) => {
-    if ((scope.jsonSegmentBytes ?? 0) + bytes.length <= 16 * 1024 * 1024) {
-      scope.jsonSegmentBytes = (scope.jsonSegmentBytes ?? 0) + bytes.length;
-      map.set(key, bytes);
+  const retain = text => {
+    const prior = scope.jsonTextSegments.get(text);
+    if (prior !== undefined) return prior;
+    const bytes = text.length * 2;
+    if ((scope.jsonSegmentBytes ?? 0) + bytes <= 16 * 1024 * 1024) {
+      scope.jsonSegmentBytes = (scope.jsonSegmentBytes ?? 0) + bytes;
+      scope.jsonTextSegments.set(text, text);
+      return text;
     }
-    return bytes;
+    return null;
   };
   function visit(entry, depth) {
     if (depth > 128) fail('CANONICAL_JSON_DEPTH_LIMIT');
     if (typeof entry === 'string') {
-      emit(scope.jsonStrings.get(entry) ?? retain(scope.jsonStrings, entry, Buffer.from(JSON.stringify(entry)))); return;
+      let text = scope.jsonStrings.get(entry);
+      if (text === undefined) {
+        text = JSON.stringify(entry);
+        const saved = retain(text);
+        if (saved !== null) { text = saved; scope.jsonStrings.set(entry, text); }
+      }
+      emit(text); return;
     }
     if (entry === null || typeof entry !== 'object') { emit(JSON.stringify(entry)); return; }
     const node = local.get(entry) ?? scope.jsonNodes.get(entry);
     if (depth + node.height > 128) fail('CANONICAL_JSON_DEPTH_LIMIT');
     if (node.size <= limit) {
-      emit(node.depths.get(depth) ?? retain(node.depths, depth,
-        Buffer.from(JSON.stringify(entry, null, 2).replaceAll('\n', `\n${'  '.repeat(depth)}`))));
+      const text = node.text ?? JSON.stringify(entry, null, 2);
+      node.text ??= retain(text);
+      emit(depth ? text.replaceAll('\n', `\n${'  '.repeat(depth)}`) : text);
       return;
     }
     emit(node.array ? '[' : '{');
@@ -237,16 +249,17 @@ export function assertPrivateLinkCompletionInputs(c, context) {
 }
 export function withPrivateLinkCompletionValidation(c, context, use) {
   const forward = forwardRuntime.getStore();
-  if (forward && !forward.completion && runtimeScopes.has(forward)) return use();
+  if (forward && !forward.completion && runtimeScopes.has(forward)) return use(c, context);
   const existing = completionScope(c, context);
-  if (existing) return use();
+  if (existing) return use(existing.completion.copy.c, existing.completion.copy.context);
   const scope = { immutable: new WeakSet(), hashes: new WeakMap(), candidates: new WeakMap(),
     statistics: { immutableCandidateVerifications: 0, immutableCandidateReuses: 0 } };
   const originals = { c, context }, copy = immutableRuntime(structuredClone(originals), scope.immutable);
   scope.completion = { c, context, copy, check: runtimeInputCheck(originals, copy), records: new Map(), verified: [] };
   runtimeScopes.add(scope);
   try {
-    const result = forwardRuntime.run(scope, use);
+    const result = forwardRuntime.run(scope, () =>
+      withPrivateLinkImmutableControlValidation(copy.c, copy.context, () => use(copy.c, copy.context)));
     if (result && typeof result.then === 'function') return Promise.resolve(result).finally(() => runtimeScopes.delete(scope));
     runtimeScopes.delete(scope); return result;
   } catch (error) { runtimeScopes.delete(scope); throw error; }
@@ -566,6 +579,29 @@ export function privateWindowFence(intent) {
     windowInstanceId: intent.binding.instanceId, intentSha256: hash(intent), outcome: 'pending-no-enable-retry' };
 }
 const successorFile = physicalKey => `private-link-runtime-window-successor-${physicalKey}.json`;
+const secondSuccessorFile = physicalKey => `private-link-runtime-window-successor-2-${physicalKey}.json`;
+const cleanedSuccessorKind = 'reviewed-private-link-cleaned-never-enabled-successor';
+const cleanedSuccessorAction = 'private-link-continue-cleaned-never-enabled-window-once';
+function verifyCleanedWindowAncestors(intent, ancestor, first) {
+  const continuation = intent.continuation, original = continuation?.original?.intent, binding = continuation?.binding;
+  if (intent.version !== 6 || continuation?.kind !== cleanedSuccessorKind || continuation.ordinal !== 2 ||
+      original?.version !== 5 || original.continuation?.original?.intent?.version !== 3 ||
+      original.physicalKey !== intent.physicalKey || binding?.physicalKey !== intent.physicalKey ||
+      binding.originalIntentSha256 !== hash(original) || binding.ancestorSha256 !== hash(ancestor) ||
+      binding.firstSuccessorSha256 !== hash(first)) fail('PRIVATE_CLEANED_SUCCESSOR_HEAD_CHANGED');
+  equal(ancestor, privateWindowFence(original.continuation.original.intent), 'PRIVATE_WINDOW_ANCESTOR_CHANGED');
+  equal(first, firstWindowSuccessor(continuation.original), 'PRIVATE_CLEANED_SUCCESSOR_HEAD_CHANGED');
+}
+function verifySecondWindowSuccessor(value, ancestor, first) {
+  closed(value, ['version', 'kind', 'ordinal', 'ancestorSha256', 'firstSuccessorSha256', 'previousHead', 'resolutionSha256', 'head']);
+  if (value.version !== 1 || value.kind !== 'private-link-reviewed-cleaned-window-successor' || value.ordinal !== 2 ||
+      value.ancestorSha256 !== hash(ancestor) || value.firstSuccessorSha256 !== hash(first) ||
+      !sha(value.resolutionSha256)) fail('PRIVATE_CLEANED_SUCCESSOR_HEAD_CHANGED');
+  equal(value.previousHead, first.head, 'PRIVATE_CLEANED_SUCCESSOR_HEAD_CHANGED');
+  verifyWindowSuccessor({ version: 1, kind: 'private-link-reviewed-window-successor',
+    ancestor: first.head, continuationSha256: value.resolutionSha256, head: value.head }, first.head);
+  if (value.head.windowInstanceId === ancestor.windowInstanceId) fail('PRIVATE_CLEANED_SUCCESSOR_INSTANCE_REUSED');
+}
 function verifyWindowSuccessor(value, ancestor) {
   closed(value, ['version', 'kind', 'ancestor', 'continuationSha256', 'head']);
   closed(value.head, Object.keys(ancestor));
@@ -626,6 +662,7 @@ export async function privateLinkRuntimeIO(c, context, evidence, directory, opti
   const control = options.control ?? await import('./private-link-controller.mjs');
   const readSource = options.sourceDigest ?? sourceDigest, lookup = options.lookup ?? publishedSourceDigest;
   const pendingReads = new Set();
+  const readinessRecords = new WeakMap();
   let admittedWindow = null;
   const admissionLock = key => join(options.store?.root ?? privateRoot, `private-link-runtime-window-admission-${key}.lock`);
   const admittedRead = async (work, until, limit) => {
@@ -702,7 +739,7 @@ export async function privateLinkRuntimeIO(c, context, evidence, directory, opti
       return { state: 'propagating', id, httpStatus: 404, armCode: 'ContainerAppNotFound' };
     }
   }, until, 15000);
-  return { now, sleep: options.sleep ?? sleep, sourceDigest: readSource, lookup, current, read, call, identities, run,
+  const io = { now, sleep: options.sleep ?? sleep, sourceDigest: readSource, lookup, current, read, call, identities, run,
     beginRecoveryReads: async until => {
       deadline(now, until);
       // Preserve fail-stop for the failed phase. A false-only/read-only recovery starts a new
@@ -728,7 +765,7 @@ export async function privateLinkRuntimeIO(c, context, evidence, directory, opti
     immutable: (name, value) => savePrivateLinkArtifact(directory, name, value),
     save: (name, value) => updatePrivateLinkArtifact(directory, name, value),
     reserve: async (kind, key, value) => {
-      if (!['image', 'receiver', 'window', 'recovery', 'public-probe', 'public-cleanup'].includes(kind) || !sha(key)) fail('PRIVATE_RUNTIME_FENCE_INVALID');
+      if (!['image', 'receiver', 'window', 'recovery', 'public-probe', 'public-probe-successor-2', 'public-cleanup'].includes(kind) || !sha(key)) fail('PRIVATE_RUNTIME_FENCE_INVALID');
       try { await saveImmutable(options.store?.root ?? privateRoot, `private-link-runtime-${kind}-${key}.json`, value); }
       catch (error) { if (error.code === 'EEXIST') fail('PRIVATE_RUNTIME_PHYSICAL_FENCE_NO_RETRY'); throw error; }
     },
@@ -742,12 +779,22 @@ export async function privateLinkRuntimeIO(c, context, evidence, directory, opti
       }
       const ancestor = await load(root, `private-link-runtime-window-${intent.physicalKey}.json`, true);
       const successor = await loadPrivateLinkArtifact(root, successorFile(intent.physicalKey), true);
+      const second = await loadPrivateLinkArtifact(root, secondSuccessorFile(intent.physicalKey), true);
       if (successor) {
         if (!ancestor) fail('PRIVATE_WINDOW_ANCESTOR_REQUIRED');
         verifyWindowSuccessor(successor, ancestor);
-        if ([4, 5].includes(intent.version) && successor.continuationSha256 !== hash(intent.continuation)) fail('PRIVATE_WINDOW_SUCCESSOR_CHANGED');
+        if (!second && [4, 5].includes(intent.version) && successor.continuationSha256 !== hash(intent.continuation)) fail('PRIVATE_WINDOW_SUCCESSOR_CHANGED');
       }
-      const effective = successor?.head ?? ancestor;
+      if (second) {
+        if (!successor || !ancestor) fail('PRIVATE_WINDOW_ANCESTOR_REQUIRED');
+        verifySecondWindowSuccessor(second, ancestor, successor);
+        if (intent.version === 6) {
+          verifyCleanedWindowAncestors(intent, ancestor, successor);
+          if (second.resolutionSha256 !== hash(intent.continuation)) fail('PRIVATE_CLEANED_SUCCESSOR_HEAD_CHANGED');
+          equal(second.head, privateWindowFence(intent), 'PRIVATE_CLEANED_SUCCESSOR_HEAD_CHANGED');
+        }
+      }
+      const effective = second?.head ?? successor?.head ?? ancestor;
       if (occupied && (frozenRecovery !== true || !isDeepStrictEqual(effective, privateWindowFence(intent)))) fail('PRIVATE_WINDOW_ADMISSION_IN_PROGRESS');
       return effective;
     },
@@ -762,7 +809,25 @@ export async function privateLinkRuntimeIO(c, context, evidence, directory, opti
       finally { admittedWindow = null; await handle.close(); await rm(name); }
     },
     appendWindow: async (original, intent) => {
-      const root = options.store?.root ?? privateRoot, ancestor = privateWindowFence(original);
+      const root = options.store?.root ?? privateRoot;
+      if (intent.version === 6) {
+        const captured = { original, intent }, copy = privateLinkValidationCopy(captured);
+        const check = runtimeInputCheck(captured, copy);
+        const ancestor = await load(root, `private-link-runtime-window-${copy.original.physicalKey}.json`); check();
+        const first = await loadPrivateLinkArtifact(root, successorFile(copy.original.physicalKey)); check();
+        verifyWindowSuccessor(first, ancestor);
+        verifyCleanedWindowAncestors(copy.intent, ancestor, first);
+        equal(copy.intent.continuation.original.intent, copy.original, 'PRIVATE_CLEANED_SUCCESSOR_ORIGINAL_CHANGED');
+        const second = { version: 1, kind: 'private-link-reviewed-cleaned-window-successor', ordinal: 2,
+          ancestorSha256: hash(ancestor), firstSuccessorSha256: hash(first), previousHead: first.head,
+          resolutionSha256: hash(copy.intent.continuation), head: privateWindowFence(copy.intent) };
+        verifySecondWindowSuccessor(second, ancestor, first);
+        check();
+        await savePrivateLinkArtifact(root, secondSuccessorFile(copy.original.physicalKey), second);
+        check();
+        return;
+      }
+      const ancestor = privateWindowFence(original);
       equal(await load(root, `private-link-runtime-window-${original.physicalKey}.json`), ancestor, 'PRIVATE_WINDOW_ANCESTOR_CHANGED');
       if (intent.physicalKey !== original.physicalKey || ![4, 5].includes(intent.version) || !intent.continuation) fail('PRIVATE_WINDOW_CONTINUATION_CHANGED');
       const successor = { version: 1, kind: 'private-link-reviewed-window-successor', ancestor,
@@ -771,15 +836,45 @@ export async function privateLinkRuntimeIO(c, context, evidence, directory, opti
       // The immutable ancestor cannot change; exclusive creation is the single-successor CAS.
       await savePrivateLinkArtifact(root, successorFile(original.physicalKey), successor);
     },
+    reservePublicProbe: async (window, intent) => {
+      if (window?.version !== 6 || window.continuation?.kind !== cleanedSuccessorKind ||
+          window.continuation.ordinal !== 2) fail('PRIVATE_CLEANED_PUBLIC_RESERVATION_REQUIRED');
+      const captured = { window, intent }, copy = privateLinkValidationCopy(captured);
+      const check = runtimeInputCheck(captured, copy), target = copy.window.publicTarget;
+      verifyRuntimeTargetScope(c, target);
+      verifyPublicCreateIntent(c, copy.window, copy.intent);
+      if (copy.window.continuation.binding.cleanupSha256 !== hash(copy.window.continuation.cleanup)) fail('PRIVATE_CLEANED_PUBLIC_ANCESTOR_CHANGED');
+      equal(target, copy.window.continuation.original.publicTarget, 'PRIVATE_CLEANED_PUBLIC_ANCESTOR_CHANGED');
+      review(copy.window.continuation.successorApproval, cleanedSuccessorAction, copy.window.continuation.binding, now());
+      const root = options.store?.root ?? privateRoot;
+      const original = await load(root, `private-link-runtime-public-probe-${hash({ appId: target.appId.toLowerCase() })}.json`); check();
+      const previousCreate = copy.window.continuation.cleanup.reconciliation.state.intent;
+      equal(original, { intentSha256: hash(previousCreate), outcome: 'create-possible' }, 'PRIVATE_CLEANED_PUBLIC_ANCESTOR_CHANGED');
+      await assertWindowHead(io, copy.window); check();
+      review(copy.window.approvals.publicCreate, 'private-link-create-public-control', copy.window.binding, now());
+      review(copy.window.continuation.successorApproval, cleanedSuccessorAction, copy.window.continuation.binding, now());
+      deadline(now, copy.intent.effectDeadline);
+      const value = { version: 1, kind: 'private-link-reviewed-public-probe-successor', ordinal: 2,
+        appId: target.appId, physicalKey: copy.window.physicalKey,
+        originalReservationSha256: hash(original), previousCreateIntentSha256: hash(previousCreate),
+        windowIntentSha256: hash(copy.window), windowHeadSha256: hash(privateWindowFence(copy.window)),
+        resolutionSha256: hash(copy.window.continuation), cleanupSha256: copy.window.continuation.binding.cleanupSha256,
+        intentSha256: hash(copy.intent), outcome: 'create-possible-no-retry' };
+      await io.reserve('public-probe-successor-2', hash({ appId: target.appId.toLowerCase(), physicalKey: copy.window.physicalKey }), value);
+      check();
+    },
     loadOriginal: async (originalDirectory, name) => {
       const allowed = ['private-window-intent.json', 'private-window-result.json', 'private-disable-intent.json',
-        'private-disable-receipt.json', 'private-enable-intent.json', 'private-public-create-intent.json'];
-      if (!allowed.includes(name)) fail('PRIVATE_WINDOW_ORIGINAL_FILE_FORBIDDEN');
+        'private-disable-receipt.json', 'private-enable-intent.json', 'private-public-create-intent.json', 'private-public-create-receipt.json'];
+      const selected = /^private-public-recovery-([a-f0-9-]{36})-(preparation|intent|result)\.json$/u.exec(name) ??
+        /^(?:private-public-reconciliation|parent-cleaned-window-observation|parent-public-absence)-([a-f0-9-]{36})\.json$/u.exec(name);
+      if (!allowed.includes(name) && (!selected || !uuid(selected[1]))) fail('PRIVATE_WINDOW_ORIGINAL_FILE_FORBIDDEN');
       originalWindowDirectory(originalDirectory);
       const info = await lstat(resolve(originalDirectory));
       if (!info.isDirectory() || info.isSymbolicLink()) fail('PRIVATE_WINDOW_ORIGINAL_DIRECTORY_REQUIRED');
       const original = await privateDirectory(originalDirectory);
-      return loadPrivateLinkArtifact(original, name, ['private-enable-intent.json', 'private-public-create-intent.json'].includes(name));
+      return loadPrivateLinkArtifact(original, name, ['private-enable-intent.json', 'private-public-create-intent.json',
+        'private-public-create-receipt.json'].includes(name));
     },
     inventory: async (candidate, until, published) => {
       const registry = await read(ids(c).registry, '2023-07-01', until);
@@ -844,31 +939,83 @@ export async function privateLinkRuntimeIO(c, context, evidence, directory, opti
       } finally { await rm(join(directory, name)); }
     },
     recordPropagation: value => savePrivateLinkArtifact(directory, `private-runtime-propagation-${randomUUID()}.json`, value),
-    observe: async (target, until, readiness = false) => {
+    observeCreation: async (target, effect, until) => {
+      const captured = { c, target, effect }, copy = privateLinkValidationCopy(captured);
+      const check = runtimeInputCheck(captured, copy);
+      const intent = verifyReadinessCreateEffect(c, copy.target, copy.effect, until);
+      const observed = { version: 1, kind: 'private-runtime-readiness-create-operation', intentSha256: hash(intent),
+        deploymentId: intent.phase.request.id, startedAt: iso(now()), deployment: null, operations: null,
+        failure: null, completedAt: null };
+      try {
+        check();
+        observed.deployment = await read(intent.phase.request.id, '2022-09-01', until); check();
+        observed.operations = await read(`${intent.phase.request.id}/operations`, '2022-09-01', until); check();
+        return observed;
+      } catch (error) { observed.failure = safeOperationFailure(error); throw error; }
+      finally {
+        observed.completedAt = iso(now());
+        await savePrivateLinkArtifact(directory, `private-runtime-readiness-create-${randomUUID()}.json`, observed);
+      }
+    },
+    recordReadinessOutcome: async (observation, state, error) => {
+      const retained = readinessRecords.get(observation);
+      if (!retained) fail('PRIVATE_READINESS_RAW_REQUIRED');
+      await savePrivateLinkArtifact(directory, `private-runtime-readiness-validation-${retained.id}.json`, {
+        version: 1, kind: 'private-runtime-readiness-validation', rawSha256: retained.sha256, state,
+        failure: error ? safeOperationFailure(error) : null, checkedAt: iso(now()),
+      });
+    },
+    observe: async (target, until, readiness = false, effect = null) => {
       if (readiness) {
         verifyRuntimeTargetScope(c, target);
-        const app = await readinessGet(target, target.appId, until);
-        const revisions = app.state === 'observed' ? await readinessGet(target, `${target.appId}/revisions`, until) : app;
+        if (effect?.createIntent) verifyReadinessCreateEffect(c, target, effect, until);
+        const id = randomUUID(), jobs = [], raw = { version: 1, kind: 'private-runtime-readiness-raw',
+          target, effect, effectDeadline: until, startedAt: iso(now()), responses: {}, complete: false, failure: null, completedAt: null };
+        const capture = (name, work) => {
+          const job = (async () => {
+            const value = await work();
+            raw.responses[name] = { observedAt: iso(now()), value };
+            return value;
+          })();
+          jobs.push(job); return job;
+        };
+        let observation;
+        try {
+        const app = await capture('app', () => readinessGet(target, target.appId, until));
+        const revisions = app.state === 'observed' ? await capture('revisions', () => readinessGet(target, `${target.appId}/revisions`, until)) : app;
         if (app.state === 'propagating' || revisions.state === 'propagating') {
           const missing = app.state === 'propagating' ? app : revisions;
-          const parentBefore = await read(target.environmentId, appApi, until);
+          const parentBefore = await capture('parentBefore', () => read(target.environmentId, appApi, until));
           if (!sameId(parentBefore?.id, target.environmentId) || parentBefore.properties?.provisioningState !== 'Succeeded') fail('PRIVATE_PROPAGATION_PARENT_UNQUALIFIED');
-          await readinessGet(target, missing.id, until);
-          const parentAfter = await read(target.environmentId, appApi, until);
+          await capture('missingChildAgain', () => readinessGet(target, missing.id, until));
+          const parentAfter = await capture('parentAfter', () => read(target.environmentId, appApi, until));
           if (!sameId(parentAfter?.id, target.environmentId) || parentAfter.properties?.provisioningState !== 'Succeeded') fail('PRIVATE_PROPAGATION_PARENT_UNQUALIFIED');
           equal(executionIdentity(parentBefore, 'Microsoft.App/managedEnvironments'),
             executionIdentity(parentAfter, 'Microsoft.App/managedEnvironments'), 'PRIVATE_PROPAGATION_PARENT_CHANGED');
           deadline(now, until);
-          return { state: 'propagating', kind: 'private-runtime-readiness-propagation', appId: target.appId,
+          observation = { state: 'propagating', kind: 'private-runtime-readiness-propagation', appId: target.appId,
             environmentId: target.environmentId, resourceId: missing.id, httpStatus: 404, armCode: 'ContainerAppNotFound',
             parentIdentity: executionIdentity(parentAfter, 'Microsoft.App/managedEnvironments'), observedAt: iso(now()) };
-        }
+        } else {
         const [identityValues, diagnostic, exports, oldApp] = await Promise.all([
-          identities(until), read(`${target.appId}/providers/Microsoft.Insights/diagnosticSettings`, '2021-05-01-preview', until),
-          read(`${ids(c).workspace}/dataExports`, '2020-08-01', until), read(ids(c).app, appApi, until),
+          capture('identities', async () => Object.fromEntries(await Promise.all([ids(c).ingestIdentity, ids(c).pullIdentity]
+            .map(async id => [id, await capture(`identity:${id}`, () => read(id, '2023-01-31', until))])))),
+          capture('diagnostic', () => read(`${target.appId}/providers/Microsoft.Insights/diagnosticSettings`, '2021-05-01-preview', until)),
+          capture('exports', () => read(`${ids(c).workspace}/dataExports`, '2020-08-01', until)),
+          capture('oldApp', () => read(ids(c).app, appApi, until)),
         ]);
-        return { app: app.value, revisions: revisions.value, identities: identityValues,
+        observation = { app: app.value, revisions: revisions.value, identities: identityValues,
           privacy: { diagnostic, exports }, oldApp, observedAt: iso(now()) };
+        raw.complete = true;
+        }
+        } catch (error) { raw.failure = safeOperationFailure(error); throw error; }
+        finally {
+          await Promise.allSettled(jobs);
+          raw.completedAt = iso(now());
+          await savePrivateLinkArtifact(directory, `private-runtime-readiness-raw-${id}.json`, raw);
+          if (observation) readinessRecords.set(observation, { id, sha256: hash(raw) });
+        }
+        return observation;
       }
       const [app, revisions, identityValues, diagnostic, exports, oldApp] = await Promise.all([
         read(target.appId, appApi, until), read(`${target.appId}/revisions`, appApi, until), identities(until),
@@ -878,6 +1025,17 @@ export async function privateLinkRuntimeIO(c, context, evidence, directory, opti
       return { app, revisions, identities: identityValues, privacy: { diagnostic, exports }, oldApp, observedAt: iso(now()) };
     },
     http: options.http ?? syntheticHttp,
+    observeDeletion: async (target, intent, until) => {
+      verifyRuntimeTargetScope(c, target);
+      if (target.appId !== runtimeTargetNames(c, target).publicProbe || intent.request?.method !== 'DELETE' ||
+          intent.request.id !== target.appId || intent.effectDeadline !== until) fail('PRIVATE_PUBLIC_DELETE_SCOPE');
+      const value = await readinessGet(target, target.appId, until);
+      const observation = { version: 1, kind: 'private-public-delete-observation', deleteIntentSha256: hash(intent),
+        id: target.appId, observedAt: iso(now()), state: value.state === 'propagating' ? 'not-yet-confirmed' : 'observed',
+        response: value };
+      await savePrivateLinkArtifact(directory, `private-public-delete-observation-${randomUUID()}.json`, observation);
+      return observation;
+    },
     query: (workspace, source, start, end, guard, until) =>
       readSyntheticQuery(c, workspace, source, start, end, guard, until, (args, timeout) => readJobs(async remaining => {
         guard();
@@ -889,6 +1047,7 @@ export async function privateLinkRuntimeIO(c, context, evidence, directory, opti
       runPrivateLinkProbe(c, target, observation, candidate, prerequisite, transportReview,
         { now, call, read, run, current, directory }, until, beforeDispatch, mode),
   };
+  return io;
 }
 
 export async function publishPrivateLinkImage(c, context, evidence, candidate, approval, local, directory, options = {}) {
@@ -1159,27 +1318,78 @@ export function verifyPrivateRuntimePreview(target, phase, preview, before, pres
     'PRIVATE_RUNTIME_PREVIEW_CHANGED');
 }
 
-export async function readyPrivateLinkRuntime(c, target, candidate, io, flag, until) {
+function verifyReadinessCreateEffect(c, target, effect, until) {
   verifyRuntimeTargetScope(c, target);
+  closed(effect, ['intentSha256', 'request', 'incarnation', 'createIntent']);
+  const intent = effect.createIntent;
+  const publicCreate = intent?.kind === 'private-link-public-control-create-intent';
+  if (!intent || (publicCreate ? intent.version !== 1 : intent.kind !== 'private-link-receiver-create-intent' || intent.version !== 2) ||
+      effect.intentSha256 !== hash(intent) || effect.incarnation !== null || intent.effectDeadline !== until ||
+      !Number.isSafeInteger(until) || until <= canonicalInstant(intent.intentAt) ||
+      until > Math.min(canonicalInstant(intent.intentAt) + 120000, canonicalInstant(intent.approval?.expiresAt))) {
+    fail('PRIVATE_READINESS_CREATE_INTENT_REQUIRED');
+  }
+  equal(intent.target, target, 'PRIVATE_READINESS_CREATE_TARGET_CHANGED');
+  const phase = privateRuntimePhase(c, target, intent.phase?.windowInstanceId,
+    publicCreate ? 'create-public-probe' : 'create-disabled', intent.phase?.predecessorSha256);
+  equal(intent.phase, phase, 'PRIVATE_READINESS_CREATE_PHASE_CHANGED');
+  equal(effect.request, phase.request, 'PRIVATE_READINESS_CREATE_REQUEST_CHANGED');
+  if (publicCreate) {
+    if (intent.outcome !== 'create-possible' || intent.binding.publicTargetSha256 !== hash(target) ||
+        intent.binding.instanceId !== phase.windowInstanceId ||
+        intent.binding.disabledRecordSha256 !== phase.predecessorSha256) fail('PRIVATE_READINESS_CREATE_INTENT_REQUIRED');
+  } else if (intent.outcome !== 'write-possible' || intent.binding.targetSha256 !== hash(target) ||
+      intent.binding.phaseSha256 !== hash(phase)) fail('PRIVATE_READINESS_CREATE_INTENT_REQUIRED');
+  review(intent.approval, publicCreate ? 'private-link-create-public-control' : 'private-link-create-disabled-receiver',
+    intent.binding, canonicalInstant(intent.intentAt));
+  return intent;
+}
+export async function readyPrivateLinkRuntime(c, target, candidate, io, flag, until, effect = null) {
+  verifyRuntimeTargetScope(c, target);
+  const originalEffect = effect;
+  let effectCheck = () => {};
+  if (effect?.createIntent) {
+    effect = privateLinkValidationCopy(effect);
+    effectCheck = runtimeInputCheck(originalEffect, effect);
+    if (flag !== 'false') fail('PRIVATE_READINESS_CREATE_INTENT_REQUIRED');
+    verifyReadinessCreateEffect(c, target, effect, until);
+  }
   let last;
   for (let index = 0; index < PRIVATE_RUNTIME_LIMITS.maxRolloutPolls; index++) {
+    effectCheck();
     deadline(io.now, until);
-    last = await io.observe(target, until, true);
+    last = await io.observe(target, until, true, effect);
+    effectCheck();
     deadline(io.now, until);
     if (last?.state === 'propagating') {
       if (last.kind !== 'private-runtime-readiness-propagation' || last.appId !== target.appId ||
           last.environmentId !== target.environmentId || ![target.appId, `${target.appId}/revisions`].includes(last.resourceId) ||
           last.httpStatus !== 404 || last.armCode !== 'ContainerAppNotFound') fail('PRIVATE_PROPAGATION_READ_SCOPE');
       await io.recordPropagation(last);
+      await io.recordReadinessOutcome?.(last, 'pending', null);
       deadline(io.now, until);
       await io.sleep(Math.min(3000, Math.max(0, until - io.now())));
       continue;
     }
-    try { verifyObservation(c, target, candidate, last, flag); return last; }
+    try {
+      verifyObservation(c, target, candidate, last, flag);
+      if (effect?.incarnation) equal(privateRuntimeIncarnation(last.app), effect.incarnation, 'PRIVATE_PREIMAGE_GENERATION_CHANGED');
+      if (effect?.createIntent && io.observeCreation) {
+        const creation = await io.observeCreation(target, originalEffect, until);
+        effectCheck();
+        verifyCreationDeployment(effect.createIntent, creation.deployment, creation.operations, last.app, creation.completedAt);
+      }
+      await io.recordReadinessOutcome?.(last, 'qualified', null);
+      deadline(io.now, until); return last;
+    }
     catch (error) {
-      if (!['PRIVATE_REVISION_NOT_READY', 'PRIVATE_RUNTIME_TARGET_DRIFT'].includes(error.message)) throw error;
-      // A mismatched desired flag is allowed only while the exact fixed deployment rolls out.
-      if (last.app && admissionFlag(last.app) === flag) verifyPrivateLinkApp(c, target, candidate, last.app, last.identities, flag);
+      let pending = error.message === 'PRIVATE_REVISION_NOT_READY';
+      if (error.message === 'PRIVATE_RUNTIME_TARGET_DRIFT' && last.app && admissionFlag(last.app) !== flag) {
+        try { verifyPrivateLinkApp(c, target, candidate, last.app, last.identities, admissionFlag(last.app)); pending = true; }
+        catch { pending = false; }
+      }
+      await io.recordReadinessOutcome?.(last, pending ? 'pending' : 'failed', error);
+      if (!pending) throw error;
     }
     await io.sleep(Math.min(3000, Math.max(0, until - io.now())));
   }
@@ -1223,7 +1433,8 @@ export async function createPrivateLinkReceiver(c, context, evidence, candidate,
       await io.reserve('receiver', hash({ app: target.appId.toLowerCase() }), { version: 1, intentSha256: hash(intent), outcome: 'create-possible' });
       return effectUntil;
     });
-    const observation = await ready(c, target, candidate, io, 'false', effectUntil);
+    const observation = await ready(c, target, candidate, io, 'false', effectUntil, { intentSha256: hash(intent), request: phase.request,
+      incarnation: null, createIntent: intent });
     const response = await io.http(target.fqdn, 'POST', '/v1/events', SYNTHETIC_FIXTURES[0],
       () => deadline(io.now, effectUntil), Math.min(effectUntil, io.now() + 1000));
     deadline(io.now, effectUntil); guard();
@@ -1380,12 +1591,12 @@ function continuationFacts(value) {
     if (!runtimeScopes.has(scope)) fail('PRIVATE_RUNTIME_OPERATION_SCOPE_CLOSED');
     scope.continuationFacts ??= new WeakMap();
     if (!scope.continuationFacts.has(value)) {
-      const { approval, admission, ...facts } = value;
+      const { approval, successorApproval, admission, ...facts } = value;
       scope.continuationFacts.set(value, immutableRuntime(facts, scope.immutable));
     }
     return scope.continuationFacts.get(value);
   }
-  const { approval, admission, ...facts } = value;
+  const { approval, successorApproval, admission, ...facts } = value;
   return facts;
 }
 function originalWindowDirectory(value) {
@@ -1396,18 +1607,23 @@ function originalWindowDirectory(value) {
   return value;
 }
 export function verifyNeverEnabledPrivateLinkWindow(c, context, evidence, record, at) {
+  return verifyFailedWindowBeforeEnable(c, context, evidence, record, at, false);
+}
+function verifyFailedWindowBeforeEnable(c, context, evidence, record, at, cleaned) {
   const scope = forwardRuntime.getStore(), cached = scope?.neverEnabled?.get(record);
-  if (cached && runtimeScopes.has(scope) && cached.c === c && cached.context === context && cached.evidence === evidence) {
+  if (cached && cached.cleaned === cleaned && runtimeScopes.has(scope) && cached.c === c && cached.context === context && cached.evidence === evidence) {
     if (canonicalInstant(record.completedAt) > at) fail('PRIVATE_NEVER_ENABLED_TIME_CHANGED');
     return cached.fence;
   }
   closed(record, ['version', 'kind', 'binding', 'approvals', 'disabled', 'candidate', 'controlEvidence', 'transport', 'target', 'publicTarget', 'phases',
     'preflight', 'probe', 'publicProbe', 'requests', 'queries', 'drain', 'enableIntentAt', 'disable', 'failure', 'outcome',
-    'terminalFalse', 'terminal503', 'enabledWindowExceeded', 'publicLifetimeExceeded', 'completedAt', 'intent', 'publicControl', 'publicCleanup']);
+    'terminalFalse', 'terminal503', 'enabledWindowExceeded', 'publicLifetimeExceeded', 'completedAt', 'intent', 'publicControl', 'publicCleanup',
+    ...(cleaned ? ['publicCleanupFailure'] : [])]);
   if (record.version !== 1 || record.kind !== 'private-link-runtime-completion' ||
-      record.intent?.version !== 3 || record.outcome !== 'stopped-disabled-unqualified' ||
+      record.intent?.version !== (cleaned ? 5 : 3) ||
+      record.outcome !== (cleaned ? 'held-terminal-state-unproven' : 'stopped-disabled-unqualified') ||
       record.terminalFalse !== true || record.terminal503 !== true || record.enabledWindowExceeded !== false ||
-      record.publicLifetimeExceeded !== false || record.probe !== null || record.publicProbe !== null ||
+      record.publicLifetimeExceeded !== false || (!cleaned && record.probe !== null) || record.publicProbe !== null ||
       record.publicControl !== null || record.enableIntentAt !== null || record.drain !== null ||
       record.requests?.length !== 0 || record.queries?.length !== 0 ||
       !/^[A-Z][A-Z0-9_]*$/u.test(record.failure?.code ?? '')) fail('PRIVATE_NEVER_ENABLED_REQUIRED');
@@ -1449,22 +1665,37 @@ export function verifyNeverEnabledPrivateLinkWindow(c, context, evidence, record
     executionIdentity(record.disabled.observation.oldApp, 'Microsoft.App/containerApps'), 'PRIVATE_OLD_RECEIVER_GENERATION_CHANGED');
   if (admissionFlag(disabled.oldApp) !== 'false') fail('PRIVATE_OLD_TERMINAL_FALSE_REQUIRED');
   verifyHttp(disabled.response, 503);
-  equal(record.publicCleanup, { version: 1, kind: 'private-link-public-control-cleanup', createAdmitted: false,
-    absent: true, creation: null, deleteIntent: null, completedAt: record.publicCleanup?.completedAt }, 'PRIVATE_NEVER_PUBLIC_REQUIRED');
-  const cleaned = canonicalInstant(record.publicCleanup.completedAt);
-  if (cleaned < stopped || cleaned > completed) fail('PRIVATE_NEVER_ENABLED_TIME_CHANGED');
+  if (cleaned) {
+    if (record.publicCleanup !== null || record.failure.code !== 'PRIVATE_RUNTIME_TARGET_DRIFT' ||
+        record.publicCleanupFailure?.code !== 'PRIVATE_PUBLIC_GENERATION_REVIEW_REQUIRED' ||
+        record.intent.continuation?.original?.intent?.version !== 3) fail('PRIVATE_CLEANED_FAILURE_SCOPE');
+    closed(record.publicCleanupFailure, ['code', 'armCode', 'httpStatus', 'bridgeCode', 'diagnostics']);
+    if (record.probe?.result?.mode !== 'private') fail('PRIVATE_CLEANED_FAILURE_PROBE_REQUIRED');
+    verifyPrivateProbeEvidence(c, record.target, record.candidate, record.preflight.initial.identities,
+      record.probe, record.preflight.initial.app, completed);
+    if (canonicalInstant(record.probe.processStartedAt) < start ||
+        record.probe.before.control.sourceSha256 !== record.approvals.enable.sourceSha256 ||
+        record.probe.before.control.headSha256 !== current.headSha256) fail('PRIVATE_CLEANED_FAILURE_PROBE_CHANGED');
+  } else {
+    equal(record.publicCleanup, { version: 1, kind: 'private-link-public-control-cleanup', createAdmitted: false,
+      absent: true, creation: null, deleteIntent: null, completedAt: record.publicCleanup?.completedAt }, 'PRIVATE_NEVER_PUBLIC_REQUIRED');
+    const cleanedAt = canonicalInstant(record.publicCleanup.completedAt);
+    if (cleanedAt < stopped || cleanedAt > completed) fail('PRIVATE_NEVER_ENABLED_TIME_CHANGED');
+  }
   const fence = privateWindowFence(record.intent);
   if (scope?.immutable.has(record)) {
     scope.neverEnabled ??= new WeakMap();
-    scope.neverEnabled.set(record, { c, context, evidence, fence });
+    scope.neverEnabled.set(record, { c, context, evidence, fence, cleaned });
   }
   return fence;
 }
-function verifyContinuationObservation(c, context, evidence, original, observation, source, at) {
-  closed(observation, ['current', 'receiver', 'response', 'publicApp', 'enableDeployment', 'publicDeployment', 'startedAt', 'completedAt']);
+function verifyContinuationObservation(c, context, evidence, original, observation, source, at, cleaned = false) {
+  closed(observation, ['current', 'receiver', 'response', 'publicApp', 'enableDeployment',
+    cleaned ? 'earlierEnableDeployment' : 'publicDeployment', 'startedAt', 'completedAt']);
   const start = canonicalInstant(observation.startedAt), end = canonicalInstant(observation.completedAt);
   if (end < start || end > at || end - start > 120000 || at - end > 120000 ||
-      observation.publicApp !== null || observation.enableDeployment !== null || observation.publicDeployment !== null) {
+      observation.publicApp !== null || observation.enableDeployment !== null ||
+      (cleaned ? observation.earlierEnableDeployment : observation.publicDeployment) !== null) {
     fail('PRIVATE_WINDOW_CONTINUATION_ABSENCE_REQUIRED');
   }
   const current = observation.current;
@@ -1480,7 +1711,234 @@ function verifyContinuationObservation(c, context, evidence, original, observati
   if (admissionFlag(observation.receiver.oldApp) !== 'false') fail('PRIVATE_OLD_TERMINAL_FALSE_REQUIRED');
   verifyHttp(observation.response, 503);
 }
+function verifyCleanedDecision(value, originalDirectory) {
+  closed(value, ['kind', 'selectedAnswer', 'failedWindowRevision', 'additionalSuccessorsAuthorized',
+    'bothFailedWindowsAndFencesMustRemainImmutable', 'freshFalseAndPublicAbsenceProofRequired', 'readinessObservationsMustBeRetained',
+    'existingLimitsMustRemainUnchanged', 'receiverRecreationAuthorized', 'imageRepublishAuthorized',
+    'priorIntentReplayAuthorized', 'runtimeExecutionAuthorizedByThisFile']);
+  equal(value, { kind: 'parent-retained-user-cleaned-window-successor-decision',
+    selectedAnswer: 'Add one reviewed successor after proven cleanup (Recommended)', failedWindowRevision: originalDirectory,
+    additionalSuccessorsAuthorized: 1, bothFailedWindowsAndFencesMustRemainImmutable: true, freshFalseAndPublicAbsenceProofRequired: true,
+    readinessObservationsMustBeRetained: true, existingLimitsMustRemainUnchanged: true, receiverRecreationAuthorized: false,
+    imageRepublishAuthorized: false, priorIntentReplayAuthorized: false, runtimeExecutionAuthorizedByThisFile: false },
+  'PRIVATE_CLEANED_SUCCESSOR_DECISION_REQUIRED');
+}
+function firstWindowSuccessor(original) {
+  return { version: 1, kind: 'private-link-reviewed-window-successor',
+    ancestor: privateWindowFence(original.intent.continuation.original.intent),
+    continuationSha256: hash(original.intent.continuation), head: privateWindowFence(original.intent) };
+}
+function verifyDeleteTerminal(c, original, cleanup) {
+  const terminal = cleanup.terminalActivity, intent = cleanup.deleteIntent, target = original.publicTarget.appId;
+  closed(terminal, ['version', 'kind', 'windowInstanceId', 'start', 'end', 'enableDeployment', 'activity',
+    'readOnly', 'originalWindowQualified', 'executionAuthorized']);
+  const start = canonicalInstant(terminal.start), end = canonicalInstant(terminal.end);
+  if (terminal.version !== 1 || terminal.kind !== 'parent-readonly-cleaned-window-observation' ||
+      terminal.windowInstanceId !== original.binding.instanceId || terminal.enableDeployment !== null ||
+      terminal.readOnly !== true || terminal.originalWindowQualified !== false || terminal.executionAuthorized !== false ||
+      start !== canonicalInstant(intent.intentAt) || end < start || !Array.isArray(terminal.activity) ||
+      terminal.activity.length !== 3) fail('PRIVATE_CLEANED_DELETE_TERMINAL_REQUIRED');
+  const events = terminal.activity, seen = new Set(), correlation = events[0]?.correlationId;
+  if (!uuid(correlation)) fail('PRIVATE_CLEANED_DELETE_CORRELATION');
+  for (const event of events) {
+    if (!uuid(event.eventDataId) || seen.has(event.eventDataId) || event.correlationId !== correlation ||
+        !sameId(event.resourceId, target) || !sameId(event.subscriptionId, c.subscriptionId) ||
+        !sameId(event.tenantId, c.tenantId) || event.category?.value !== 'Administrative' ||
+        event.operationName?.value !== 'Microsoft.App/containerApps/delete' ||
+        event.authorization?.action !== 'Microsoft.App/containerApps/delete' ||
+        !sameId(event.authorization.scope, target) || !sameId(event.properties?.entity, target) ||
+        !uuid(event.claims?.appid) || event.claims.idtyp !== 'user' ||
+        event.claims.iss !== `https://sts.windows.net/${c.tenantId}/` ||
+        typeof event.caller !== 'string' || !event.caller ||
+        !sameId(event.claims?.['http://schemas.microsoft.com/identity/claims/objectidentifier'], c.operatorPrincipalId) ||
+        !sameId(event.claims?.['http://schemas.microsoft.com/identity/claims/tenantid'], c.tenantId)) fail('PRIVATE_CLEANED_DELETE_EVENT_SCOPE');
+    seen.add(event.eventDataId);
+    const timestamp = queueArmInstant(event.eventTimestamp), submitted = queueArmInstant(event.submissionTimestamp);
+    if (timestamp < BigInt(start) * 10000n || timestamp >= BigInt(intent.effectDeadline) * 10000n ||
+        submitted < timestamp || submitted > BigInt(end) * 10000n) fail('PRIVATE_CLEANED_DELETE_EVENT_TIME');
+  }
+  const select = status => {
+    const values = events.filter(event => event.status?.value === status);
+    if (values.length !== 1) fail('PRIVATE_CLEANED_DELETE_EVENT_STATUS');
+    return values[0];
+  };
+  const started = select('Started'), accepted = select('Accepted'), succeeded = select('Succeeded');
+  for (const event of [started, accepted]) {
+    if (event.httpRequest?.method !== 'DELETE' || !uuid(event.httpRequest.clientRequestId) ||
+        event.httpRequest.uri !== `https://management.azure.com${target}?api-version=${appApi}` ||
+        event.caller !== started.caller || event.claims.appid !== started.claims.appid) fail('PRIVATE_CLEANED_DELETE_REQUEST_SCOPE');
+  }
+  if (started.httpRequest.clientRequestId !== accepted.httpRequest.clientRequestId ||
+      queueArmInstant(started.eventTimestamp) > queueArmInstant(accepted.eventTimestamp) ||
+      queueArmInstant(accepted.eventTimestamp) > queueArmInstant(succeeded.eventTimestamp) ||
+      succeeded.caller !== started.caller || succeeded.claims.appid !== started.claims.appid ||
+      accepted.properties.statusCode !== 'Accepted') fail('PRIVATE_CLEANED_DELETE_SEQUENCE');
+  return queueArmInstant(succeeded.eventTimestamp);
+}
+export function verifyCleanedPrivateLinkWindow(c, context, evidence, original, cleanup, at) {
+  if (!forwardRuntime.getStore()) return withPrivateLinkCompletionValidation(c, context, () => {
+    const input = { c, context, evidence, original, cleanup }, copy = privateLinkValidationCopy(input);
+    const unchanged = runtimeInputCheck(input, copy);
+    unchanged();
+    const result = withPrivateLinkRuntimeValidation(copy.c, copy.context, copy.evidence, scopedEvidence => {
+      immutableRuntime(scopedEvidence, forwardRuntime.getStore().immutable);
+      return verifyCleanedWindowRecord(copy.c, copy.context, scopedEvidence, copy.original, copy.cleanup, at);
+    });
+    unchanged(); return result;
+  });
+  return verifyCleanedWindowRecord(c, context, evidence, original, cleanup, at);
+}
+function verifyCleanedWindowRecord(c, context, evidence, original, cleanup, at) {
+  if (original?.intent?.version !== 5 || original.intent.continuation?.original?.intent?.version !== 3) fail('PRIVATE_CLEANED_FAILURE_SCOPE');
+  const scope = forwardRuntime.getStore(), cached = scope?.cleanedWindows?.get(original);
+  if (!Number.isSafeInteger(at) || canonicalInstant(cleanup.terminalActivity.end) > at ||
+      canonicalInstant(cleanup.reconciliation.observedAt) > at) fail('PRIVATE_CLEANED_ABSENCE_REQUIRED');
+  if (cached && runtimeScopes.has(scope) && cached.c === c && cached.context === context &&
+      cached.evidence === evidence && cached.cleanup === cleanup) return cached.result;
+  const result = withPublishedScan(c, context, evidence, original.candidate, original.disabled,
+    original.intent.publishedScanAttestation, original.binding.runtimeReview.publishedScanReview,
+    canonicalInstant(original.intent.intentAt), () => {
+      verifyFailedWindowBeforeEnable(c, context, evidence, original, at, true);
+      closed(cleanup, ['preparation', 'deleteIntent', 'result', 'reconciliation', 'terminalActivity', 'parentAbsenceObservation']);
+      const { preparation, deleteIntent, result, reconciliation } = cleanup, window = original.intent;
+      closed(preparation, ['version', 'kind', 'binding', 'bindingSha256', 'generation', 'approvalAction', 'executionAuthorized']);
+      closed(reconciliation, ['version', 'kind', 'reconciliationId', 'state', 'absent', 'qualified', 'originalHistoryModified', 'observedAt']);
+      closed(reconciliation.state, ['intent', 'deployment', 'operations', 'app', 'observedAt']);
+      const creation = reconciliation.state.intent, generation = preparation.generation;
+      verifyPublicCreateIntent(c, window, creation);
+      if (canonicalInstant(creation.intentAt) < canonicalInstant(original.probe.observedAt) ||
+          canonicalInstant(creation.intentAt) > canonicalInstant(original.completedAt)) fail('PRIVATE_CLEANED_CREATE_TIME');
+      if (preparation.version !== 1 || preparation.kind !== 'private-link-public-cleanup-preparation' ||
+          preparation.executionAuthorized !== false || preparation.approvalAction !== 'private-link-recover-public-cleanup' ||
+          !uuid(preparation.binding.recoveryId)) fail('PRIVATE_CLEANED_CLEANUP_PREPARATION');
+      closed(generation, ['version', 'kind', 'createIntentSha256', 'createReceiptSha256', 'incarnation', 'app', 'observedAt']);
+      if (generation.version !== 1 || generation.kind !== 'private-public-cleanup-observed-generation' ||
+          generation.createIntentSha256 !== hash(creation) || generation.createReceiptSha256 !== null ||
+          generation.app === null) fail('PRIVATE_CLEANED_GENERATION_REQUIRED');
+      equal(generation.incarnation, privateRuntimeIncarnation(generation.app), 'PRIVATE_CLEANED_GENERATION_CHANGED');
+      verifyPrivateLinkApp(c, window.publicTarget, window.candidate, generation.app, original.disable.observation.identities, 'false');
+      verifyCreationDeployment(creation, reconciliation.state.deployment, reconciliation.state.operations, generation.app, generation.observedAt);
+      const binding = publicRecoveryBinding(c, context, window, creation, preparation.binding.recoveryId, generation);
+      equal(preparation.binding, binding, 'PRIVATE_CLEANED_CLEANUP_BINDING');
+      if (preparation.bindingSha256 !== hash(binding)) fail('PRIVATE_CLEANED_CLEANUP_BINDING');
+      closed(deleteIntent, ['version', 'windowIntentSha256', 'createIntentSha256', 'request', 'approval', 'binding',
+        'action', 'intentAt', 'effectDeadline', 'outcome']);
+      const deletionAt = canonicalInstant(deleteIntent.intentAt);
+      equal(deleteIntent.binding, binding, 'PRIVATE_CLEANED_DELETE_BINDING');
+      equal(deleteIntent.request, publicDeleteRequest(window), 'PRIVATE_CLEANED_DELETE_REQUEST_SCOPE');
+      if (deleteIntent.version !== 1 || deleteIntent.windowIntentSha256 !== hash(window) ||
+          deleteIntent.createIntentSha256 !== hash(creation) || deleteIntent.action !== 'private-link-recover-public-cleanup' ||
+          deleteIntent.outcome !== 'delete-possible' || deletionAt < canonicalInstant(generation.observedAt) ||
+          !Number.isSafeInteger(deleteIntent.effectDeadline) || deleteIntent.effectDeadline <= deletionAt ||
+          deleteIntent.effectDeadline > Math.min(deletionAt + 120000, canonicalInstant(deleteIntent.approval.expiresAt))) fail('PRIVATE_CLEANED_DELETE_INTENT');
+      review(deleteIntent.approval, deleteIntent.action, binding, deletionAt);
+      closed(result, ['version', 'kind', 'recoveryId', 'originalIntentSha256', 'outcome', 'receipt', 'failure', 'qualification', 'completedAt']);
+      const stopped = canonicalInstant(result.completedAt), failure = result.failure, diagnostics = failure?.diagnostics;
+      closed(failure, ['code', 'armCode', 'httpStatus', 'bridgeCode', 'diagnostics']);
+      if (result.version !== 1 || result.kind !== 'private-link-public-cleanup-recovery' ||
+          result.recoveryId !== binding.recoveryId || result.originalIntentSha256 !== hash(window) ||
+          result.outcome !== 'held-public-control-state-unproven' || result.receipt !== null || result.qualification !== false ||
+          result.failure?.code !== 'ARM_OPERATION_FAILED' || result.failure?.httpStatus !== 404 || result.failure.armCode !== 'ContainerAppNotFound' ||
+          stopped < deletionAt || stopped > at || stopped > canonicalInstant(reconciliation.state.observedAt) ||
+          stopped > canonicalInstant(reconciliation.observedAt) ||
+          diagnostics?.step !== 'arm.get' || diagnostics.kind !== 'http-error' ||
+          !Number.isFinite(diagnostics.configuredTimeoutMs) || diagnostics.configuredTimeoutMs <= 0 ||
+          diagnostics.configuredTimeoutMs > PRIVATE_RUNTIME_LIMITS.armRequestMs ||
+          !Number.isFinite(diagnostics.elapsedMs) || diagnostics.elapsedMs < 0 ||
+          diagnostics.elapsedMs > diagnostics.configuredTimeoutMs || diagnostics.killed !== false ||
+          diagnostics.timeoutObserved !== false || diagnostics.signal !== null || failure.bridgeCode !== null ||
+          !Number.isInteger(diagnostics.processCode) || diagnostics.processCode <= 0) fail('PRIVATE_CLEANED_HELD_RESULT_CHANGED');
+      closed(diagnostics, ['step', 'kind', 'configuredTimeoutMs', 'elapsedMs', 'killed', 'timeoutObserved', 'processCode', 'signal']);
+      const terminalAt = verifyDeleteTerminal(c, original, cleanup);
+      const observedAt = canonicalInstant(reconciliation.observedAt);
+      if (reconciliation.version !== 1 || reconciliation.kind !== 'private-link-public-control-reconciliation' ||
+          !uuid(reconciliation.reconciliationId) || reconciliation.absent !== true || reconciliation.qualified !== false ||
+          reconciliation.originalHistoryModified !== false || reconciliation.state.app !== null ||
+          queueArmInstant(reconciliation.state.observedAt) < terminalAt ||
+          canonicalInstant(reconciliation.state.observedAt) > observedAt || observedAt > at ||
+          canonicalInstant(cleanup.terminalActivity.end) > at) fail('PRIVATE_CLEANED_ABSENCE_REQUIRED');
+      const parent = cleanup.parentAbsenceObservation;
+      closed(parent, ['version', 'kind', 'startedAt', 'completedAt', 'appId', 'environmentId', 'before', 'after', 'app',
+        'apps', 'resources', 'absenceObserved', 'protocolRecoveryQualified', 'originalWindowQualified', 'resourceWrites']);
+      if (parent.version !== 1 || parent.kind !== 'parent-readonly-public-control-observation' ||
+          parent.appId !== original.publicTarget.appId || parent.environmentId !== original.publicTarget.environmentId ||
+          parent.absenceObserved !== true || parent.protocolRecoveryQualified !== false ||
+          parent.originalWindowQualified !== false || parent.resourceWrites !== 0 ||
+          canonicalInstant(parent.startedAt) > canonicalInstant(parent.completedAt) || canonicalInstant(parent.completedAt) > at ||
+          queueArmInstant(parent.startedAt) < terminalAt) fail('PRIVATE_CLEANED_PARENT_ABSENCE_CHANGED');
+      equal(parent.app, { value: null, error: null }, 'PRIVATE_CLEANED_PARENT_ABSENCE_CHANGED');
+      for (const env of [parent.before, parent.after]) {
+        if (!sameId(env?.id, parent.environmentId) || env.properties?.provisioningState !== 'Succeeded') fail('PRIVATE_CLEANED_PARENT_CHANGED');
+      }
+      equal(executionIdentity(parent.before, 'Microsoft.App/managedEnvironments'),
+        executionIdentity(parent.after, 'Microsoft.App/managedEnvironments'), 'PRIVATE_CLEANED_PARENT_CHANGED');
+      equal(executionIdentity(parent.before, 'Microsoft.App/managedEnvironments'),
+        executionIdentity(evidence.records.at(-1).after.resources[parent.environmentId], 'Microsoft.App/managedEnvironments'),
+        'PRIVATE_CLEANED_PARENT_CHANGED');
+      for (const inventory of [parent.apps, parent.resources]) {
+        if (!Array.isArray(inventory?.value) || inventory.nextLink || inventory.value.some(app => sameId(app.id, parent.appId))) fail('PRIVATE_CLEANED_PARENT_ABSENCE_CHANGED');
+      }
+      const receiver = parent.apps.value.find(app => sameId(app.id, original.target.appId));
+      if (!receiver) fail('PRIVATE_CLEANED_CURRENT_RECEIVER_REQUIRED');
+      verifyPrivateLinkApp(c, original.target, original.candidate, receiver, original.disable.observation.identities, 'false');
+      equal(privateRuntimeIncarnation(receiver), window.incarnation, 'PRIVATE_CLEANED_GENERATION_CHANGED');
+      return { physicalKey: window.physicalKey, originalResultSha256: hash(original), cleanupSha256: hash(cleanup) };
+    });
+  if (scope?.immutable.has(original) && scope.immutable.has(cleanup)) {
+    scope.cleanedWindows ??= new WeakMap();
+    scope.cleanedWindows.set(original, { c, context, evidence, cleanup, result });
+  }
+  return result;
+}
+function cleanedSuccessorBinding(c, context, evidence, candidate, disabled, instanceId, transport, runtimeReview, value) {
+  const selection = value.binding;
+  for (const key of ['cleanupRecoveryId', 'publicReconciliationId', 'terminalObservationId', 'parentAbsenceObservationId']) {
+    if (!uuid(selection?.[key])) fail('PRIVATE_CLEANED_ARTIFACT_IDS_REQUIRED');
+  }
+  if (selection.cleanupRecoveryId !== value.cleanup.preparation.binding.recoveryId ||
+      selection.publicReconciliationId !== value.cleanup.reconciliation.reconciliationId) fail('PRIVATE_CLEANED_ARTIFACT_IDS_CHANGED');
+  return { version: 1, action: cleanedSuccessorAction, ordinal: 2, configSha256: hash(c), contextSha256: hash(context),
+    cleanupRecoveryId: selection.cleanupRecoveryId, publicReconciliationId: selection.publicReconciliationId,
+    terminalObservationId: selection.terminalObservationId, parentAbsenceObservationId: selection.parentAbsenceObservationId,
+    controlEvidenceSha256: hash(evidence), originalResultSha256: hash(value.original), originalIntentSha256: hash(value.original.intent),
+    ancestorSha256: hash(privateWindowFence(value.original.intent.continuation.original.intent)),
+    firstSuccessorSha256: hash(firstWindowSuccessor(value.original)), cleanupSha256: hash(value.cleanup),
+    decisionSha256: hash(value.decision), originalDirectory: value.originalDirectory, physicalKey: value.original.intent.physicalKey,
+    windowBindingSha256: hash(windowBinding(c, context, evidence, candidate, disabled, instanceId, transport, runtimeReview)),
+    sourceSha256: runtimeReview.costReview.sourceSha256, observationSha256: hash(value.observation) };
+}
+function verifyCleanedObservation(c, context, evidence, original, observation, source, at) {
+  verifyContinuationObservation(c, context, evidence, original, observation, source, at, true);
+}
+function verifyCleanedSuccessor(c, context, evidence, candidate, disabled, instanceId, transport, runtimeReview, value, at, reviewed) {
+  closed(value, ['version', 'kind', 'ordinal', 'original', 'originalDirectory', 'cleanup', 'decision', 'observation', 'binding',
+    ...(reviewed ? ['successorApproval', 'admission'] : [])]);
+  if (value.version !== 1 || value.kind !== cleanedSuccessorKind || value.ordinal !== 2 ||
+      !runtimeReview?.publishedScanReview || !uuid(instanceId) ||
+      [value.original?.binding?.instanceId, value.original?.intent?.continuation?.original?.binding?.instanceId].includes(instanceId)) fail('PRIVATE_CLEANED_SUCCESSOR_REQUIRED');
+  originalWindowDirectory(value.originalDirectory);
+  verifyCleanedDecision(value.decision, value.originalDirectory);
+  verifyCleanedPrivateLinkWindow(c, context, evidence, value.original, value.cleanup, at);
+  equal(candidate, value.original.candidate, 'PRIVATE_WINDOW_CONTINUATION_IMAGE_CHANGED');
+  equal(disabled, value.original.disabled, 'PRIVATE_WINDOW_CONTINUATION_RECEIVER_CHANGED');
+  const source = verifyRuntimeReview(c, context, runtimeReview, at);
+  const binding = cleanedSuccessorBinding(c, context, evidence, candidate, disabled, instanceId, transport, runtimeReview, value);
+  equal(value.binding, binding, 'PRIVATE_CLEANED_SUCCESSOR_BINDING');
+  verifyCleanedObservation(c, context, evidence, value.original, value.observation, source, canonicalInstant(value.observation.completedAt));
+  if (canonicalInstant(value.observation.startedAt) < Math.max(canonicalInstant(value.cleanup.reconciliation.observedAt),
+    canonicalInstant(value.cleanup.terminalActivity.end))) fail('PRIVATE_CLEANED_OBSERVATION_TIME');
+  if (reviewed) {
+    review(value.successorApproval, cleanedSuccessorAction, binding, at);
+    equal({ commitSha: value.successorApproval.policyCommitSha, sourceSha256: value.successorApproval.sourceSha256 },
+      runtimeReview.publishedScanReview.publication, 'PRIVATE_CLEANED_SUCCESSOR_SOURCE');
+    if (canonicalInstant(value.successorApproval.approvedAt) < canonicalInstant(value.observation.completedAt) ||
+        canonicalInstant(value.admission.startedAt) < canonicalInstant(value.successorApproval.approvedAt)) fail('PRIVATE_CLEANED_OBSERVATION_TIME');
+    verifyCleanedObservation(c, context, evidence, value.original, value.admission, source, at);
+  }
+  return binding;
+}
 function verifyWindowContinuation(c, context, evidence, candidate, disabled, instanceId, transport, runtimeReview, value, at, reviewed = true) {
+  if (value?.kind === cleanedSuccessorKind) return verifyCleanedSuccessor(c, context, evidence, candidate, disabled, instanceId, transport, runtimeReview, value, at, reviewed);
   closed(value, ['version', 'kind', 'original', 'originalDirectory', 'observation', 'binding',
     ...(reviewed ? ['approval', 'admission'] : [])]);
   if (value.version !== 1 || value.kind !== 'reviewed-private-link-never-enabled-continuation' ||
@@ -1521,6 +1979,43 @@ async function readOriginalWindow(io, originalDirectory) {
   await assertWindowHead(io, record.intent);
   return record;
 }
+async function readCleanedOriginal(io, selection, check) {
+    const { originalDirectory } = selection;
+    originalWindowDirectory(originalDirectory);
+    for (const key of ['cleanupRecoveryId', 'publicReconciliationId', 'terminalObservationId', 'parentAbsenceObservationId']) {
+      if (!uuid(selection[key])) fail('PRIVATE_CLEANED_ARTIFACT_IDS_REQUIRED');
+    }
+    const read = async (directory, name) => { const value = await io.loadOriginal(directory, name); check(); return value; };
+    const original = await read(originalDirectory, 'private-window-result.json');
+    equal(await read(originalDirectory, 'private-window-intent.json'), original?.intent, 'PRIVATE_WINDOW_ORIGINAL_INTENT_REQUIRED');
+    equal(await read(originalDirectory, 'private-disable-intent.json'), original?.disable?.intent, 'PRIVATE_WINDOW_ORIGINAL_FALSE_REQUIRED');
+    equal(await read(originalDirectory, 'private-disable-receipt.json'), original?.disable, 'PRIVATE_WINDOW_ORIGINAL_FALSE_REQUIRED');
+    if (original?.intent?.version !== 5 || original.intent.continuation?.original?.intent?.version !== 3) fail('PRIVATE_CLEANED_FAILURE_SCOPE');
+    for (const name of ['private-enable-intent.json', 'private-public-create-receipt.json']) {
+      if (await read(originalDirectory, name) !== null) fail('PRIVATE_CLEANED_FAILURE_SCOPE');
+    }
+    const prefix = `private-public-recovery-${selection.cleanupRecoveryId}`;
+    const cleanup = {
+      preparation: await read(originalDirectory, `${prefix}-preparation.json`),
+      deleteIntent: await read(originalDirectory, `${prefix}-intent.json`),
+      result: await read(originalDirectory, `${prefix}-result.json`),
+      reconciliation: await read(originalDirectory, `private-public-reconciliation-${selection.publicReconciliationId}.json`),
+      terminalActivity: await read(originalDirectory, `parent-cleaned-window-observation-${selection.terminalObservationId}.json`),
+      parentAbsenceObservation: await read(originalDirectory, `parent-public-absence-${selection.parentAbsenceObservationId}.json`),
+    };
+    equal(await read(originalDirectory, 'private-public-create-intent.json'), cleanup.reconciliation?.state?.intent, 'PRIVATE_CLEANED_CREATE_FILE_CHANGED');
+    const first = original.intent.continuation;
+    equal(await read(first.originalDirectory, 'private-window-result.json'), first.original, 'PRIVATE_WINDOW_ORIGINAL_RESULT_CHANGED');
+    equal(await read(first.originalDirectory, 'private-window-intent.json'), first.original.intent, 'PRIVATE_WINDOW_ORIGINAL_INTENT_REQUIRED');
+    equal(await read(first.originalDirectory, 'private-disable-receipt.json'), first.original.disable, 'PRIVATE_WINDOW_ORIGINAL_FALSE_REQUIRED');
+    equal(await read(first.originalDirectory, 'private-disable-intent.json'), first.original.disable.intent, 'PRIVATE_WINDOW_ORIGINAL_FALSE_REQUIRED');
+    for (const name of ['private-enable-intent.json', 'private-public-create-intent.json']) {
+      if (await read(first.originalDirectory, name) !== null) fail('PRIVATE_NEVER_ENABLED_REQUIRED');
+    }
+    await assertWindowHead(io, original.intent); check();
+    return { original, cleanup };
+  
+}
 async function observeWindowContinuation(c, context, evidence, original, io, cap, guard) {
   const startedAt = iso(io.now()), until = stageDeadline(io, cap);
   guard();
@@ -1538,6 +2033,67 @@ async function observeWindowContinuation(c, context, evidence, original, io, cap
     () => { guard(); deadline(io.now, until); }, Math.min(until, io.now() + 1000));
   guard(); deadline(io.now, until); await assertWindowHead(io, original.intent);
   return { current, receiver, response, publicApp, enableDeployment, publicDeployment, startedAt, completedAt: iso(io.now()) };
+}
+async function observeCleanedSuccessor(c, context, evidence, original, io, cap, guard) {
+  const startedAt = iso(io.now()), until = stageDeadline(io, cap);
+  guard();
+  for (const approval of Object.values(original.approvals)) { await io.published(approval, true); guard(); }
+  await io.verifySource(original.candidate); guard();
+  const current = await io.current(until); guard();
+  const receiver = await io.observe(original.target, until); guard();
+  verifyObservation(c, original.target, original.candidate, receiver, 'false');
+  equal(privateRuntimeIncarnation(receiver.app), original.intent.incarnation, 'PRIVATE_CLEANED_GENERATION_CHANGED');
+  const publicApp = await io.read(original.publicTarget.appId, appApi, until); guard();
+  const enableDeployment = await io.read(original.phases.enable.request.id, '2022-09-01', until); guard();
+  const earlierEnableDeployment = await io.read(original.intent.continuation.original.phases.enable.request.id, '2022-09-01', until); guard();
+  if (publicApp !== null || enableDeployment !== null || earlierEnableDeployment !== null) fail('PRIVATE_CLEANED_ENABLE_DEPLOYMENT_PRESENT');
+  const response = await io.http(original.target.fqdn, 'POST', '/v1/events', SYNTHETIC_FIXTURES[0],
+    () => { guard(); deadline(io.now, until); }, Math.min(until, io.now() + 1000));
+  guard(); deadline(io.now, until); await assertWindowHead(io, original.intent); guard();
+  return { current, receiver, response, publicApp, enableDeployment, earlierEnableDeployment, startedAt, completedAt: iso(io.now()) };
+}
+export async function prepareCleanedPrivateLinkWindowSuccessor(c, context, evidence, candidate, disabled, instanceId, transport,
+  selection, directory, options = {}) {
+  closed(selection, ['originalDirectory', 'cleanupRecoveryId', 'publicReconciliationId', 'terminalObservationId', 'parentAbsenceObservationId']);
+  const scanCheck = windowScanInputCheck(options);
+  if (!options.runtimeReview?.publishedScanReview || resolve(selection.originalDirectory) === resolve(directory)) fail('PRIVATE_CLEANED_SUCCESSOR_REQUIRED');
+  const originalInputs = { c, context, evidence, candidate, disabled, instanceId, transport, selection };
+  const unchanged = runtimeInputCheck(originalInputs, privateLinkValidationCopy(originalInputs));
+  const check = () => { scanCheck(); unchanged(); };
+  return withPublishedScan(c, context, evidence, candidate, disabled, options.publishedScanAttestation,
+    options.runtimeReview.publishedScanReview, (options.now ?? options.io?.now ?? Date.now)(), async () => {
+      const io = options.io ?? await privateLinkRuntimeIO(c, context, evidence, directory, options);
+      const decision = await io.load('private-cleaned-window-user-decision.json'); check();
+      verifyCleanedDecision(decision, selection.originalDirectory);
+      const initial = await readCleanedOriginal(io, selection, check);
+      return io.withWindowAdmission(initial.original.intent, async () => {
+        const runtimeReview = options.runtimeReview, cap = canonicalInstant(runtimeReview.costReview.expiresAt);
+        let historicalCheck = () => {};
+        const guard = () => { check(); historicalCheck(); verifyRuntimeReview(c, context, runtimeReview, io.now()); freshImage(c, candidate, io.now());
+          if (options.cancelled?.()) fail('PRIVATE_RUNTIME_CANCELLED'); };
+        io.verifyPrerequisites();
+        const borrowed = { ...await readCleanedOriginal(io, selection, guard), decision };
+        const retained = privateLinkValidationCopy(borrowed), { original, cleanup } = retained;
+        historicalCheck = runtimeInputCheck(borrowed, retained);
+        verifyCleanedPrivateLinkWindow(c, context, evidence, original, cleanup, io.now());
+        equal(candidate, original.candidate, 'PRIVATE_WINDOW_CONTINUATION_IMAGE_CHANGED');
+        equal(disabled, original.disabled, 'PRIVATE_WINDOW_CONTINUATION_RECEIVER_CHANGED');
+        if (!uuid(instanceId) || [original.binding.instanceId, original.intent.continuation.original.binding.instanceId].includes(instanceId)) fail('PRIVATE_WINDOW_NEW_INSTANCE_REQUIRED');
+        const observation = await observeCleanedSuccessor(c, context, evidence, original, io, cap, guard);
+        equal(await readCleanedOriginal(io, selection, guard), { original, cleanup }, 'PRIVATE_CLEANED_ORIGINAL_CHANGED');
+        equal(await io.load('private-cleaned-window-user-decision.json'), retained.decision, 'PRIVATE_CLEANED_SUCCESSOR_DECISION_REQUIRED');
+        const continuation = { version: 1, kind: cleanedSuccessorKind, ordinal: 2, original, originalDirectory: selection.originalDirectory,
+          cleanup, decision: retained.decision, observation, binding: selection };
+        continuation.binding = cleanedSuccessorBinding(c, context, evidence, candidate, disabled, instanceId, transport, runtimeReview, continuation);
+        verifyCleanedSuccessor(c, context, evidence, candidate, disabled, instanceId, transport, runtimeReview, continuation, io.now(), false);
+        const prepared = { version: 1, kind: 'private-link-cleaned-window-successor-preparation', continuation,
+          binding: windowBinding(c, context, evidence, candidate, disabled, instanceId, transport, runtimeReview, continuation),
+          successorBinding: continuation.binding, approvalAction: cleanedSuccessorAction, executionAuthorized: false,
+          publishedScanAttestation: selectedPublishedScan(c, context, candidate, runtimeReview.publishedScanReview).facts };
+        guard(); await io.immutable('private-cleaned-window-successor-preparation.json', prepared); guard();
+        return prepared;
+      });
+    }, check);
 }
 export async function preparePrivateLinkWindowContinuation(c, context, evidence, candidate, disabled, instanceId, transport,
   originalDirectory, directory, options = {}) {
@@ -1896,13 +2452,22 @@ async function qualifyWindow(c, context, evidence, candidate, disabled, instance
   const target = privateLinkRuntimeTarget(c, context, candidate, prerequisites, options.runtimeReview ?? null, evidence);
   equal(target, disabled.target, 'PRIVATE_RUNTIME_TARGET_CHANGED');
   let continuation = options.continuation ?? null;
+  const cleaned = continuation?.kind === cleanedSuccessorKind;
+  const continuationReview = () => cleaned ? continuation.successorApproval : continuation.approval;
+  const reviewAction = cleaned ? cleanedSuccessorAction : continuationAction;
+  const verifyOriginal = async value => {
+    if (!cleaned) return equal(await readOriginalWindow(io, value.originalDirectory), value.original, 'PRIVATE_WINDOW_ORIGINAL_RESULT_CHANGED');
+    const current = await readCleanedOriginal(io, { ...value.binding, originalDirectory: value.originalDirectory }, options.operationCheck);
+    equal(current, { original: value.original, cleanup: value.cleanup }, 'PRIVATE_CLEANED_ORIGINAL_CHANGED');
+    equal(await io.load('private-cleaned-window-user-decision.json'), value.decision, 'PRIVATE_CLEANED_SUCCESSOR_DECISION_REQUIRED');
+  };
   if (continuation) {
     if (resolve(continuation.originalDirectory) === resolve(directory)) fail('PRIVATE_WINDOW_NEW_DIRECTORY_REQUIRED');
-    const { approval, ...facts } = continuation;
+    const { approval, successorApproval, ...facts } = continuation;
     verifyWindowContinuation(c, context, evidence, candidate, disabled, instanceId, transport, options.runtimeReview, facts, io.now(), false);
-    review(approval, continuationAction, facts.binding, io.now());
-    equal(await readOriginalWindow(io, facts.originalDirectory), facts.original, 'PRIVATE_WINDOW_ORIGINAL_RESULT_CHANGED');
-    await io.published(approval);
+    review(continuationReview(), reviewAction, facts.binding, io.now());
+    await verifyOriginal(facts);
+    await io.published(continuationReview());
   }
   const binding = windowBinding(c, context, evidence, candidate, disabled, instanceId, transport, options.runtimeReview ?? null, continuation);
   closed(approvals, ['enable', 'disable', 'publicCreate', 'publicDelete']);
@@ -1917,7 +2482,7 @@ async function qualifyWindow(c, context, evidence, candidate, disabled, instance
   const reviewed = () => {
     options.operationCheck();
     if (options.cancelled?.()) fail('PRIVATE_RUNTIME_CANCELLED');
-    if (continuation) review(continuation.approval, continuationAction, continuation.binding, io.now());
+    if (continuation) review(continuationReview(), reviewAction, continuation.binding, io.now());
     review(approvals.enable, 'private-link-bounded-enable', binding, io.now());
     review(approvals.disable, 'private-link-false-only-disable', binding, io.now());
     freshImage(c, candidate, io.now());
@@ -1932,12 +2497,12 @@ async function qualifyWindow(c, context, evidence, candidate, disabled, instance
   verifyPrivateRuntimePreview(target, phases.enable, preview, initial.app, current.preservedResourceIds,
     { c, candidate, identities: initial.identities });
   if (continuation) {
-    const admission = await observeWindowContinuation(c, context, evidence, continuation.original, io, approvalCap, reviewed);
+    const admission = await (cleaned ? observeCleanedSuccessor : observeWindowContinuation)(c, context, evidence, continuation.original, io, approvalCap, reviewed);
     continuation = { ...continuation, admission };
     verifyWindowContinuation(c, context, evidence, candidate, disabled, instanceId, transport, options.runtimeReview, continuation, io.now());
-    equal(await readOriginalWindow(io, continuation.originalDirectory), continuation.original, 'PRIVATE_WINDOW_ORIGINAL_RESULT_CHANGED');
-    await io.published(continuation.approval); reviewed();
-    await io.immutable('private-window-continuation-admission.json', admission);
+    await verifyOriginal(continuation);
+    await io.published(continuationReview()); reviewed();
+    await io.immutable(cleaned ? 'private-cleaned-window-successor-admission.json' : 'private-window-continuation-admission.json', admission);
   }
   const disableBody = structuredClone(phases.disable.request);
   const publicTarget = publicControlTarget(c, target, context, evidence);
@@ -1950,7 +2515,7 @@ async function qualifyWindow(c, context, evidence, candidate, disabled, instance
     publicControl: null, publicCleanup: null,
     outcome: 'in-progress', terminalFalse: false, terminal503: false, enabledWindowExceeded: false, publicLifetimeExceeded: false, completedAt: null };
   const incarnation = privateRuntimeIncarnation(initial.app);
-  const intent = { version: options.publishedScanAttestation ? 5 : continuation ? 4 : 3, kind: 'private-link-window-intent', contextSha256: hash(context), binding, approvals, phases,
+  const intent = { version: cleaned ? 6 : options.publishedScanAttestation ? 5 : continuation ? 4 : 3, kind: 'private-link-window-intent', contextSha256: hash(context), binding, approvals, phases,
     disabled, candidate, controlEvidence: evidence, transport, target, publicTarget, incarnation,
     physicalKey: hash({ appId: incarnation.appId, createdAt: incarnation.createdAt }), intentAt: iso(io.now()),
     rollbackRequest: disableBody,
@@ -1968,7 +2533,7 @@ async function qualifyWindow(c, context, evidence, candidate, disabled, instance
   const active = () => {
     options.operationCheck();
     if (options.cancelled?.()) fail('PRIVATE_RUNTIME_CANCELLED');
-    if (continuation) review(continuation.approval, continuationAction, continuation.binding, io.now());
+    if (continuation) review(continuationReview(), reviewAction, continuation.binding, io.now());
     deadline(io.now, workUntil);
     freshImage(c, candidate, io.now());
     review(approvals.enable, 'private-link-bounded-enable', binding, io.now());
@@ -2010,7 +2575,8 @@ async function qualifyWindow(c, context, evidence, candidate, disabled, instance
       await persist();
       return effectUntil;
     });
-    const enabled = await ready(c, target, candidate, io, 'true', effectUntil);
+    const enabled = await ready(c, target, candidate, io, 'true', effectUntil, { intentSha256: hash(run.enableIntent),
+      request: phases.enable.request, incarnation: intent.incarnation });
     run.enabled = enabled; active();
     for (const fixture of SYNTHETIC_FIXTURES) {
       await io.current(Math.min(workUntil, io.now() + 120000)); await io.published(approvals.enable);
@@ -2078,7 +2644,7 @@ async function qualifyWindow(c, context, evidence, candidate, disabled, instance
 }
 
 export function verifyWindowIntent(c, context, evidence, intent) {
-  return immutableRuntimeFact('window-intent', intent, [c, context, evidence], () => intent?.version === 5 ?
+  return immutableRuntimeFact('window-intent', intent, [c, context, evidence], () => [5, 6].includes(intent?.version) ?
     withPublishedScan(c, context, evidence, intent.candidate, intent.disabled, intent.publishedScanAttestation,
       intent.binding?.runtimeReview?.publishedScanReview, canonicalInstant(intent.intentAt),
       () => verifyWindowIntentRecord(c, context, evidence, intent)) :
@@ -2088,17 +2654,18 @@ function verifyWindowIntentRecord(c, context, evidence, intent) {
   closed(intent, ['version', 'kind', 'contextSha256', 'binding', 'approvals', 'phases', 'disabled', 'candidate',
     'controlEvidence', 'transport', 'target', 'publicTarget', 'incarnation', 'physicalKey', 'intentAt', 'rollbackRequest',
     'publicPhase', 'publicCleanupRequest', 'outcome',
-    ...(intent?.version === 5 ? ['continuation', 'publishedScanAttestation'] : intent?.version === 4 ? ['continuation'] : [])]);
-  if (![3, 4, 5].includes(intent.version) || intent.kind !== 'private-link-window-intent' || intent.contextSha256 !== hash(context) ||
+    ...([5, 6].includes(intent?.version) ? ['continuation', 'publishedScanAttestation'] : intent?.version === 4 ? ['continuation'] : [])]);
+  if (![3, 4, 5, 6].includes(intent.version) || intent.kind !== 'private-link-window-intent' || intent.contextSha256 !== hash(context) ||
       intent.outcome !== 'probe-or-enable-possible-no-retry') fail('PRIVATE_WINDOW_INTENT_CHANGED');
   equal(intent.controlEvidence, evidence, 'PRIVATE_CONTROL_EVIDENCE_CHANGED');
   verifyDisabledReceiver(c, context, evidence, intent.candidate, intent.disabled);
   equal(intent.target, intent.disabled.target, 'PRIVATE_RUNTIME_TARGET_CHANGED');
   equal(intent.incarnation, privateRuntimeIncarnation(intent.disabled.observation.app), 'PRIVATE_WINDOW_INCARNATION_CHANGED');
   equal(intent.physicalKey, hash({ appId: intent.incarnation.appId, createdAt: intent.incarnation.createdAt }), 'PRIVATE_WINDOW_PHYSICAL_KEY_CHANGED');
-  if (intent.version === 5 && !intent.binding.runtimeReview?.publishedScanReview ||
-      intent.version !== 5 && intent.binding.runtimeReview?.publishedScanReview) fail('PRIVATE_PUBLISHED_SCAN_INTENT_REQUIRED');
-  if (intent.version === 4 || intent.version === 5 && intent.continuation !== null) verifyWindowContinuation(c, context, evidence, intent.candidate, intent.disabled,
+  if ([5, 6].includes(intent.version) && !intent.binding.runtimeReview?.publishedScanReview ||
+      ![5, 6].includes(intent.version) && intent.binding.runtimeReview?.publishedScanReview) fail('PRIVATE_PUBLISHED_SCAN_INTENT_REQUIRED');
+  if ((intent.version === 6) !== (intent.continuation?.kind === cleanedSuccessorKind)) fail('PRIVATE_CLEANED_SUCCESSOR_REQUIRED');
+  if (intent.version === 4 || [5, 6].includes(intent.version) && intent.continuation !== null) verifyWindowContinuation(c, context, evidence, intent.candidate, intent.disabled,
     intent.binding.instanceId, intent.transport, intent.binding.runtimeReview, intent.continuation, canonicalInstant(intent.intentAt));
   const binding = windowBinding(c, context, evidence, intent.candidate, intent.disabled, intent.binding.instanceId, intent.transport,
     intent.binding.runtimeReview ?? null, intent.continuation ?? null);
@@ -2148,7 +2715,8 @@ async function falseOnlyDisable(c, context, original, approval, binding, action,
     await io.immutable(`${prefix}-intent.json`, intent);
     return effectUntil;
   });
-  const terminal = await ready(c, target, candidate, io, 'false', effectUntil); guard();
+  const terminal = await ready(c, target, candidate, io, 'false', effectUntil, { intentSha256: hash(intent),
+    request: original.rollbackRequest, incarnation: original.incarnation }); guard();
   const oldTarget = oldPublicRuntimeTarget(c, { oldApp: context.origin.receiver.receipt.resources[ids(c).app],
     oldEnvironment: { id: ids(c).environment, properties: { vnetConfiguration: null } },
     oldReceiver: context.origin.receiver }, target);
@@ -2248,7 +2816,7 @@ export function verifyPrivateLinkRuntimeCompletion(c, context, record, at) {
   return { ...entry.result };
 }
 function verifyRuntimeCompletion(c, context, record, at) {
-  return record?.intent?.version === 5 ?
+  return [5, 6].includes(record?.intent?.version) ?
     withPublishedScan(c, context, record.controlEvidence, record.candidate, record.disabled, record.intent.publishedScanAttestation,
       record.binding?.runtimeReview?.publishedScanReview, canonicalInstant(record.intent.intentAt),
       () => verifyRuntimeCompletionRecord(c, context, record, at)) :
@@ -2450,10 +3018,12 @@ async function createPublicControl(c, window, io) {
     intent = { version: 1, kind: 'private-link-public-control-create-intent', windowIntentSha256: hash(window),
       phase, target, approval: approvals.publicCreate, binding, intentAt: iso(io.now()), effectDeadline: effectUntil, outcome: 'create-possible' };
     await io.immutable('private-public-create-intent.json', intent);
-    await io.reserve('public-probe', hash({ appId: target.appId.toLowerCase() }), { intentSha256: hash(intent), outcome: 'create-possible' });
+    if (window.version === 6) await io.reservePublicProbe(window, intent);
+    else await io.reserve('public-probe', hash({ appId: target.appId.toLowerCase() }), { intentSha256: hash(intent), outcome: 'create-possible' });
     return effectUntil;
   });
-  const observation = await ready(c, target, candidate, io, 'false', effectUntil); guard();
+  const observation = await ready(c, target, candidate, io, 'false', effectUntil, { intentSha256: hash(intent),
+    request: phase.request, incarnation: null, createIntent: intent }); guard();
   const record = { version: 1, kind: 'private-link-disabled-public-control', intent, observation, completedAt: iso(io.now()) };
   await io.immutable('private-public-create-receipt.json', record);
   return record;
@@ -2558,7 +3128,10 @@ async function cleanupPublicControl(c, window, approval, binding, action, prefix
     let absent = false;
     for (let count = 0; count < 40; count++) {
       deadline(io.now, effectUntil);
-      if (await io.read(window.publicTarget.appId, appApi, effectUntil) === null) { absent = true; break; }
+      const observed = io.observeDeletion ? await io.observeDeletion(window.publicTarget, deleteIntent, effectUntil) :
+        { state: 'observed', response: { state: 'observed', value: await io.read(window.publicTarget.appId, appApi, effectUntil) } };
+      if (observed.state === 'observed' && observed.response.state === 'observed' && observed.response.value === null) { absent = true; break; }
+      if (observed.state !== 'observed' && observed.state !== 'not-yet-confirmed') fail('PRIVATE_PUBLIC_ABSENCE_UNPROVEN');
       await io.sleep(Math.min(3000, Math.max(0, effectUntil - io.now())));
     }
     if (!absent) fail('PRIVATE_PUBLIC_ABSENCE_UNPROVEN');
@@ -2669,6 +3242,7 @@ export const PRIVATE_LINK_RUNTIME_OPERATIONS = Object.freeze([
   'prepare-disable-recovery', 'recover-disable', 'reconcile-receiver',
   'prepare-public-cleanup', 'recover-public-cleanup', 'reconcile-public-probe',
   'prepare-window-continuation', 'qualify-window-continuation',
+  'prepare-cleaned-window-successor', 'qualify-cleaned-window-successor',
 ]);
 export async function runPrivateLinkRuntime(c, context, evidence, operation, directoryArg, inputs, options = {}) {
   const inherited = publishedScanValidation.getStore();
@@ -2680,11 +3254,14 @@ export async function runPrivateLinkRuntime(c, context, evidence, operation, dir
   if (options.publishedScanAttestation !== undefined || options.publishedScanReview !== undefined) fail('PRIVATE_PUBLISHED_SCAN_TYPED_DATA_REQUIRED');
   const review = inputs?.runtimeReview?.publishedScanReview;
   const hasFacts = Object.hasOwn(inputs ?? {}, 'publishedScanAttestation');
-  if (inherited && ['prepare-window', 'prepare-window-continuation', 'qualify-window', 'qualify-window-continuation'].includes(operation) &&
+  if (inherited && ['prepare-window', 'prepare-window-continuation', 'qualify-window', 'qualify-window-continuation',
+    'prepare-cleaned-window-successor', 'qualify-cleaned-window-successor'].includes(operation) &&
       !review) fail('PRIVATE_PUBLISHED_SCAN_INPUT_SCOPE');
+  if (['prepare-cleaned-window-successor', 'qualify-cleaned-window-successor'].includes(operation) && !review) fail('PRIVATE_PUBLISHED_SCAN_INPUT_SCOPE');
   if (!review && !hasFacts) return runPrivateRuntimeOperation(c, context, evidence, operation, directoryArg, inputs, options);
-  const prepare = ['prepare-window', 'prepare-window-continuation'].includes(operation);
-  if (!['prepare-window', 'prepare-window-continuation', 'qualify-window', 'qualify-window-continuation'].includes(operation) ||
+  const prepare = ['prepare-window', 'prepare-window-continuation', 'prepare-cleaned-window-successor'].includes(operation);
+  if (!['prepare-window', 'prepare-window-continuation', 'qualify-window', 'qualify-window-continuation',
+    'prepare-cleaned-window-successor', 'qualify-cleaned-window-successor'].includes(operation) ||
       !review || prepare !== hasFacts) fail('PRIVATE_PUBLISHED_SCAN_INPUT_SCOPE');
   publishedScanReview(c, context, review, (options.now ?? options.io?.now ?? Date.now)());
   if (review.candidateSha256 !== hash(inputs.candidate) || review.controlEvidenceSha256 !== hash(evidence)) fail('PRIVATE_PUBLISHED_SCAN_FACTS_CHANGED');
@@ -2692,9 +3269,10 @@ export async function runPrivateLinkRuntime(c, context, evidence, operation, dir
   let facts = inputs.publishedScanAttestation;
   if (!prepare) {
     const directory = await privateDirectory(directoryArg);
-    const name = operation === 'qualify-window' ? 'private-window-preparation.json' : 'private-window-continuation-preparation.json';
+    const name = operation === 'qualify-cleaned-window-successor' ? 'private-cleaned-window-successor-preparation.json' :
+      operation === 'qualify-window' ? 'private-window-preparation.json' : 'private-window-continuation-preparation.json';
     const prepared = options.io ? await options.io.load(name) : await loadPrivateLinkArtifact(directory, name);
-    if (prepared?.version !== 2) fail('PRIVATE_PUBLISHED_SCAN_PREPARATION_REQUIRED');
+    if (prepared?.version !== (operation === 'qualify-cleaned-window-successor' ? 1 : 2)) fail('PRIVATE_PUBLISHED_SCAN_PREPARATION_REQUIRED');
     equal(prepared.binding.runtimeReview, inputs.runtimeReview, 'PRIVATE_PUBLISHED_SCAN_PREPARATION_CHANGED');
     facts = prepared.publishedScanAttestation;
   }
@@ -2708,7 +3286,7 @@ export async function runPrivateLinkRuntime(c, context, evidence, operation, dir
 async function runPrivateRuntimeOperation(c, context, evidence, operation, directoryArg, inputs, options) {
   if (!PRIVATE_LINK_RUNTIME_OPERATIONS.includes(operation)) fail('PRIVATE_RUNTIME_FIXED_OPERATION_REQUIRED');
   const forward = ['prepare-image', 'publish-image', 'prepare-receiver', 'create-receiver', 'prepare-window', 'qualify-window',
-    'prepare-window-continuation', 'qualify-window-continuation'].includes(operation);
+    'prepare-window-continuation', 'qualify-window-continuation', 'prepare-cleaned-window-successor', 'qualify-cleaned-window-successor'].includes(operation);
   let runtimeReview = null;
   if (Object.hasOwn(inputs ?? {}, 'runtimeReview')) {
     if (!forward || inputs.runtimeReview === null) fail('PRIVATE_RUNTIME_REVIEW_DATA_SCOPE');
@@ -2720,6 +3298,29 @@ async function runPrivateRuntimeOperation(c, context, evidence, operation, direc
       options.runtimeReview !== undefined && !isDeepStrictEqual(options.runtimeReview, runtimeReview)) fail('PRIVATE_RUNTIME_TYPED_REVIEW_DATA_REQUIRED');
   options = { ...options, runtimeReview };
   const directory = await privateDirectory(directoryArg);
+  if (operation === 'prepare-cleaned-window-successor') {
+    closed(inputs, ['candidate', 'disabled', 'instanceId', 'transport', 'originalDirectory', 'cleanupRecoveryId',
+      'publicReconciliationId', 'terminalObservationId', 'parentAbsenceObservationId']);
+    const { candidate, disabled, instanceId, transport, ...selection } = inputs;
+    return prepareCleanedPrivateLinkWindowSuccessor(c, context, evidence, candidate, disabled, instanceId, transport, selection, directory, options);
+  }
+  if (operation === 'qualify-cleaned-window-successor') {
+    closed(inputs, ['candidate', 'disabled', 'instanceId', 'transport', 'approvals', 'successorApproval']);
+    const prepared = options.io ? await options.io.load('private-cleaned-window-successor-preparation.json') :
+      await loadPrivateLinkArtifact(directory, 'private-cleaned-window-successor-preparation.json');
+    closed(prepared, ['version', 'kind', 'continuation', 'binding', 'successorBinding', 'approvalAction', 'executionAuthorized', 'publishedScanAttestation']);
+    if (prepared.version !== 1 || prepared.kind !== 'private-link-cleaned-window-successor-preparation' ||
+        prepared.executionAuthorized !== false || prepared.approvalAction !== cleanedSuccessorAction) fail('PRIVATE_CLEANED_SUCCESSOR_PREPARATION');
+    equal(prepared.successorBinding, prepared.continuation.binding, 'PRIVATE_CLEANED_SUCCESSOR_BINDING');
+    equal(prepared.publishedScanAttestation, options.publishedScanAttestation, 'PRIVATE_PUBLISHED_SCAN_PREPARATION_CHANGED');
+    equal(prepared.binding, windowBinding(c, context, evidence, inputs.candidate, inputs.disabled, inputs.instanceId,
+      inputs.transport, runtimeReview, prepared.continuation), 'PRIVATE_CLEANED_SUCCESSOR_BINDING');
+    const result = await qualifyPrivateLinkDelivery(c, context, evidence, inputs.candidate, inputs.disabled, inputs.instanceId,
+      inputs.approvals, inputs.transport, directory, { ...options,
+        continuation: { ...prepared.continuation, successorApproval: inputs.successorApproval } });
+    if (result.outcome !== 'qualified-private-delivery-disabled') fail('PRIVATE_RUNTIME_QUALIFICATION_HELD');
+    return result;
+  }
   if (operation === 'prepare-window-continuation') {
     closed(inputs, ['candidate', 'disabled', 'instanceId', 'transport', 'originalDirectory']);
     return preparePrivateLinkWindowContinuation(c, context, evidence, inputs.candidate, inputs.disabled,

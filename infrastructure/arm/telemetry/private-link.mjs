@@ -1,4 +1,5 @@
-import { isDeepStrictEqual } from 'node:util';
+import { isDeepStrictEqual, types } from 'node:util';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { BUDGET, budgetProperties, closed, digestJson, fail, ids, ownerTags, projectBudgetFilter, sameId, validateConfig } from './definition.mjs';
 import { durableQueueCost, QUEUE_PROFILE_KIND, QUEUE_RUNTIME, queueEnvironment, queueResources, verifyQueueTopology } from './durable-queue.mjs';
 import { verifyQueueAdoptionRecord } from './queue-adoption.mjs';
@@ -128,7 +129,20 @@ export const PRIVATE_LINK_LIMITS = Object.freeze({ commandMs: 15000, checkMs: 12
   pages: 32, items: 2048, bytes: 16 * 1024 * 1024, pollMs: 3000 });
 export const PRIVATE_LINK_BUDGETS = Object.freeze({ migration: { project: 425, telemetry: 375, state: 50 },
   steady: { project: 375, telemetry: 325, state: 50 } });
-const hash = digestJson;
+const maximumContextDigestBytes = 64 * 1024;
+const hash = value => {
+  const scope = immutableContextProofs.getStore();
+  const memo = scope?.active && scope.verified && value !== null && typeof value === 'object' &&
+    scope.members.has(value) ? scope.digests : null;
+  const prior = memo?.get(value);
+  if (prior !== undefined) return prior;
+  const result = digestJson(value);
+  if (memo && scope.digestBytes + result.length * 2 <= maximumContextDigestBytes) {
+    memo.set(value, result);
+    scope.digestBytes += result.length * 2;
+  }
+  return result;
+};
 const sha = value => typeof value === 'string' && /^[0-9a-f]{64}$/u.test(value);
 const equal = (actual, expected, code) => { if (!isDeepStrictEqual(actual, expected)) fail(code); };
 const networkReserved = ['169.254.0.0/16', '172.30.0.0/16', '172.31.0.0/16', '192.0.2.0/24',
@@ -436,6 +450,42 @@ export function buildPrivateLinkPlan(c, context, input, sourceSha256) {
 }
 // Only synchronous checks share this proof; its inputs are deeply immutable.
 let synchronousContextProof = null;
+const immutableContextProofs = new AsyncLocalStorage();
+export function withPrivateLinkImmutableControlValidation(c, context, use) {
+  const seen = new WeakSet();
+  const immutable = value => {
+    if (value === null || ['string', 'boolean'].includes(typeof value) ||
+        typeof value === 'number' && Number.isFinite(value)) return true;
+    if (typeof value !== 'object') return false;
+    if (seen.has(value)) return true;
+    if (types.isProxy(value) || !Object.isFrozen(value) ||
+        !Array.isArray(value) && ![Object.prototype, null].includes(Object.getPrototypeOf(value))) return false;
+    seen.add(value);
+    return Object.values(Object.getOwnPropertyDescriptors(value))
+      .every(descriptor => Object.hasOwn(descriptor, 'value') && immutable(descriptor.value));
+  };
+  if (!immutable(c) || !immutable(context)) fail('PRIVATE_LINK_IMMUTABLE_CONTEXT_REQUIRED');
+  const scope = { c, context, members: seen, active: true, verified: false, digests: new WeakMap(), digestBytes: 0 };
+  const close = () => { scope.active = false; scope.digests = null; scope.digestBytes = 0; };
+  try {
+    const result = immutableContextProofs.run(scope, use);
+    if (result && typeof result.then === 'function') return Promise.resolve(result).finally(close);
+    close(); return result;
+  } catch (error) { close(); throw error; }
+}
+function verifiedImmutableContext(c, context) {
+  const scope = immutableContextProofs.getStore();
+  if (!scope) return false;
+  if (!scope.active) fail('PRIVATE_LINK_CONTEXT_VALIDATION_SCOPE_CLOSED');
+  if (scope.c !== c || scope.context !== context) return false;
+  // Only this scope's private frozen pair can reuse its pure plan proof.
+  if (!scope.verified) {
+    closed(context, ['plan', 'origin']);
+    verifyPrivateLinkPlan(c, context.origin, context.plan, context.plan?.sourceSha256);
+    scope.verified = true;
+  }
+  return true;
+}
 function freezeContext(value) {
   if (value && typeof value === 'object') {
     Object.values(value).forEach(freezeContext); Object.freeze(value);
@@ -443,6 +493,11 @@ function freezeContext(value) {
   return value;
 }
 export function withPrivateLinkControlValidation(c, context, verify) {
+  if (verifiedImmutableContext(c, context)) {
+    const result = verify();
+    if (result && typeof result.then === 'function') fail('PRIVATE_LINK_SYNCHRONOUS_VALIDATION_REQUIRED');
+    return result;
+  }
   closed(context, ['plan', 'origin']);
   verifyPrivateLinkPlan(c, context.origin, context.plan, context.plan?.sourceSha256);
   const previous = synchronousContextProof;
@@ -454,6 +509,7 @@ export function withPrivateLinkControlValidation(c, context, verify) {
   } finally { synchronousContextProof = previous; }
 }
 export function verifyPrivateLinkControlContext(c, context) {
+  if (verifiedImmutableContext(c, context)) return context;
   if (synchronousContextProof?.c === c && synchronousContextProof.context === context) return context;
   closed(context, ['plan', 'origin']);
   verifyPrivateLinkPlan(c, context.origin, context.plan, context.plan?.sourceSha256);

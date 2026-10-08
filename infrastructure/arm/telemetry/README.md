@@ -17,6 +17,19 @@ CLI long-running poller. Requests remain at most 15 seconds within the same
 120-second phase-check deadline; response handles and full results stay private.
 The qualified local Azure CLI Python bridge is part of the source hash.
 
+## UAT deployment boundary
+
+MissionSpec itself is a local CLI/library, not a hosted application to deploy.
+The collector uses the explicit private subscription, resource-group, naming,
+region and budget configuration reviewed by its operator. The repository has
+no implicit dev, staging or UAT target, and these labels do not authorize reuse
+or duplication of an existing collector's resources or history.
+For a separate UAT collector, the deploying maintainer must establish that
+target and its independently reviewed configuration, costs and phase evidence.
+The cleaned-successor changes below affect the operator/runtime protocol, not
+the ARM resource templates; they do not require a new infrastructure topology
+or grant deployment authority.
+
 ## Private Link replacement
 
 The alternate Queue Private Link path has separate deterministic planning,
@@ -67,11 +80,27 @@ qualification requires a new readiness measurement under the retained review,
 a separate continuation approval and fresh native admission. One immutable
 successor preserves the original failed result and physical fence; this is not
 a retry of an unknown or previously enabled window.
+An attested first successor that created its public control but never enabled
+delivery may use `prepare-private-link-cleaned-window-successor` and
+`qualify-private-link-cleaned-window-successor`, also under `private-link-runtime`.
+This requires complete generation-bound cleanup, terminal native delete
+evidence, strict absence, an explicit one-additional decision and a fifth
+approval. Its version-6 ordinal-2 intent preserves the full failed version-5
+history, both prior window fences and the original public reservation.
+A separate append-only public reservation admits this successor only; no third
+successor, fence reset, receiver recreation or unknown-write replay is allowed.
+Preparation remains non-authorizing and fresh admission is independent.
 An already-published image can use a separately reviewed, genuinely new
 scan attestation for window preparation/qualification without replacing its
 candidate or publication profile. Full facts are retained once in the
 version-5 intent; the new review cannot authorize image publication or receiver
 creation, and historical cleanup remains independent of current scan expiry.
+New-create readiness retains raw and partial observations before validation
+failure and checks the exact admitted deployment/Create operations. Configured
+target drift still fails without FQDN normalization or broad retry.
+After an admitted public DELETE, exact `ContainerAppNotFound` observations may
+be polled only as unconfirmed under the original deadline; later strict absence
+is necessary, and the DELETE is never repeated.
 Neither a local plan nor a successful setup stage authorizes runtime work.
 Effects require exact reviewed bindings, published source, fresh evidence,
 durable physical-target intent fencing and retained outcomes. Unknown

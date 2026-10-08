@@ -286,6 +286,25 @@ proof of one byte-identical cross-platform archive. Future candidates must run
 the same checks again. Other architectures remain untested; installed package,
 source-checkout execution and native AI-host qualification remain distinct.
 
+## UAT maintainer handoff
+
+UAT deployment is a maintainer action, separate from the repository merge.
+For local CLI UAT, use the bounded install procedure above on the exact accepted
+candidate; a successful source build alone is not an installed-package check.
+The normal CLI must continue to report no configured production telemetry
+endpoint, and native autonomous execution must remain disabled unless its
+independent host qualification is established.
+
+The cleaned-successor changes update the reviewed collector operator protocol,
+not its ARM topology. They do not require new resource templates or define dev,
+staging or UAT resource aliases. Any separate UAT collector needs an explicit
+private target configuration and its own cost, source, current-state and phase
+approvals. Do not deploy the existing migration's intents or copy its authority
+to another environment. Follow the [operator procedure](telemetry-operator.md);
+an install smoke must never enable a collector or send events to Azure.
+The source checkout's `infrastructure/arm/telemetry/README.md` documents the
+collector UAT boundary; infrastructure is deliberately not packaged with the CLI.
+
 ## Remaining maintainer gates
 
 | Gate | Current boundary and required decision |
@@ -294,7 +313,7 @@ source-checkout execution and native AI-host qualification remain distinct.
 | Release metadata and authority | Select a version, release/tag policy, distribution/access policy and supported platform matrix explicitly. Review corresponding manifest/check changes in a PR; keep `private: true` and `0.0.0` until that decision. Publication, tags and pushes require separate authority. |
 | Final candidate qualification | Rerun the normal repository/license checks and explicit offline install on the exact candidate. Qualify every advertised OS/architecture, native-addon load and package-manager executable surface, including Windows shims. A local macOS pass and earlier hosted source checks are not interchangeable. |
 | Native hosts and billing | Claude Code and Codex live pilots are deferred. Copilot default-model/zero-extra-charge evidence remains unresolved. No paid model calls are admitted by this checklist. Rendered skills and installed package smoke do not qualify live hosts or enable autonomous execution. |
-| Telemetry operations | Normal CLI composition has no production endpoint. Enforced NSP and bounded live qualification are selected, but control-plane deployment and actual delivery remain unqualified until separately reviewed operator execution succeeds. The created queue storage's original failed qualification is preserved. Do not weaken inherited policy or probe endpoints as an install test. |
+| Telemetry operations | Normal CLI composition has no production endpoint. The replacement Queue Private Link control-plane path is implemented; actual private delivery, bounded runtime qualification and ordered retirement remain separate operator gates. Historical failed windows and cleanup outcomes stay immutable. Do not weaken inherited policy or probe endpoints as an install test. |
 | Claims and provenance | Review the final archive and retained CLI notices, state tested platforms and remaining limitations, and keep the operator/service closure separate. Liftoff package-manager migration, Mission Context implementation and Artifact Server remain out of scope. |
 
 See [maintainer setup](maintainer-setup.md) for hosted controls and authority,
