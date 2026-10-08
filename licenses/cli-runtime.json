@@ -4,7 +4,7 @@
   "packageName": "@msn-control/missionspec",
   "packageVersion": "0.0.0",
   "lockfile": "package-lock.json",
-  "lockfileDataSha256": "d610499273c8f01cb1478e2e7a57ab1d7c5f0432a4c0ee6c17c79aae651a38f8",
+  "lockfileDataSha256": "bd7c9949036fa54a97cb3a3a67c2b04a4bffeed3c83e26844bb030420c2173dd",
   "selection": "Complete locked runtime dependency/optional/peer closure; not a bundle or reachability analysis of executable code.",
   "provenanceLimit": "Tarball integrity is recorded from the lockfile; trust restoration via npm ci. This check does not independently authenticate installed source bytes.",
   "directDependencies": {
@@ -42,9 +42,9 @@
     {
       "location": "node_modules/@modelcontextprotocol/sdk",
       "name": "@modelcontextprotocol/sdk",
-      "version": "1.30.0",
-      "resolved": "https://registry.npmjs.org/@modelcontextprotocol/sdk/-/sdk-1.30.0.tgz",
-      "integrity": "sha512-xKd8OIzlqNzcqcNumGAa6g+PW2kjD5vrpcKOnfldAUPP3j7lnqMPwlTXQm8gF+UwH72z0lqaRbjr9hqGz0eITA==",
+      "version": "1.31.0",
+      "resolved": "https://registry.npmjs.org/@modelcontextprotocol/sdk/-/sdk-1.31.0.tgz",
+      "integrity": "sha512-UvTMgnNlnIBO/22ob2RcVGDlcvOslQs8T59+FTGdA0L27a39fdGF/EDETNtDVK4DZGpwomlsYpRdA8UXcVL/pw==",
       "relationship": "direct",
       "alsoDirectDevelopmentDependency": false,
       "licenseExpression": "MIT",

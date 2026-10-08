@@ -46,7 +46,7 @@
     "check": "npm test && npm run check:architecture && npm run check:repository && node scripts/check-package.mjs && npm run check:licenses"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.30.0",
+    "@modelcontextprotocol/sdk": "1.31.0",
     "ajv": "8.20.0",
     "fs-native-extensions": "1.5.1",
     "mdast-util-from-markdown": "2.0.3",

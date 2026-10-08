@@ -40,10 +40,10 @@ SOFTWARE.
 --- End LICENSE ---
 
 ================================================================================
-@modelcontextprotocol/sdk@1.30.0
+@modelcontextprotocol/sdk@1.31.0
 Locked location: node_modules/@modelcontextprotocol/sdk
-Source: https://registry.npmjs.org/@modelcontextprotocol/sdk/-/sdk-1.30.0.tgz
-Integrity: sha512-xKd8OIzlqNzcqcNumGAa6g+PW2kjD5vrpcKOnfldAUPP3j7lnqMPwlTXQm8gF+UwH72z0lqaRbjr9hqGz0eITA==
+Source: https://registry.npmjs.org/@modelcontextprotocol/sdk/-/sdk-1.31.0.tgz
+Integrity: sha512-UvTMgnNlnIBO/22ob2RcVGDlcvOslQs8T59+FTGdA0L27a39fdGF/EDETNtDVK4DZGpwomlsYpRdA8UXcVL/pw==
 Declared license: MIT
 
 --- LICENSE (retained SHA-256: 5e13dbbc1d120fc2a03cecde7c91424ae2d7de11b63d58ded2f4431e261ee50d) ---
