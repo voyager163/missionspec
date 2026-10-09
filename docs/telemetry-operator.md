@@ -540,6 +540,20 @@ collects and verifies fresh source, head, policy, NSG, privacy, generation,
 permission, cost and scan evidence. No scope or serialized token is accepted
 from operator JSON, and no trust survives into a separate operation.
 
+Forward snapshots reuse only JSON nodes cloned and deeply frozen by that same
+open operation. Hash-immutable membership alone, including a caller-frozen
+object, never grants snapshot ownership. New JSON wrappers are copied and
+frozen while repeated owned history retains its identity; unsupported values
+keep the structured-clone path. Completion-validation scopes remain separate.
+
+The default runtime HTTP port retains one distinct immutable
+`private-runtime-http-<uuid>.json` observation per attempt, with start/end
+times, the returned response, and any sanitized thrown failure. A returned
+transport-error response remains an error response, not a thrown-failure or
+success receipt. A thrown error is rethrown after retention, and a retention
+failure prevents a successful return. Explicit custom HTTP ports remain
+unchanged. These private diagnostics do not renew a review or authorize effects.
+
 Control dispatch and independent runtime-completion validation also use
 operation-local private copies. The first full validation checks the complete
 history, candidate, original intents and completion; later passes may reuse

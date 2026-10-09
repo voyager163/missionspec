@@ -135,6 +135,47 @@ function immutableRuntime(value, seen) {
   seen.add(value); Object.values(value).forEach(entry => immutableRuntime(entry, seen));
   return Object.freeze(value);
 }
+function runtimeSnapshotShape(value, owned = new WeakSet()) {
+  const shapes = new WeakMap(), active = new WeakSet();
+  function visit(entry, depth) {
+    if (depth > 128) return false;
+    if (entry === null || typeof entry === 'string' || typeof entry === 'boolean' ||
+        typeof entry === 'number' && Number.isFinite(entry)) return true;
+    if (typeof entry !== 'object' || types.isProxy(entry)) return false;
+    if (owned.has(entry)) return true;
+    const array = Array.isArray(entry), prototype = Object.getPrototypeOf(entry);
+    if (array ? prototype !== Array.prototype : ![Object.prototype, null].includes(prototype)) return false;
+    if (active.has(entry)) return false;
+    if (shapes.has(entry)) return true;
+    active.add(entry);
+    const fields = [];
+    for (const key of Object.keys(entry)) {
+      const descriptor = Object.getOwnPropertyDescriptor(entry, key);
+      if (!Object.hasOwn(descriptor, 'value') || !visit(descriptor.value, depth + 1)) return false;
+      fields.push([key, descriptor.value]);
+    }
+    active.delete(entry); shapes.set(entry, fields);
+    return true;
+  }
+  return visit(value, 0) ? shapes : null;
+}
+function ownedRuntimeSnapshot(value, scope) {
+  const shapes = runtimeSnapshotShape(value, scope.owned);
+  if (!shapes) return immutableRuntime(structuredClone(value), scope.immutable);
+  const copies = new WeakMap();
+  function copy(entry) {
+    if (entry === null || typeof entry !== 'object' || scope.owned.has(entry)) return entry;
+    if (copies.has(entry)) return copies.get(entry);
+    const result = Array.isArray(entry) ? new Array(entry.length) : {};
+    copies.set(entry, result);
+    for (const [key, child] of shapes.get(entry)) {
+      Object.defineProperty(result, key, { value: copy(child), enumerable: true, writable: true, configurable: true });
+    }
+    return result;
+  }
+  const snapshot = immutableRuntime(copy(value), scope.immutable);
+  return immutableRuntime(snapshot, scope.owned);
+}
 function runtimeInputCheck(original, copy, code = 'PRIVATE_RUNTIME_OPERATION_INPUT_CHANGED') {
   const stable = new WeakMap();
   const remember = (map, value, expected, frozen) => {
@@ -231,6 +272,9 @@ export function privateLinkValidationCopy(value) {
     if (!runtimeScopes.has(scope)) fail('PRIVATE_RUNTIME_OPERATION_SCOPE_CLOSED');
     prior.check(); return prior.copy;
   }
+  // Hash-immutable membership can include caller-frozen nodes; only cloned
+  // snapshot provenance in the current open forward operation permits reuse.
+  if (scope?.owned && !scope.completion && runtimeScopes.has(scope)) return ownedRuntimeSnapshot(value, scope);
   const copy = structuredClone(value);
   return immutableRuntime(scope?.completion ? internValidationCopy(copy, scope) : copy, scope?.immutable ?? new WeakSet());
 }
@@ -1024,7 +1068,17 @@ export async function privateLinkRuntimeIO(c, context, evidence, directory, opti
       ]);
       return { app, revisions, identities: identityValues, privacy: { diagnostic, exports }, oldApp, observedAt: iso(now()) };
     },
-    http: options.http ?? syntheticHttp,
+    http: options.http ?? (async (...args) => {
+      const observation = { version: 1, kind: 'private-runtime-http-observation',
+        startedAt: iso(now()), completedAt: null, response: null, failure: null };
+      try { observation.response = await syntheticHttp(...args); }
+      catch (error) { observation.failure = safeOperationFailure(error); throw error; }
+      finally {
+        observation.completedAt = iso(now());
+        await io.immutable(`private-runtime-http-${randomUUID()}.json`, observation);
+      }
+      return observation.response;
+    }),
     observeDeletion: async (target, intent, until) => {
       verifyRuntimeTargetScope(c, target);
       if (target.appId !== runtimeTargetNames(c, target).publicProbe || intent.request?.method !== 'DELETE' ||
@@ -2409,10 +2463,11 @@ async function qualifyPrivateLinkDeliveryScope(c, context, evidence, candidate, 
   }
   const inputs = { c, context, evidence, candidate, disabled, approvals, transport, runtimeReview: options.runtimeReview ?? null,
     continuation: options.continuation ?? null, publishedScanAttestation: options.publishedScanAttestation ?? null };
-  const scope = { immutable: new WeakSet(), hashes: new WeakMap(), candidates: new WeakMap() };
+  const scope = { immutable: new WeakSet(), owned: new WeakSet(), hashes: new WeakMap(), candidates: new WeakMap() };
   const statistics = { immutableCandidateVerifications: 0, immutableCandidateReuses: 0 };
   scope.statistics = statistics;
   const copy = immutableRuntime(structuredClone(inputs), scope.immutable);
+  if (runtimeSnapshotShape(copy)) immutableRuntime(copy, scope.owned);
   // Compare the caller graph after awaits without serializing repeated history.
   // Only pairs already proven deeply frozen may survive between checks.
   const unchanged = runtimeInputCheck(inputs, copy);

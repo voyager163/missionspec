@@ -107,6 +107,14 @@ durable physical-target intent fencing and retained outcomes. Unknown
 submissions cannot be replayed by changing a directory or review wrapper.
 The operator guide documents the input artifacts and recovery boundaries.
 
+Forward runtime snapshots share only JSON nodes cloned and frozen within the
+same open operation; caller-frozen hash membership is not ownership. Default
+runtime HTTP writes a distinct immutable private observation for each attempt,
+including returned transport errors and sanitized thrown failures. Failed
+observation retention blocks a successful return. Explicit custom HTTP ports
+keep their existing behavior. None of these mechanisms grants execution or
+changes evidence caps, freshness checks, or effect deadlines.
+
 The completed budget/core/workspace-access/data/upload-role/assignments/disabled-app
 sequence uses `reconcile disabled-app` for a read-only, unapproved version-3 proposal.
 The one-image publication is independently verified history, not an ARM phase.
