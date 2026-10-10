@@ -6,6 +6,7 @@ import { buildQueuePhase, durableQueueCost, queueTopology, QUEUE_AUTHORITY, QUEU
   verifyQueueProviderOperations, verifyQueueRecord, verifyQueueWhatIf, queuePreflightBaseline, QueueTopologyController } from '../durable-queue.mjs';
 import { candidateFixture } from './receiver-upgrade.fixture.mjs';
 import { terminalReceiverWindow } from './receiver-window.fixture.mjs';
+import { analyzeEffectivePolicies, effectivePolicyScopes, POLICY_API, EXEMPTION_API, POLICY_ASSIGNMENT_QUERY } from '../effective-policy.mjs';
 
 // Generated UNIT evidence only. No saved profile, source archive, review, or cloud receipt is represented by these bytes.
 export function baseFixture() {
@@ -99,8 +100,16 @@ export function queuePhaseFixture(f, name, priorRecords = {}) {
   ] };
   const validation = { properties: { provisioningState: 'Succeeded', templateHash: digest(json(phase.template)) } };
   const preview = verifyQueueWhatIf(c, phase, topology, whatIf, [], identity);
+  const effectivePolicy = analyzeEffectivePolicies(phase, { reads: effectivePolicyScopes(phase).flatMap(id => [
+    { id: `${id}/providers/Microsoft.Authorization/policyAssignments`, apiVersion: POLICY_API,
+      filter: /^\/subscriptions\/[^/]+$/iu.test(id) ? '$filter=atScope()&$expand=EffectiveDefinitionVersion' : POLICY_ASSIGNMENT_QUERY,
+      response: { value: [] } },
+    { id: `${id}/providers/Microsoft.Authorization/policyExemptions`, apiVersion: EXEMPTION_API,
+      filter: /^\/subscriptions\/[^/]+$/iu.test(id) ? '$filter=atScope()' : null, response: { value: [] } },
+  ]) });
   const binding = { foundationBaselineSha256: f.origin.policyBaselineSha256, topologyReviewSha256: digest(json(review)),
     providerOperationsSha256: verifyQueueProviderOperations(providerOperations), preservedIds: [],
+    effectivePolicyVersion: 1, effectivePolicySha256: digest(json(effectivePolicy)), effectivePolicy,
     queuePreview: preview, queuePreviewSha256: digest(json(preview)),
     requiredPostCreateReadbacksSha256: preview.requiredPostCreateReadbacksSha256,
     armValidationSha256: digest(json(validation)), validatedTemplateSha256: digest(json(phase.template)) };

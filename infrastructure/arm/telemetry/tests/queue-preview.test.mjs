@@ -75,6 +75,7 @@ test('CREATE omission allowlist rejects contradictory predictions and every unre
     ['subnet', a => { a[0].after.properties.networkAcls.virtualNetworkRules = [{ id: 'unreviewed-subnet' }]; }],
     ['IP rule', a => { a[0].after.properties.networkAcls.ipRules = [{ value: '192.0.2.1' }]; }],
     ['resource access rule', a => { a[0].after.properties.networkAcls.resourceAccessRules = [{ resourceId: 'unreviewed' }]; }],
+    ['actual-only empty IPv6 default', a => { a[0].after.properties.networkAcls.ipv6Rules = []; }],
     ['ACL null instead of omitted', a => { a[0].after.properties.networkAcls.ipRules = null; }],
     ['encryption source', a => { a[0].after.properties.encryption.keySource = 'Microsoft.Keyvault'; }],
     ['queue encryption disabled', a => { a[0].after.properties.encryption.services = { queue: { enabled: false, keyType: 'Account' } }; }],
@@ -84,6 +85,10 @@ test('CREATE omission allowlist rejects contradictory predictions and every unre
     ['null present services', a => { a[0].after.properties.encryption.services = null; }],
     ['unexpected encryption service', a => { a[0].after.properties.encryption.services = { queue: { enabled: true, keyType: 'Account' }, blob: { enabled: false } }; }],
     ['nonempty CORS', a => { a[1].after.properties = { cors: { corsRules: [{ allowedOrigins: ['*'] }] } }; }],
+    ['actual-only disabled logging default', a => {
+      a[1].after.properties = { cors: { corsRules: [] },
+        logging: { delete: false, read: false, write: false, version: '1.0', retentionPolicy: { enabled: false } } };
+    }],
     ['null CORS properties', a => { a[1].after.properties = null; }],
     ['unknown partial CORS omission', a => { a[1].after.properties = {}; }],
     ['nonempty metadata', a => { a[2].after.properties = { metadata: { retention: 'forever' } }; }],
@@ -162,6 +167,108 @@ test('preview uncertainty and mandatory readbacks are bound to phase, preflight 
   assert.equal(queuePreflightBaseline(refreshed), x.q.proof.baselineSha256);
 });
 
+const policyFields = ['effectivePolicyVersion', 'effectivePolicySha256', 'effectivePolicy'];
+function removePolicyBinding(proof) { for (const key of policyFields) delete proof[key]; }
+function bindPolicyApproval(q) {
+  q.proof.baselineSha256 = queuePreflightBaseline(q.proof);
+  q.approval.baselineSha256 = q.proof.baselineSha256;
+}
+
+test('historical queue baseline bytes and strict immutable record replay survive the optional policy version', async () => {
+  const x = fixture(); x.bind(); await x.q.controller.execute(x.q.approval);
+  const record = structuredClone(x.q.record()), proof = record.preflight;
+  removePolicyBinding(proof);
+  const oldBaseline = digest(json({
+    foundationBaselineSha256: proof.foundationBaselineSha256, topologyReviewSha256: proof.topologyReviewSha256,
+    providerOperationsSha256: proof.providerOperationsSha256, preservedIdsSha256: digest(json(proof.preservedIds)),
+    queuePreviewSha256: proof.queuePreviewSha256, requiredPostCreateReadbacksSha256: proof.requiredPostCreateReadbacksSha256,
+    validatedTemplateSha256: proof.validatedTemplateSha256,
+  }));
+  assert.equal(queuePreflightBaseline(proof), oldBaseline);
+  assert.notEqual(oldBaseline, x.q.proof.baselineSha256);
+  proof.baselineSha256 = oldBaseline; record.approval.baselineSha256 = oldBaseline;
+  record.journal.approvalSha256 = record.receipt.approvalSha256 = digest(json(record.approval));
+  record.journal.receiptSha256 = digest(json(record.receipt));
+  const before = structuredClone(record);
+  verifyQueuePreflight(x.f.c, record.phase, record.topology, proof);
+  verifyQueueRecord(x.f.c, record);
+  assert.deepEqual(record, before);
+  record.receipt.resources[x.f.topology.ids.account].properties.networkAcls.ipv6Rules = [];
+  record.receipt.resources[x.f.topology.ids.account].properties.publicNetworkAccess = 'Disabled';
+  record.journal.receiptSha256 = digest(json(record.receipt));
+  assert.throws(() => verifyQueueRecord(x.f.c, record), { message: 'QUEUE_NETWORK_POLICY_MISMATCH' });
+  record.receipt.resources[x.f.topology.ids.account].properties.publicNetworkAccess = 'Enabled';
+  record.journal.outcome = 'reconciliation-required';
+  record.journal.receiptSha256 = digest(json(record.receipt));
+  assert.throws(() => verifyQueueRecord(x.f.c, record), { message: 'QUEUE_RECORD_EXECUTION_INVALID' });
+});
+
+test('any partial or mistyped effective-policy binding fails instead of downgrading to legacy baseline', async t => {
+  for (let mask = 1; mask < 7; mask++) await t.test(`partial-${mask}`, () => {
+    const x = fixture(), proof = structuredClone(x.q.proof);
+    policyFields.forEach((key, index) => { if (mask & (1 << index)) delete proof[key]; });
+    assert.throws(() => queuePreflightBaseline(proof), { message: 'QUEUE_PREFLIGHT_BINDING_REQUIRED' });
+    assert.throws(() => verifyQueuePreflight(x.f.c, x.q.phase, x.f.topology, proof));
+  });
+  for (const [name, mutate] of [
+    ...policyFields.map(key => [`undefined ${key}`, p => { p[key] = undefined; }]),
+    ['unknown version', p => { p.effectivePolicyVersion = 2; }],
+    ['string version', p => { p.effectivePolicyVersion = '1'; }],
+    ['changed hash', p => { p.effectivePolicySha256 = digest('unbound policy'); }],
+    ['unqualified evidence', p => {
+      p.effectivePolicy.qualified = false; p.effectivePolicySha256 = digest(json(p.effectivePolicy));
+    }],
+  ]) await t.test(name, () => {
+    const x = fixture(), proof = structuredClone(x.q.proof); mutate(proof);
+    assert.throws(() => queuePreflightBaseline(proof), { message: 'QUEUE_PREFLIGHT_BINDING_REQUIRED' });
+  });
+});
+
+test('every new queue dispatch requires effective policy even with otherwise valid reapproved legacy proof', async t => {
+  for (const phase of ['queue-storage', 'queue-role', 'queue-assignment']) await t.test(phase, async () => {
+    const f = baseFixture(), q = queuePhaseFixture(f, phase);
+    removePolicyBinding(q.proof); bindPolicyApproval(q);
+    verifyQueuePreflight(f.c, q.phase, f.topology, q.proof);
+    await assert.rejects(q.controller.execute(q.approval), { message: 'QUEUE_EFFECTIVE_POLICY_REQUIRED' });
+    assert.equal(q.dispatched, false); assert.equal(q.record().journal, null); assert.equal(q.record().receipt, null);
+  });
+  const inherited = fixture();
+  const version = inherited.q.proof.effectivePolicyVersion;
+  removePolicyBinding(inherited.q.proof); bindPolicyApproval(inherited.q);
+  Object.setPrototypeOf(inherited.q.proof, { effectivePolicyVersion: version });
+  await assert.rejects(inherited.q.controller.execute(inherited.q.approval), { message: 'QUEUE_EFFECTIVE_POLICY_REQUIRED' });
+  assert.equal(inherited.q.dispatched, false); assert.equal(inherited.q.record().journal, null);
+  const x = fixture(); x.bind();
+  x.q.io.verifyCurrent = async () => { removePolicyBinding(x.q.proof); bindPolicyApproval(x.q); };
+  await assert.rejects(x.q.controller.execute(x.q.approval), { message: 'QUEUE_EFFECTIVE_POLICY_REQUIRED' });
+  assert.equal(x.q.dispatched, false); assert.equal(x.q.record().journal, null);
+});
+
+test('rehashing policy evidence cannot bypass deterministic replay or phase binding in preflight and records', async t => {
+  const mutations = [
+    ['fake qualified evidence', p => { p.effectivePolicy = { qualified: true }; }],
+    ['foreign phase', p => { p.effectivePolicy.phaseSha256 = digest('different phase'); }],
+    ['missing policy read', p => { p.effectivePolicy.snapshot.reads.pop(); }],
+    ['fabricated analysis', p => { p.effectivePolicy.analysis.observations.push({ allowed: true }); }],
+  ];
+  for (const [name, mutate] of mutations) await t.test(name, async () => {
+    const x = fixture(); x.bind();
+    await x.q.controller.execute(x.q.approval);
+    const record = structuredClone(x.q.record());
+    mutate(record.preflight);
+    record.preflight.effectivePolicySha256 = digest(json(record.preflight.effectivePolicy));
+    record.preflight.baselineSha256 = record.approval.baselineSha256 = queuePreflightBaseline(record.preflight);
+    record.journal.approvalSha256 = record.receipt.approvalSha256 = digest(json(record.approval));
+    record.journal.receiptSha256 = digest(json(record.receipt));
+    assert.throws(() => verifyQueueRecord(x.f.c, record));
+    const next = fixture(); next.bind(); mutate(next.q.proof);
+    next.q.proof.effectivePolicySha256 = digest(json(next.q.proof.effectivePolicy));
+    bindPolicyApproval(next.q);
+    await assert.rejects(next.q.controller.execute(next.q.approval));
+    assert.equal(next.q.dispatched, false); assert.equal(next.q.record().journal, null);
+  });
+});
+
 test('actual GET verification never inherits preview omissions; incomplete postcreate data produces no qualified receipt', async t => {
   for (const field of ['services', 'queue-key-type', 'queue-disabled', 'key-source', 'shared-key',
     'ipRules', 'cors', 'metadata']) await t.test(field, async () => {
@@ -199,6 +306,89 @@ test('actual GET verification never inherits preview omissions; incomplete postc
   invalidValidation.validation.properties.provisioningState = 'Failed';
   invalidValidation.preflight.armValidationSha256 = digest(json(invalidValidation.validation));
   assert.throws(() => verifyQueueRecord(x.f.c, invalidValidation), /QUEUE_RECORD_EXECUTION_INVALID/);
+});
+
+function observedSafeDefaults(x) {
+  x.q.resources[x.f.topology.ids.account].properties.networkAcls.ipv6Rules = [];
+  x.q.resources[x.f.topology.ids.service].properties.logging =
+    { delete: false, read: false, write: false, version: '1.0', retentionPolicy: { enabled: false } };
+}
+
+test('observed safe defaults never qualify network-policy drift even when all eight postconditions match', async () => {
+  const x = fixture(); x.bind(); observedSafeDefaults(x);
+  x.q.resources[x.f.topology.ids.account].properties.publicNetworkAccess = 'Disabled';
+  const before = structuredClone(x.q.resources), requirements = queuePostCreateRequirements(x.f.c, x.f.topology);
+  assert.equal(requirements.length, 8);
+  for (const requirement of requirements) {
+    assert.deepEqual(requirement.path.split('.').reduce((value, key) => value[key], x.q.resources[requirement.resourceId]),
+      requirement.expected);
+  }
+  const service = x.q.phase.resources[1];
+  verifyQueueResource(x.f.c, x.f.topology, service, x.q.resources[service.id]);
+  assert.throws(() => queuePostCreateEvidence(x.f.c, x.q.phase, x.f.topology, x.q.resources),
+    { message: 'QUEUE_NETWORK_POLICY_MISMATCH' });
+  await assert.rejects(x.q.controller.execute(x.q.approval), { message: 'QUEUE_CHANGE_STOPPED_RESOURCES_PRESERVED' });
+  const failed = structuredClone(x.q.record());
+  assert.equal(failed.receipt, null);
+  assert.equal(failed.journal.outcome, 'reconciliation-required');
+  assert.equal(failed.journal.failureCode, 'QUEUE_NETWORK_POLICY_MISMATCH');
+  assert.equal(failed.journal.transportDispatchAttempted, true);
+  assert.deepEqual(x.q.resources, before);
+  assert.throws(() => verifyQueueRecord(x.f.c, failed), { message: 'QUEUE_RECORD_EXECUTION_INVALID' });
+  assert.deepEqual(x.q.record(), failed);
+  x.q.resources[x.f.topology.ids.account].properties.publicNetworkAccess = 'Enabled';
+  await assert.rejects(x.q.controller.execute(x.q.approval), { message: 'QUEUE_INTENT_REPLAY_FORBIDDEN' });
+  assert.throws(() => verifyQueueRecord(x.f.c, x.q.record()), { message: 'QUEUE_RECORD_EXECUTION_INVALID' });
+  assert.deepEqual(x.q.record(), failed);
+});
+
+test('readback diagnostics distinguish unreviewed fields without copying raw names or values into journals', async t => {
+  for (const resource of ['account', 'service']) await t.test(resource, async () => {
+    const x = fixture(); x.bind(); observedSafeDefaults(x);
+    const actual = x.q.resources[x.f.topology.ids[resource]];
+    const target = resource === 'account' ? actual.properties.networkAcls : actual.properties;
+    target['unreviewed-field-sensitive-name'] = 'raw-sensitive-value';
+    const before = structuredClone(x.q.resources);
+    await assert.rejects(x.q.controller.execute(x.q.approval), { message: 'QUEUE_CHANGE_STOPPED_RESOURCES_PRESERVED' });
+    const record = x.q.record();
+    assert.equal(record.receipt, null);
+    assert.equal(record.journal.outcome, 'reconciliation-required');
+    assert.equal(record.journal.failureCode, 'QUEUE_READBACK_SHAPE_UNREVIEWED');
+    assert.deepEqual(Object.keys(record.journal).sort(),
+      ['phase', 'phaseSha256', 'approvalSha256', 'intentAt', 'outcome', 'transportDispatchAttempted', 'failureCode'].sort());
+    assert(!json(record.journal).includes('sensitive'));
+    assert(!json(record.journal).includes(x.f.topology.ids[resource]));
+    assert.deepEqual(x.q.resources, before);
+  });
+});
+
+test('safe defaults cannot make rehashed success-shaped records bypass full resource or journal verification', async t => {
+  const x = fixture(); x.bind(); observedSafeDefaults(x);
+  await x.q.controller.execute(x.q.approval);
+  const record = x.q.record();
+  verifyQueueRecord(x.f.c, record);
+  for (const [name, mutate, code] of [
+    ['network drift', r => { r.receipt.resources[x.f.topology.ids.account].properties.publicNetworkAccess = 'Disabled'; },
+      'QUEUE_NETWORK_POLICY_MISMATCH'],
+    ['unknown ACL field', r => { r.receipt.resources[x.f.topology.ids.account].properties.networkAcls.extra = []; },
+      'QUEUE_READBACK_SHAPE_UNREVIEWED'],
+    ['nonempty IPv6', r => { r.receipt.resources[x.f.topology.ids.account].properties.networkAcls.ipv6Rules = [{}]; },
+      'QUEUE_IPV6_RULES_DRIFT'],
+    ['unknown service field', r => { r.receipt.resources[x.f.topology.ids.service].properties.extra = {}; },
+      'QUEUE_READBACK_SHAPE_UNREVIEWED'],
+    ['enabled logging', r => { r.receipt.resources[x.f.topology.ids.service].properties.logging.read = true; },
+      'QUEUE_LOGGING_DRIFT'],
+    ['failed immutable journal', r => { r.journal.outcome = 'reconciliation-required'; },
+      'QUEUE_RECORD_EXECUTION_INVALID'],
+  ]) await t.test(name, () => {
+    const forged = structuredClone(record); mutate(forged);
+    forged.journal.receiptSha256 = digest(json(forged.receipt));
+    const before = structuredClone(forged);
+    assert.equal(forged.receipt.qualified, true);
+    assert.equal(forged.receipt.postCreateReadbacks.observations.length, 8);
+    assert.throws(() => verifyQueueRecord(x.f.c, forged), { message: code });
+    assert.deepEqual(forged, before);
+  });
 });
 
 test('read-only validation preserves the full raw payload and returns explicit unqualified omission evidence', async t => {
