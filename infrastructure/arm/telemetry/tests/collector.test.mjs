@@ -7,17 +7,25 @@ import { chmod, link, mkdir, open, readFile, readdir, rename, rm, symlink, trunc
 import { buildPhase, storageContract, ids, json, digest, ownerTags, firstReleaseCost, PHASES, LIMITS, RECEIVER_DIGEST, RECEIVER_COMMAND,
   BUDGET, budgetProperties, budgetConfiguration, projectBudgetFilter, validateConfig, assignmentRoleTargets } from '../definition.mjs';
 import { verifyWhatIf, assertBudget, permitFirstPush, verifyResource, executionIdentity,
-  verifyExecutionOrigins, verifyReconciliation, verifyDeploymentIdentity, roleDefinitionSignature, verifyImagePublication, verifyPublicationReadback, resourceContext } from '../policy.mjs';
+  verifyExecutionOrigins, verifyReconciliation, verifyDeploymentIdentity, roleDefinitionSignature, verifyImagePublication, verifyPublicationReadback,
+  resourceContext, predecessorInstanceIds, syntheticTransitionHash } from '../policy.mjs';
 import { manifestJson, configJson } from './receiver-oci.fixture.mjs';
 import { candidateFixture, receiverSourceFixtureRun } from './receiver-upgrade.fixture.mjs';
 import { terminalReceiverWindow } from './receiver-window.fixture.mjs';
-import { queuePhaseFixture, queueCandidateFixture } from './durable-queue.fixture.mjs';
-import { queueTopology } from '../durable-queue.mjs';
+import { queuePhaseFixture, queueCandidateFixture, imageRecordFixture } from './durable-queue.fixture.mjs';
+import { queueTopology, buildQueuePhase, verifyQueueWhatIf, queuePreflightBaseline, QueueTopologyController } from '../durable-queue.mjs';
+import { queueAdoptionFixture } from './queue-adoption.fixture.mjs';
+import { nspAdmissionFixture, nspBillingFixture } from './nsp.fixture.mjs';
+import { nspLineageHead, nspReadinessBinding, nspTargetKey, nspIntentFence } from '../nsp.mjs';
+import { nspReadRequests } from '../nsp-controller.mjs';
+import { analyzeEffectivePolicies } from '../effective-policy.mjs';
+import { emptyPolicySnapshot } from './effective-policy.fixture.mjs';
 import { buildDisabledImagePhase, ReceiverUpgradeController, RECEIVER_SOURCE_INPUTS, verifyDisabledImageRecord } from '../receiver-upgrade.mjs';
 import { CollectorController, az, transport, validateReadOnly, verifyScannerAdoption, verifyOrigin, verifyProjectBudgetReceipt,
   checkReadOnly, load, saveImmutable, MAX_PRIVATE_ARTIFACT_BYTES, DIAGNOSTIC_API, privateDirectory, sourceDigest,
   publishedSourceDigest, collectReconciliation, reviewedReconciliationReceipts, verifyFreshReconciliation, readPrivacy, readAssignmentRoleDefinitions,
-  whatIfRequestContext, receiverUpgradeIO } from '../controller.mjs';
+  whatIfRequestContext, receiverUpgradeIO, checkQueuedPublication, captureQueuedPublication, reconciliationReceiverCandidate,
+  buildSyntheticWindow, syntheticWindowIO, SyntheticToggleController } from '../controller.mjs';
 
 const c = { version: 2, subscriptionId: '00000000-0000-4000-8000-000000000001',
   tenantId: '00000000-0000-4000-8000-000000000002', operatorPrincipalId: '00000000-0000-4000-8000-000000000003',
@@ -1865,10 +1873,302 @@ async function realReceiverUpgradeFixture(t, mode) {
   const io = receiverUpgradeIO(config, phase, receipts, adoption.origin, evidence, directory, invoke, options);
   const controller = new ReceiverUpgradeController(config, phase, candidate, predecessor.readback.app, io);
   return { config, phase, candidate, predecessor, receipts, directory, approval, io, controller, calls, start, expiry, whatIf, source, reconciliation,
+    invoke, lookup, sourceRun, resources, origin: adoption.origin, scannerAdoption: adoption.adoption,
     foundationResources: adoption.origin.resources, foundationAbsences: adoption.origin.absent,
     get maximumReads() { return maximumReads; }, get whatIfRemainingMs() { return whatIfRemainingMs; }, get whatIfRequests() { return whatIfRequests; },
     get now() { return now; }, get writes() { return writes; }, get intentAt() { return intentAt; }, get app() { return app; } };
 }
+
+async function queuedPublicationComposition(t) {
+  const f = await realReceiverUpgradeFixture(t, 'success'), receipt = await f.controller.execute(f.approval);
+  const prepared = { version: 1, kind: 'reviewed-disabled-image-change',
+    publication: { commitSha: 'c'.repeat(40), sourceSha256: f.source }, candidate: f.candidate,
+    predecessor: f.predecessor, prerequisiteReceipts: f.receipts, phase: f.phase, approval: f.approval,
+    preflight: await load(f.directory, `${f.phase.phase}-preflight.json`), whatIf: f.whatIf, journal: await f.io.loadJournal(), receipt };
+  verifyDisabledImageRecord(f.config, prepared);
+  const r = ids(f.config), originalHistory = json(f.reconciliation.origins);
+  const adopted = await queueAdoptionFixture({ c: f.config, r, receipts: { ...f.receipts, receiverUpgrade: prepared },
+    identity: f.receipts.core.resources[r.ingestIdentity], source: f.source, origin: f.origin,
+    topology: queueTopology(f.config, 'unittest'), at: f.now });
+  const nf = { ...adopted, source: f.source, at: adopted.at + 1000 };
+  const network = await nspAdmissionFixture(nf, adopted.adoption);
+  nf.at += 5000;
+  const records = { 'queue-storage': adopted.adoption };
+  for (const name of ['queue-role', 'queue-assignment']) {
+    const q = queuePhaseFixture({ ...nf, origin: nf.foundationOrigin }, name, structuredClone(records));
+    const context = { adoption: adopted.adoption, admission: network }, phase = buildQueuePhase(f.config, name, nf.topology, nf.identity, context);
+    const observation = structuredClone(network.records.at(-1).receipt.observation);
+    observation.startedAt = observation.completedAt = nf.at;
+    const billing = nspBillingFixture(nf, network.topology, nf.at), head = nspLineageHead(network);
+    Object.assign(q.proof, nspReadinessBinding(context, head, billing.review, observation), { phaseSha256: digest(json(phase)),
+      networkObservation: observation, networkBillingReview: billing.review, networkBillingEvidence: billing.evidence, networkLineageHead: head });
+    q.proof.queuePreview = verifyQueueWhatIf(f.config, phase, nf.topology, q.whatIf, q.proof.preservedIds, nf.identity, context);
+    q.proof.queuePreviewSha256 = digest(json(q.proof.queuePreview));
+    q.proof.effectivePolicy = analyzeEffectivePolicies(phase, emptyPolicySnapshot(phase));
+    q.proof.effectivePolicySha256 = digest(json(q.proof.effectivePolicy));
+    q.proof.baselineSha256 = queuePreflightBaseline(q.proof);
+    q.approval.phaseSha256 = digest(json(phase)); q.approval.baselineSha256 = q.proof.baselineSha256;
+    await new QueueTopologyController(f.config, phase, nf.topology, q.review, q.io, context).execute(q.approval);
+    records[name] = { ...q.record(), version: 2, kind: 'reviewed-nsp-queue-phase', phase, networkAdmission: network };
+    nf.at += 1000;
+  }
+  const candidate = queueCandidateFixture(nf, f.candidate), publishedTemplate = candidate.publication;
+  candidate.publication = null;
+  candidate.profile.source.commitSha = 'f'.repeat(40);
+  Object.assign(candidate.review, { sourceSha256: f.source, profileSha256: digest(json(candidate.profile)),
+    approvedAt: new Date(nf.at - 1000).toISOString(), expiresAt: new Date(nf.at + 1800000).toISOString() });
+  const sourceRun = async (command, args) => args[0] !== 'merge-base' && args[2]?.startsWith('f'.repeat(40) + ':')
+    ? { stdout: Buffer.from(`UNIT queue ${args[2].slice(41)}`) } : f.sourceRun(command, args);
+  const lookup = async commit => commit === 'd'.repeat(40) ? adopted.source
+    : commit === 'e'.repeat(40) ? f.source : f.lookup(commit);
+  const proposal = structuredClone(f.reconciliation.proposal), observation = structuredClone(network.records.at(-1).receipt.observation);
+  Object.assign(proposal, { version: 6, receiverCandidateSha256: digest(json(f.candidate)),
+    receiverUpgradeSha256: digest(json(prepared)), queueRecordsSha256: digest(json(records)),
+    queueAdoptionSha256: digest(json(adopted.adoption)), nspNetworkSha256: digest(json(network)),
+    nspObservation: observation, nspLineageHead: nspLineageHead(network), checkedAt: new Date(nf.at).toISOString() });
+  proposal.results['disabled-app'].resources[r.app] = receipt.resources[r.app];
+  for (const id of [nf.topology.ids.account, network.topology.ids.perimeter]) {
+    proposal.inventory.value.push({ id, createdTime: new Date(nf.at).toISOString() });
+  }
+  const review = { ...f.reconciliation.review, version: 6, proposalSha256: digest(json(proposal)), reviewedAt: new Date(nf.at + 1).toISOString() };
+  const reconciliation = { origins: f.reconciliation.origins, proposal, review, receiverCandidate: candidate,
+    receiverUpgrade: prepared, queueRecords: records, nspNetwork: network };
+  const historical = await reviewedReconciliationReceipts(f.config, f.reconciliation.foundation, reconciliation, f.source, lookup, { sourceRun });
+  const receipts = { ...historical, publication: f.receipts.publication, receiverUpgrade: prepared, queueRecords: records, nspNetwork: network };
+  const billing = nspBillingFixture(nf, network.topology, nf.at);
+  const evidence = { foundationBudgets: f.reconciliation.foundation, scannerAdoption: f.scannerAdoption,
+    reconciliation, receiverCandidate: candidate, queueTopology: nf.topology, queueRecords: records, nspNetwork: network,
+    nspBillingReview: billing.review, nspBillingEvidence: billing.evidence };
+  const resources = new Map(f.resources);
+  resources.set(r.app, structuredClone(receipt.resources[r.app]));
+  resources.set(`${r.group}/resources`, proposal.inventory);
+  const requests = nspReadRequests(network.topology);
+  for (const [id, value] of Object.entries(observation.resources)) resources.set(id, value);
+  for (const key of ['profiles', 'associations', 'rules', 'links', 'linkReferences', 'configurations', 'privateEndpoints', 'queues']) {
+    resources.set(requests[key].id, observation[key]);
+  }
+  resources.set(observation.configuration.id, observation.configuration);
+  for (const [id, request] of Object.entries(requests.diagnostics)) resources.set(request.id, observation.diagnostics[id]);
+  resources.set(adopted.adoption.origin.phase.deploymentId, adopted.adoption.observation.deployment);
+  for (const name of ['queue-role', 'queue-assignment']) {
+    const record = records[name];
+    resources.set(record.phase.deploymentId, record.receipt.deployment);
+    for (const [id, value] of Object.entries(record.receipt.resources)) resources.set(id, value);
+  }
+  const last = network.records.at(-1), initialIntent = { ...Object.fromEntries(
+    ['version', 'phaseSha256', 'approvalSha256', 'requestSha256', 'predecessorSha256', 'intentAt'].map(key => [key, last.journal[key]])),
+    outcome: 'submission-possible', transportDispatchAttempted: false };
+  const reservation = { phase: last.phase, approvalSha256: digest(json(last.approval)), journal: initialIntent };
+  const fence = nspIntentFence(network, reservation), headFiles = new Map([
+    [`nsp-head-${nspTargetKey(network.topology)}.json`, nspLineageHead(network)],
+    [`nsp-intent-fence-${nspTargetKey(network.topology)}.json`, fence],
+    [`nsp-intent-${fence.intentKey}.json`, reservation],
+  ]);
+  let manifests = structuredClone(f.candidate.publication.manifests), copies = 0;
+  const calls = [], invoke = async (args, timeout) => {
+    assert(timeout > 0 && timeout <= 15000); calls.push(args);
+    if (args[0] === 'account') return { id: f.config.subscriptionId, tenantId: f.config.tenantId, state: 'Enabled', environmentName: 'AzureCloud' };
+    if (args[0] === 'acr') {
+      if (args[1] === 'repository') return ['missionspec/telemetry-ingest'];
+      if (args[2] === 'list-metadata') return structuredClone(manifests);
+      if (args[2] === 'list-referrers') return [];
+      assert.equal(args[2], 'show');
+      const image = args[args.indexOf('--name') + 1].split('@')[1];
+      if (image === f.config.receiverDigest) return JSON.parse(f.candidate.legacyPublication.manifestJson);
+      if (image === f.candidate.profile.manifestDigest) return JSON.parse(f.candidate.profile.manifestJson);
+      assert.equal(image, candidate.profile.manifestDigest); assert.equal(copies, 1);
+      return JSON.parse(candidate.profile.manifestJson);
+    }
+    assert.equal(args[0], 'rest'); assert.equal(args[args.indexOf('--method') + 1], 'GET');
+    const id = new URL(args[args.indexOf('--url') + 1]).pathname;
+    assert(resources.has(id), id);
+    return structuredClone(resources.get(id));
+  };
+  const options = { now: () => nf.at, lookup, sourceRun,
+    headRead: async (_root, name) => structuredClone(headFiles.get(name) ?? null) };
+  return { f, nf, prepared, candidate, receipts, evidence, resources, network, headFiles, calls, invoke, options, originalHistory,
+    gate: (changed = evidence, overrides = {}) => checkQueuedPublication(f.config, receipts, changed, f.directory, invoke, { ...options, ...overrides }),
+    setManifests: value => { manifests = value; },
+    publish: () => {
+      assert.equal(copies, 0); copies++;
+      manifests = [...manifests, { digest: candidate.profile.manifestDigest, tags: [candidate.review.tag] }];
+      const published = structuredClone(candidate);
+      published.publication = { ...publishedTemplate, profileSha256: digest(json(published.profile)),
+        reviewSha256: digest(json(published.review)), intentAt: new Date(nf.at).toISOString(),
+        completedAt: new Date(nf.at + 1).toISOString(), manifests: structuredClone(manifests) };
+      return published;
+    },
+    get copies() { return copies; } };
+}
+
+test('composed first queue publication verifies prior v6 history and gates, then captures one pending copy after a network race', async t => {
+  const x = await queuedPublicationComposition(t);
+  assert.equal(reconciliationReceiverCandidate(x.evidence.reconciliation.proposal, x.candidate), x.candidate.priorCandidate);
+  const proof = await x.gate();
+  assert.equal(proof.publicationPreview.pushExecuted, false);
+  assert.equal(proof.inventory.manifests.length, 2);
+  assert.equal(proof.candidateSha256, digest(json(x.candidate)));
+  assert(!x.calls.some(args => args[2] === 'show' && args.includes(`missionspec/telemetry-ingest@${x.candidate.profile.manifestDigest}`)));
+  const badHistory = structuredClone(x.evidence);
+  badHistory.reconciliation.origins.records[0].phase.resources[0].expected.properties.amount = 999;
+  await assert.rejects(x.gate(badHistory));
+  await assert.rejects(x.gate(x.evidence, { sourceRun: async (command, args) =>
+    args[0] === 'merge-base' ? x.options.sourceRun(command, args) : { stdout: Buffer.from('UNIT corrupted source') } }), /RECEIVER_SOURCE_UNAVAILABLE/);
+  const badBilling = structuredClone(x.evidence); badBilling.nspBillingReview.cost.explicitUncertaintyAccepted = false;
+  await assert.rejects(x.gate(badBilling), /NSP_COST_DIVERGENCE/);
+  const headName = `nsp-head-${nspTargetKey(x.network.topology)}.json`, head = x.headFiles.get(headName);
+  x.headFiles.set(headName, { ...head, recordSha256: digest('UNIT later deny') });
+  await assert.rejects(x.gate(), /CANONICAL_HEAD_CHANGED/);
+  x.headFiles.set(headName, head);
+  x.setManifests([...proof.inventory.manifests, { digest: 'sha256:' + 'f'.repeat(64), tags: ['UNIT unexpected'] }]);
+  await assert.rejects(x.gate(), /PUBLICATION_READBACK_CHANGED|RECEIVER_INVENTORY_CHANGED/);
+  x.setManifests(proof.inventory.manifests);
+  await x.gate();
+  x.publish();
+  x.headFiles.set(headName, { ...head, recordSha256: digest('UNIT deny after copy') });
+  const observation = await captureQueuedPublication(x.f.config, x.candidate, x.f.directory, x.invoke,
+    { now: () => Date.parse(x.candidate.review.expiresAt) + 1000 });
+  assert.equal(x.copies, 1);
+  assert.equal(observation.manifests.length, 3);
+  assert.equal(observation.qualified, false); assert.equal(observation.replayAuthorized, false);
+  assert.equal(x.candidate.publication, null);
+  assert.equal(json(x.evidence.reconciliation.origins), x.originalHistory);
+});
+
+test('actual paired disable composition does not depend on live Storage or NSP and still rejects app or approval drift', async t => {
+  const x = await queuedPublicationComposition(t);
+  await x.gate();
+  const candidate = x.publish(), rr = ids(x.f.config);
+  const priorWindow = terminalReceiverWindow(x.f.config, x.receipts, x.f.origin, x.f.source, x.nf.at + 100, {
+    version: 1, id: randomUUID(), predecessorSha256: digest(json(x.prepared)), previousInstanceIds: predecessorInstanceIds(x.prepared),
+  });
+  const queued = await imageRecordFixture({ c: x.f.config, r: rr, receipts: x.receipts, source: x.f.source,
+    at: x.nf.at + 1000, origin: x.f.origin }, candidate, priorWindow, 'disabled-queue-upgrade', randomUUID());
+  const rec = structuredClone(x.evidence.reconciliation);
+  rec.receiverCandidate = candidate; rec.receiverUpgrade = queued;
+  Object.assign(rec.proposal, { receiverCandidateSha256: digest(json(candidate)), receiverUpgradeSha256: digest(json(queued)),
+    checkedAt: new Date(x.nf.at + 2000).toISOString() });
+  rec.proposal.results['disabled-app'].resources[rr.app] = queued.receipt.resources[rr.app];
+  Object.assign(rec.proposal.imagePublication, { manifests: candidate.publication.manifests,
+    priorManifest: JSON.parse(candidate.priorCandidate.profile.manifestJson),
+    candidateManifest: JSON.parse(candidate.profile.manifestJson) });
+  Object.assign(rec.review, { proposalSha256: digest(json(rec.proposal)), reviewedAt: new Date(x.nf.at + 2001).toISOString() });
+  const reconciled = await reviewedReconciliationReceipts(x.f.config, x.evidence.foundationBudgets, rec, x.f.source,
+    x.options.lookup, { sourceRun: x.options.sourceRun });
+  const base = { ...reconciled, publication: x.receipts.publication, receiverUpgrade: queued,
+    queueRecords: x.receipts.queueRecords, nspNetwork: x.network };
+  const evidence = { ...x.evidence, reconciliation: rec, receiverCandidate: candidate, receiverUpgrade: queued,
+    windowPredecessor: queued };
+  const instance = { version: 1, id: randomUUID(), predecessorSha256: digest(json(queued)), previousInstanceIds: predecessorInstanceIds(queued) };
+  const phases = Object.fromEntries(['synthetic-admission', 'synthetic-disable'].map(name => [name,
+    buildPhase(x.f.config, name, null, base, x.evidence.foundationBudgets, rec, instance)]));
+  const anchor = structuredClone(queued.receipt.resources[rr.app]);
+  const flag = (app, value) => {
+    const copy = structuredClone(app);
+    copy.properties.template.containers[0].env.find(entry => entry.name === 'MSR_INGESTION_ENABLED').value = value;
+    return copy;
+  };
+  const whatifs = {
+    'synthetic-admission': { status: 'Succeeded', changes: [{ resourceId: rr.app, changeType: 'Modify', before: anchor, after: flag(anchor, 'true') }] },
+    'synthetic-disable': { status: 'Succeeded', changes: [{ resourceId: rr.app, changeType: 'Modify', before: flag(anchor, 'true'), after: anchor }] },
+  };
+  const window = buildSyntheticWindow(x.f.config, phases, base, x.f.origin, x.f.source, whatifs);
+  const now = Date.now();
+  const approvals = Object.fromEntries(Object.entries(phases).map(([name, phase]) => [name, {
+    version: 2, action: `synthetic-window-${name}`, windowSha256: digest(json(window)), phaseSha256: digest(json(phase)),
+    configSha256: digest(json(x.f.config)), sourceSha256: x.f.source, originSha256: window.originSha256,
+    receiptsSha256: window.receiptsSha256, baselineSha256: window.baselineSha256,
+    reviewedWhatIfSha256: window.phases[name].reviewedWhatIfSha256, transitionSha256: syntheticTransitionHash(phase),
+    windowInstanceId: instance.id, predecessorSha256: instance.predecessorSha256,
+    approvedAt: new Date(now - 10000).toISOString(), expiresAt: new Date(now + 1800000).toISOString(),
+  }]));
+  for (const mode of ['unavailable', 'drifting', 'image-drift', 'config-drift', 'approval-drift']) await t.test(mode, async () => {
+    const directory = await scratch(t), currentApprovals = structuredClone(approvals);
+    let app = flag(anchor, 'true'), puts = 0, backendReads = 0, deployment = null;
+    if (mode === 'image-drift') app.properties.template.containers[0].image = `${x.f.config.registryName}.azurecr.io/missionspec/telemetry-ingest@sha256:${'f'.repeat(64)}`;
+    if (mode === 'config-drift') app.properties.template.containers[0].resources.cpu = 0.5;
+    if (mode === 'approval-drift') currentApprovals['synthetic-disable'].phaseSha256 = digest('UNIT unrelated phase');
+    const enabled = { phase: 'synthetic-admission', windowSha256: digest(json(window)),
+      phaseSha256: digest(json(phases['synthetic-admission'])), approvalSha256: digest(json(approvals['synthetic-admission'])),
+      windowInstanceId: instance.id, predecessorSha256: instance.predecessorSha256,
+      intentAt: new Date(now - 1000).toISOString(), outcome: 'readback-qualified', transportDispatchAttempted: true };
+    await saveImmutable(directory, 'synthetic-admission-journal.json', enabled);
+    const invokes = [], invoke = async (args, timeout) => {
+      assert(timeout > 0 && timeout <= 15000); invokes.push(args);
+      if (args[0] === 'account') return { id: x.f.config.subscriptionId, tenantId: x.f.config.tenantId, state: 'Enabled', environmentName: 'AzureCloud' };
+      if (args[0] === 'deployment') {
+        assert.equal(args[2], 'validate'); return { properties: { provisioningState: 'Succeeded' } };
+      }
+      assert.equal(args[0], 'rest');
+      const method = args[args.indexOf('--method') + 1], id = new URL(args[args.indexOf('--url') + 1]).pathname;
+      if (/\/providers\/Microsoft\.(Storage|Network)\//iu.test(id)) {
+        backendReads++;
+        if (mode === 'unavailable') throw new Error('UNIT_STORAGE_AND_NSP_UNAVAILABLE');
+        return { id, properties: { publicNetworkAccess: 'Enabled', accessMode: 'Learning' } };
+      }
+      if (method === 'PUT') {
+        assert.equal(id, phases['synthetic-disable'].deploymentId);
+        const body = JSON.parse(await readFile(args[args.indexOf('--body') + 1].slice(1), 'utf8'));
+        assert.equal(body.properties.mode, 'Incremental'); assert.equal(body.properties.template.resources.length, 1);
+        const expected = body.properties.template.resources[0];
+        assert.equal(expected.type, 'Microsoft.App/containerApps');
+        assert.equal(expected.properties.template.containers[0].env.find(entry => entry.name === 'MSR_INGESTION_ENABLED').value, 'false');
+        const previous = app;
+        app = { ...structuredClone(expected), id: rr.app, systemData: previous.systemData, identity: previous.identity };
+        app.properties.configuration.ingress.fqdn = previous.properties.configuration.ingress.fqdn;
+        Object.assign(app.properties, { provisioningState: 'Succeeded', runningStatus: 'Running',
+          latestRevisionName: 'unit-independent-disable', latestReadyRevisionName: 'unit-independent-disable' });
+        deployment = { id, properties: { provisioningState: 'Succeeded', mode: 'Incremental',
+          correlationId: 'UNIT-disable', templateHash: digest(json(body.properties.template)), timestamp: new Date().toISOString() } };
+        puts++; return {};
+      }
+      assert.equal(method, 'GET');
+      if (id === phases['synthetic-admission'].deploymentId) return { id, properties: { provisioningState: 'Succeeded' } };
+      if (id === phases['synthetic-disable'].deploymentId) return deployment;
+      if (id === rr.app) return structuredClone(app);
+      if (id === rr.app + '/revisions') return { value: [{ id: `${id}/${app.properties.latestRevisionName}`,
+        name: app.properties.latestRevisionName, properties: { active: true, provisioningState: 'Provisioned',
+          runningState: 'Running', healthState: 'Healthy', replicas: 1, trafficWeight: 100, template: app.properties.template } }] };
+      if (id === rr.ingestIdentity || id === rr.pullIdentity) return structuredClone(base.core.resources[id]);
+      if (id === rr.app + '/providers/Microsoft.Insights/diagnosticSettings') return { value: [] };
+      if (id === rr.workspace + '/dataExports') return { value: [] };
+      assert.fail('Unexpected disable dependency: ' + id);
+    };
+    const ctx = whatIfRequestContext(x.f.config, phases['synthetic-disable']);
+    const io = syntheticWindowIO(x.f.config, phases, window, currentApprovals, base, {}, x.f.origin,
+      evidence, directory, () => false, invoke, {
+        lookup: x.options.lookup, sourceRun: x.options.sourceRun,
+        request: async operation => {
+          operation.beforeDispatch();
+          return { version: 1, contextSha256: ctx.contextSha256, verifiedRegion: x.f.config.location,
+            step: `what-if.${operation.action}`, responseFile: 'whatif-response-0000.json', statusCode: 200,
+            bodyParseError: false, headers: {}, body: { status: 'Succeeded', properties: { changes: [{
+              resourceId: rr.app, changeType: 'Modify', before: structuredClone(app), after: flag(app, 'false'),
+            }] } } };
+        },
+      });
+    const toggle = new SyntheticToggleController(x.f.config, phases, window, currentApprovals, io);
+    try {
+      if (['unavailable', 'drifting'].includes(mode)) {
+        const result = await toggle.execute('synthetic-disable').catch(async error => {
+          t.diagnostic(json({ journal: await load(directory, 'synthetic-disable-journal.json', true), lastCalls: invokes.slice(-3) }));
+          throw error;
+        });
+        assert.equal(result.qualified, true);
+        assert.equal(result.resources[rr.app].properties.template.containers[0].env.find(entry => entry.name === 'MSR_INGESTION_ENABLED').value, 'false');
+        assert.equal(puts, 1);
+        const proof = await load(directory, 'synthetic-disable-preflight.json');
+        assert.equal(proof.qualificationKind, 'paired-receiver-disable-only-preflight');
+        assert.equal(proof.liveQueueNetworkRechecked, false);
+      } else {
+        await assert.rejects(toggle.execute('synthetic-disable'));
+        assert.equal(puts, 0);
+      }
+      assert.equal(backendReads, 0);
+      assert(!invokes.some(args => args[0] === 'acr'));
+    } finally { toggle.deadlines.dispose(); await toggle.deadlines.pendingIncident; }
+  });
+});
 
 test('real receiverUpgradeIO completes a 100-second full preflight before separately bounded critical checks and rollout', async t => {
   const f = await realReceiverUpgradeFixture(t, 'success');

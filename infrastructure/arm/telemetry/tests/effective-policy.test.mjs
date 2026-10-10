@@ -29,7 +29,7 @@ test('inherited initiative/default modify blocks Enabled to Disabled before a qu
   assert.equal(proof.qualified, false);
   assert.deepEqual(proof.analysis.blockers.map(v => [v.reason, v.field, v.requested, v.mutation, v.condition]),
     [['REQUEST_REWRITTEN', network, 'Enabled', 'Disabled', 'unknown']]);
-  assert.equal(proof.analysis.blockers[0].versionResolution, 'all-matching-versions');
+  assert.equal(proof.analysis.blockers[0].versionResolution, 'latest-matching-versions');
   assert.equal(proof.analysis.blockers[0].exemptionsApplied, false);
   assert.deepEqual(proof, analyzeEffectivePolicies(x.phase, proof.snapshot));
   assert.equal(x.calls.length, 5);
@@ -217,6 +217,32 @@ test('nested AND/OR/not unknown tags and resourceGroup expressions cannot create
   });
 });
 
+test('stored logical-key casing preserves type guards without normalizing literals or unknown operators', async () => {
+  const x = effectivePolicyFixture();
+  x.definition.properties.policyRule.if = {
+    AllOf: [
+      { AnyOf: [{ field: 'type', Equals: 'Microsoft.Compute/virtualMachines' }] },
+      { unknownOperator: 'unresolved' },
+    ],
+  };
+  const before = structuredClone(x.definition);
+  assert.equal((await x.analyze()).qualified, true);
+  assert.deepEqual(x.definition, before);
+  x.definition.properties.policyRule.if.AllOf[0].AnyOf[0].Equals = 'Microsoft.Storage/storageAccounts';
+  assert.equal((await x.analyze()).qualified, false);
+  x.definition.properties.policyRule.if = {
+    allof: [{ field: 'type', equals: 'Microsoft.Storage/storageAccounts' }, { field: network, notEquals: 'Disabled' }],
+  };
+  assert.equal((await x.analyze()).qualified, false);
+  x.definition.properties.policyRule.if = {
+    allOf: [{ field: 'type', equals: 'Microsoft.Compute/virtualMachines' }],
+    AllOf: [{ field: 'type', equals: 'Microsoft.Storage/storageAccounts' }],
+  };
+  assert.equal((await x.analyze()).qualified, false, 'Conflicting case-folded keys must remain unresolved');
+  x.definition.properties.policyRule.if = { unknownAllOf: [{ field: 'type', equals: 'Microsoft.Compute/virtualMachines' }] };
+  assert.equal((await x.analyze()).qualified, false);
+});
+
 test('assignment to initiative to definition forwarding and defaults are exact evidence, not ignored overrides', async () => {
   const x = effectivePolicyFixture();
   x.initiative.properties.parameters = { behavior: { type: 'String', defaultValue: 'audit' } };
@@ -234,8 +260,51 @@ test('assignment to initiative to definition forwarding and defaults are exact e
   await assert.rejects(x.analyze(), /EFFECTIVE_POLICY_PARAMETERS_UNRESOLVED/);
 });
 
+test('array allowedValues validates each selected item through defaults and initiative forwarding', async () => {
+  const x = effectivePolicyFixture();
+  x.initiative.properties.parameters = {
+    selectedTypes: { type: 'Array', defaultValue: ['Microsoft.Storage/storageAccounts'],
+      allowedValues: ['Microsoft.Storage/storageAccounts', 'Microsoft.Compute/virtualMachines'] },
+  };
+  x.definition.properties.parameters.selectedTypes = {
+    type: 'Array', defaultValue: [], allowedValues: ['Microsoft.Storage/storageAccounts', 'Microsoft.Compute/virtualMachines'],
+  };
+  x.initiative.properties.policyDefinitions[0].parameters = { selectedTypes: { value: "[parameters('selectedTypes')]" } };
+  x.definition.properties.policyRule.if = { field: 'type', in: "[parameters('selectedTypes')]" };
+  assert.equal((await x.analyze()).qualified, false, 'Valid array must not hide the matching network rewrite');
+  x.assignment.properties.parameters = { selectedTypes: { value: ['Microsoft.Compute/virtualMachines'] } };
+  assert.equal((await x.analyze()).qualified, true);
+  x.assignment.properties.parameters.selectedTypes.value = [
+    'Microsoft.Compute/virtualMachines', 'Microsoft.Storage/storageAccounts',
+  ];
+  assert.equal((await x.analyze()).qualified, false);
+  x.assignment.properties.parameters.selectedTypes.value = [];
+  assert.equal((await x.analyze()).qualified, true);
+  for (const value of [
+    ['Microsoft.Storage/storageAccounts', 'unlisted'], ['microsoft.storage/storageaccounts'],
+    [['Microsoft.Storage/storageAccounts']], [null], 'Microsoft.Storage/storageAccounts',
+  ]) {
+    x.assignment.properties.parameters.selectedTypes.value = value;
+    await assert.rejects(x.analyze(), /EFFECTIVE_POLICY_PARAMETERS_UNRESOLVED/);
+  }
+});
+
+test('allowedValues assignment validation remains case-sensitive and rejects malformed lists', async () => {
+  const x = effectivePolicyFixture();
+  x.definition.properties.parameters.effect.allowedValues = ['modify', 'audit', 'disabled', 'deny'];
+  x.initiative.properties.policyDefinitions[0].parameters = { effect: { value: 'AUDIT' } };
+  await assert.rejects(x.analyze(), /EFFECTIVE_POLICY_PARAMETERS_UNRESOLVED/);
+  x.initiative.properties.policyDefinitions[0].parameters.effect.value = 'audit';
+  assert.equal((await x.analyze()).qualified, true);
+  for (const allowedValues of [null, false, {}, 'audit', [], undefined]) {
+    x.definition.properties.parameters.effect.allowedValues = allowedValues;
+    await assert.rejects(x.analyze(), /EFFECTIVE_POLICY_PARAMETERS_UNRESOLVED/);
+  }
+});
+
 test('all matching unpinned versions are checked; no optimistic latest-version selection', async () => {
   const x = effectivePolicyFixture();
+  delete x.initiative.properties.policyDefinitions[0].definitionVersion;
   x.definition.properties.policyRule.then.effect = 'audit';
   const other = structuredClone(x.definition);
   other.id = `${x.definitionId}/versions/1.1.0`; other.properties.version = '1.1.0';
@@ -251,6 +320,135 @@ test('all matching unpinned versions are checked; no optimistic latest-version s
   assert(exact.analysis.observations.every(v => v.versionResolution === 'exact-version'));
   x.initiative.properties.policyDefinitions[0].effectiveDefinitionVersion = '2.0.0';
   await assert.rejects(x.analyze(), /EFFECTIVE_POLICY_VERSION_INVALID/);
+});
+
+test('preview annotations preserve legacy matches while explicit wildcards auto-ingest numeric updates', async () => {
+  const x = effectivePolicyFixture(), reference = x.initiative.properties.policyDefinitions[0];
+  reference.definitionVersion = '1.*.*-preview';
+  x.catalog.value = [];
+  for (const [version, effect] of [['1.0.0-preview', 'audit'], ['1.1.0-preview', 'modify'], ['1.2.0', 'audit']]) {
+    const definition = structuredClone(x.definition);
+    definition.id = `${x.definitionId}/versions/${version}`;
+    definition.properties.version = version;
+    definition.properties.policyRule.then.effect = effect;
+    x.catalog.value.push(structuredClone(definition));
+    x.responses.set(definition.id, definition);
+  }
+  const current = await x.analyze();
+  assert.equal(current.version, 2);
+  assert.equal(current.qualified, true);
+  assert.deepEqual([...new Set(current.analysis.observations.map(value => value.definitionVersion))], ['1.2.0']);
+  const ambiguous = analyzeEffectivePolicies(x.phase, current.snapshot, 1);
+  assert.equal(ambiguous.qualified, false);
+  assert.deepEqual([...new Set(ambiguous.analysis.observations.map(value => value.definitionVersion))].sort(),
+    ['1.0.0-preview', '1.1.0-preview', '1.2.0']);
+  assert(ambiguous.analysis.blockers.some(value => value.definitionVersion === '1.1.0-preview'));
+  reference.effectiveDefinitionVersion = '1.0.0-preview';
+  assert.equal((await x.analyze()).qualified, true);
+  reference.effectiveDefinitionVersion = '1.2.0';
+  assert.equal((await x.analyze()).qualified, true, 'GA promotion must not hide a still-assigned policy');
+  reference.effectiveDefinitionVersion = '2.0.0';
+  await assert.rejects(x.analyze(), /EFFECTIVE_POLICY_VERSION_INVALID/);
+  delete reference.effectiveDefinitionVersion;
+  reference.definitionVersion = '1.0.0-preview';
+  assert.equal((await x.analyze()).qualified, true);
+  reference.policyDefinitionId = `${x.definitionId}/versions/1.0.0-preview`;
+  assert.equal((await x.analyze()).qualified, true);
+  reference.policyDefinitionId = x.definitionId;
+  reference.definitionVersion = '2.*.*-preview';
+  await assert.rejects(x.analyze(), /EFFECTIVE_POLICY_VERSION_UNRESOLVED/);
+  for (const selector of ['1.*.*-other', '1.*.*-preview.1', '1.*.*-Preview', '1.*.0-preview']) {
+    reference.definitionVersion = selector;
+    await assert.rejects(x.analyze(), /EFFECTIVE_POLICY_VERSION_INVALID/);
+  }
+});
+
+test('explicit wildcard selection uses the newest matching schema without ignoring unknown parameters', async () => {
+  const x = effectivePolicyFixture(), reference = x.initiative.properties.policyDefinitions[0];
+  x.definition.properties.policyRule.then.effect = 'audit';
+  reference.parameters = { excludedManagedByResourceProviders: { value: [] } };
+  const latest = structuredClone(x.definition);
+  latest.id = `${x.definitionId}/versions/1.2.0`; latest.properties.version = '1.2.0';
+  latest.properties.parameters.excludedManagedByResourceProviders = { type: 'Array', defaultValue: [] };
+  x.catalog.value = [structuredClone(x.definition), latest];
+  const current = await x.analyze();
+  assert.equal(current.qualified, true);
+  assert(current.analysis.observations.every(value => value.definitionVersion === '1.2.0'));
+  verifyEffectivePolicyEvidence(x.phase, current);
+  assert.throws(() => analyzeEffectivePolicies(x.phase, current.snapshot, 1), /EFFECTIVE_POLICY_PARAMETERS_INVALID/);
+  reference.effectiveDefinitionVersion = '1.0.0';
+  await assert.rejects(x.analyze(), /EFFECTIVE_POLICY_PARAMETERS_INVALID/);
+  delete reference.effectiveDefinitionVersion;
+  reference.parameters.unrecognized = { value: [] };
+  await assert.rejects(x.analyze(), /EFFECTIVE_POLICY_PARAMETERS_INVALID/);
+});
+
+test('numeric wildcard updates cannot choose a safer old version or cross a pinned major/minor', async () => {
+  const x = effectivePolicyFixture(), reference = x.initiative.properties.policyDefinitions[0];
+  x.catalog.value = [];
+  for (const [version, effect] of [['1.9.0', 'audit'], ['1.10.0', 'deny'], ['1.10.1', 'audit'], ['2.0.0', 'deny']]) {
+    const definition = structuredClone(x.definition);
+    definition.id = `${x.definitionId}/versions/${version}`; definition.properties.version = version;
+    definition.properties.policyRule.then.effect = effect;
+    x.catalog.value.push(definition);
+  }
+  let current = await x.analyze();
+  assert.equal(current.qualified, true);
+  assert(current.analysis.observations.every(value => value.definitionVersion === '1.10.1'));
+  reference.definitionVersion = '1.9.*';
+  assert((await x.analyze()).analysis.observations.every(value => value.definitionVersion === '1.9.0'));
+  reference.definitionVersion = '1.*.*';
+  x.catalog.value = x.catalog.value.filter(value => value.properties.version !== '1.10.1');
+  current = await x.analyze();
+  assert.equal(current.qualified, false);
+  assert(current.analysis.blockers.every(value => value.definitionVersion === '1.10.0'));
+  const tied = structuredClone(x.catalog.value.find(value => value.properties.version === '1.10.0'));
+  tied.id += '-preview'; tied.properties.version += '-preview'; tied.properties.policyRule.then.effect = 'audit';
+  x.catalog.value.push(tied);
+  current = await x.analyze();
+  assert.equal(current.qualified, false, 'preview status ties cannot hide a potentially enforced rule');
+  assert.deepEqual([...new Set(current.analysis.observations.map(value => value.definitionVersion))].sort(), ['1.10.0', '1.10.0-preview']);
+});
+
+test('historical version-one evidence is rechecked with its original algorithm, never relabeled', async () => {
+  const x = effectivePolicyFixture();
+  x.definition.properties.policyRule.then.effect = 'audit';
+  const latest = structuredClone(x.definition);
+  latest.id = `${x.definitionId}/versions/1.1.0`; latest.properties.version = '1.1.0';
+  x.catalog.value = [structuredClone(x.definition), latest];
+  const current = await x.analyze(), historical = analyzeEffectivePolicies(x.phase, current.snapshot, 1);
+  const original = structuredClone(historical);
+  assert.equal(historical.version, 1);
+  assert(historical.analysis.observations.every(value => value.versionResolution === 'all-matching-versions'));
+  assert.equal(historical.analysis.observations.length, current.analysis.observations.length * 2);
+  verifyEffectivePolicyEvidence(x.phase, historical);
+  assert.deepEqual(historical, original);
+  assert.throws(() => verifyEffectivePolicyEvidence(x.phase, { ...historical, version: 2 }), /EFFECTIVE_POLICY_BINDING_INVALID/);
+  assert.throws(() => verifyEffectivePolicyEvidence(x.phase, { ...current, version: 1 }), /EFFECTIVE_POLICY_BINDING_INVALID/);
+  assert.throws(() => analyzeEffectivePolicies(x.phase, current.snapshot, 3), /EFFECTIVE_POLICY_BINDING_INVALID/);
+});
+
+test('complete version-list documents avoid redundant reads while summary lists still require exact GETs', async () => {
+  const x = effectivePolicyFixture();
+  x.catalog.value = [structuredClone(x.definition)];
+  const proof = await x.analyze();
+  assert.equal(proof.qualified, false);
+  assert.equal(x.calls.length, 4);
+  assert(!x.calls.some(call => call.id === x.definition.id));
+  const oldStyle = structuredClone(proof);
+  oldStyle.snapshot.reads.push({ id: x.definition.id, apiVersion: POLICY_API, filter: null,
+    response: structuredClone(x.definition) });
+  assert.deepEqual(analyzeEffectivePolicies(x.phase, oldStyle.snapshot).analysis, proof.analysis);
+  oldStyle.snapshot.reads.at(-1).response.properties.policyRule.then.effect = 'audit';
+  assert.throws(() => analyzeEffectivePolicies(x.phase, oldStyle.snapshot), /EFFECTIVE_POLICY_DEFINITION_DRIFT/);
+  x.calls.length = 0;
+  x.catalog.value = [{ id: x.definition.id, properties: { version: '1.0.0' } }];
+  assert.equal((await x.analyze()).qualified, false);
+  assert.equal(x.calls.length, 5);
+  assert(x.calls.some(call => call.id === x.definition.id));
+  x.catalog.value = [structuredClone(x.definition)];
+  x.catalog.value[0].properties.policyRule = null;
+  await assert.rejects(x.analyze(), /EFFECTIVE_POLICY_RULE_INVALID/);
 });
 
 test('potential network/auth/logging mutations outside the subset fail closed with sanitized reasons', async t => {
@@ -350,6 +548,7 @@ test('definition drift, including safe-effect changes, invalidates the fresh evi
 
 test('scoped routes remain GET-only, explicit-account authenticated, bounded and four-way concurrency limited', async t => {
   const x = effectivePolicyFixture(), directory = await scratch(t);
+  delete x.initiative.properties.policyDefinitions[0].definitionVersion;
   x.definition.properties.policyRule.then.effect = 'audit';
   for (let i = 1; i < 9; i++) {
     const version = `1.${i}.0`, d = structuredClone(x.definition);
@@ -431,14 +630,19 @@ test('source publication hashes include the new imported module but preserve pre
   const historical = Object.fromEntries(names.map(name => [prefix + name, `unit historical ${name}`]));
   const schemas = { 'assets/schemas/telemetry-event.schema.json': json(contract.schema),
     'services/telemetry-ingest/schema/storage-columns.json': json(contract.columns) };
-  for (const modern of [false, true]) {
+  const nspNames = ['queue-adoption.mjs', 'nsp.mjs', 'nsp-controller.mjs', 'nsp-reconciliation.mjs'];
+  for (const modern of [false, true, 'nsp']) {
     const files = { ...historical, ...schemas };
     if (modern) {
       files[prefix + 'controller.mjs'] = "import { collectEffectivePolicies } from './effective-policy.mjs';";
       files[prefix + 'effective-policy.mjs'] = 'unit new policy';
     }
+    if (modern === 'nsp') for (const name of nspNames) {
+      files[prefix + 'controller.mjs'] += `\nimport {} from './${name}';`;
+      files[prefix + name] = `unit ${name}`;
+    }
     const expected = createHash('sha256');
-    for (const name of [...names, ...(modern ? ['effective-policy.mjs'] : [])]) expected.update(name).update(files[prefix + name]);
+    for (const name of [...names, ...(modern ? ['effective-policy.mjs'] : []), ...(modern === 'nsp' ? nspNames : [])]) expected.update(name).update(files[prefix + name]);
     expected.update(json(contract));
     const run = async (_command, args) => {
       if (args[0] === 'merge-base') return { stdout: Buffer.alloc(0) };
@@ -450,7 +654,9 @@ test('source publication hashes include the new imported module but preserve pre
     assert.equal(await publishedSourceDigest(commit, run), expected.digest('hex'));
   }
   const current = createHash('sha256');
-  for (const name of [...names, 'effective-policy.mjs']) current.update(name).update(await readFile(prefix + name));
+  for (const name of [...names, 'effective-policy.mjs', ...nspNames, 'queue-defender.mjs', 'private-link.mjs', 'private-link-whatif.mjs',
+    'private-link-controller.mjs', 'private-link-readback.mjs', 'private-link-runtime.mjs', 'private-link-exec.py',
+    'private-link-artifacts.mjs', 'private-link-nsg-adoption.mjs']) current.update(name).update(await readFile(prefix + name));
   current.update(json(contract));
   assert.equal(await sourceDigest(), current.digest('hex'));
 });
