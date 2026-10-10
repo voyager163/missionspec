@@ -207,11 +207,14 @@ export function windowsShimInvocation(kind, bin, args, systemRoot = process.env.
 }
 
 export function installSmokeEnvironment(home, guard, inherited = process.env) {
+  const systemRoots = Object.entries(inherited).filter(([key]) => key.toLowerCase() === 'systemroot');
+  assert(systemRoots.length <= 1, 'Ambiguous SystemRoot environment keys');
   const replaced = new Set(['path', 'node_options', 'node_path', 'home', 'userprofile', 'xdg_config_home',
     'appdata', 'localappdata', 'missionspec_config_home', 'comspec', 'psmodulepath', 'psexecutionpolicypreference',
-    'ci', 'node_env', 'node_test_context', 'do_not_track', 'missionspec_telemetry']);
+    'ci', 'node_env', 'node_test_context', 'do_not_track', 'missionspec_telemetry', 'systemroot']);
   return {
     ...Object.fromEntries(Object.entries(inherited).filter(([key]) => !replaced.has(key.toLowerCase()))),
+    ...(systemRoots.length === 1 ? { SystemRoot: systemRoots[0][1] } : {}),
     HOME: home, USERPROFILE: home, XDG_CONFIG_HOME: home, APPDATA: home, LOCALAPPDATA: home,
     MISSIONSPEC_CONFIG_HOME: path.join(home, 'missionspec'), PATH: path.dirname(process.execPath),
     NODE_OPTIONS: `--import=${pathToFileURL(guard).href}`,

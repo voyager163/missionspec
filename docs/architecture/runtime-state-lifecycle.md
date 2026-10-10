@@ -135,8 +135,9 @@ owner-only readable mode and single-link count **before reading**, bind it to
 the pre-open identity, use `O_NOFOLLOW | O_NONBLOCK`, bound all bytes, and recheck
 descriptor, pathname and real ancestor observations. A permissive, linked,
 special or identical-content replacement cannot be silently treated as the
-original observation. The Windows held-reader extension is undergoing native
-qualification independently of the earlier storage paths. It uses the
+original observation. The Windows held-reader extension has separate bounded
+[native qualification](windows-state.md#persistence-held-read-qualification),
+including source and runtime-lifecycle application scenarios. It uses the
 directory-relative held reader described in [Windows state](windows-state.md);
 a completed external ACL check is not attributed to a later Node descriptor.
 SQLite-header admission uses its own shared byte-range locking mode; ordinary
