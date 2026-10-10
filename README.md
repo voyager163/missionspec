@@ -27,7 +27,10 @@ release gates. Ordinary Claude Code skills and CLI/MCP integration do not
 require the optional programmatic Claude SDK bridge.
 
 The root package manifest is private at version `0.0.0` for local development;
-it does not represent a product release.
+it does not represent a product release. The
+[offline install and release handoff](docs/release-readiness.md) records the
+explicit tarball-install check, its tested platform and the remaining release
+gates; it does not authorize publication or live model calls.
 
 ## Direction and skill sources
 

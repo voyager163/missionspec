@@ -80,10 +80,14 @@ TypeScript build. For a focused local iteration, the individual commands are:
 | `npm run check:architecture` | Check static TypeScript import boundaries. |
 | `npm run check:repository` | Validate local documentation links and anchors, issue forms, required documents, and workflow policies. |
 | `npm run check:package` | Check npm dry-run package contents, exclusion boundaries, and packaged links without publishing. |
+| `npm run check:package -- --install` | Explicit offline tarball install and inert CLI/API/skill smoke using the reviewed cached runtime closure; not part of ordinary unit checks. |
 | `npm run check:licenses` | Verify locked CLI runtime provenance and shipped legal notices. |
 | `npm run check:portable` | Compile and test the bounded portable/read-only surface; not Windows private-write qualification. |
 
 Run the full `npm run check` on macOS/Linux before reporting a change as fully checked.
+The [release handoff](docs/release-readiness.md) explains the separate install
+check, cold-cache prerequisites, current platform evidence and remaining
+publication gates.
 Architecture analysis uses Babel's TypeScript parser; compilation uses the
 TypeScript compiler. Passing static import checks does not prove runtime
 isolation, and compiling domain contracts does not establish complete engine

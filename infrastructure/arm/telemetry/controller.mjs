@@ -13,7 +13,21 @@ import { IMAGE_PHASES, buildDisabledImagePhase, receiverAnchor, prepareReceiverP
 import { QUEUE_PHASES, durableQueueCost, buildQueuePhase, queueEnvironment, queueTopology,
   qualifiedQueueRecords, verifyQueueTopology, verifyQueueReview, verifyQueueRecord, verifyQueueProviderOperations, verifyQueueApiCatalog,
   verifyQueueResource, verifyQueuePrivacy, verifyQueueDrain, verifyQueueWhatIf, queuePreflightBaseline, QueueTopologyController } from './durable-queue.mjs';
-import { PHASES, buildPhase, deploymentName, validateConfig, ids, digest, json, fail, sameId, storageContract, firstReleaseCost, assertOwned, RECEIVER_COMMAND,
+import { collectEffectivePolicies, verifyEffectivePolicyEvidence, effectivePolicyScopes } from './effective-policy.mjs';
+import { collectQueueAdoption, adoptQueueStorage, verifyQueueAdoptionRecord, verifyAdoptedQueueStorage,
+  verifyQueueAdoptionSources } from './queue-adoption.mjs';
+import { collectQueueDefender, queueDefenderInventory } from './queue-defender.mjs';
+import { NSP_PHASES, NSP_LIMITS, NSP_API, NSP_STORAGE_API, nspTopology, emptyNspEvidence, buildNspPhase,
+  verifyNspEvidence, verifyNspAdmission, verifyNspObservation, verifyNspQueuePreflight, nspLineageHead,
+  nspState, nspReadinessBinding, verifyNspPreview, nspIntentKey, nspPendingHead, nspTargetKey, nspIntentFence, verifyNspApiCatalog } from './nsp.mjs';
+import { NspController, nspTransport, collectNspObservation, checkNspReadOnly, collectNspPermissions, collectNspEffectivePolicies } from './nsp-controller.mjs';
+import { collectNspReconciliation, qualifyNspReconciliation, verifyNspStoppedAttempt } from './nsp-reconciliation.mjs';
+import { buildPrivateLinkPlan, verifyPrivateLinkPlan, verifyPrivateLinkContext, PRIVATE_LINK_CONTROL_STAGES } from './private-link.mjs';
+import { privateLinkWhatIfContext, privateLinkRuntimeWhatIfContext } from './private-link-whatif.mjs';
+import { runPrivateLinkControl, runPrivateLinkNsgAdoption } from './private-link-controller.mjs';
+import { runPrivateLinkRuntime } from './private-link-runtime.mjs';
+import { loadPrivateLinkArtifact, savePrivateLinkArtifact } from './private-link-artifacts.mjs';
+import { PHASES, buildPhase, deploymentName, validateConfig, ids, digest, digestJson, json, fail, sameId, storageContract, firstReleaseCost, assertOwned, RECEIVER_COMMAND,
   closed, budgetConfiguration, projectBudgetFilter, verifyFoundationBudgets, reconciliationBinding, assignmentRoleTargets,
   TOGGLE_PHASES, SYNTHETIC_LIMITS, SYNTHETIC_FIXTURES, requireAccess, validateWindowInstance } from './definition.mjs';
 import { assertBudget, verifyWhatIf, verifyResource, verifyApproval, verifyFreshReview, sourceContractsSummary, permitFirstPush,
@@ -147,7 +161,10 @@ export async function load(directory, name, optional = false) {
   }
 }
 export async function sourceDigest() {
-  const names = ['definition.mjs', 'policy.mjs', 'controller.mjs', 'arm-whatif.py', 'receiver-upgrade.mjs', 'durable-queue.mjs'];
+  const names = ['definition.mjs', 'policy.mjs', 'controller.mjs', 'arm-whatif.py', 'receiver-upgrade.mjs', 'durable-queue.mjs', 'effective-policy.mjs',
+    'queue-adoption.mjs', 'nsp.mjs', 'nsp-controller.mjs', 'nsp-reconciliation.mjs', 'queue-defender.mjs',
+    'private-link.mjs', 'private-link-whatif.mjs', 'private-link-controller.mjs', 'private-link-readback.mjs',
+    'private-link-runtime.mjs', 'private-link-exec.py', 'private-link-artifacts.mjs', 'private-link-nsg-adoption.mjs'];
   const hash = createHash('sha256');
   for (const name of names) hash.update(name).update(await readFile(resolve(here, name)));
   const contract = await storageContract(); hash.update(json(contract));
@@ -212,6 +229,7 @@ export async function az(args, timeout = 60000, run = execute) {
   try {
     const { stdout } = await run('az', args, { timeout, maxBuffer: 64 * 1024 * 1024,
       env: { ...process.env, AZURE_CORE_COLLECT_TELEMETRY: 'false', AZURE_EXTENSION_USE_DYNAMIC_INSTALL: 'no' } });
+    if (args[0] === 'rest' && args[args.indexOf('--method') + 1] === 'GET' && ['', 'null'].includes(stdout.trim())) fail('ARM_EMPTY_READ_RESPONSE');
     return stdout.trim() ? JSON.parse(stdout) : null;
   } catch (error) {
     const { code, status } = cliError(error);
@@ -228,6 +246,11 @@ export async function az(args, timeout = 60000, run = execute) {
     const queueAssignment = /^https:\/\/management\.azure\.com\/subscriptions\/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\/resourceGroups\/missionspec-[a-z0-9]{2,10}-telemetry\/providers\/Microsoft\.Storage\/storageAccounts\/msrtq[a-z0-9]{8,16}\/queueServices\/default\/queues\/telemetry-events-v1\/providers\/Microsoft\.Authorization\/roleAssignments\/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\?api-version=2022-04-01$/iu.exec(args[args.indexOf('--url') + 1] ?? '');
     if (args[0] === 'rest' && args[args.indexOf('--method') + 1] === 'GET' && status === 404 && code === 'RoleAssignmentNotFound' &&
         queueAssignment && sameId(queueAssignment[1], args[args.indexOf('--subscription') + 1])) return null;
+    const nspResource = /^https:\/\/management\.azure\.com\/subscriptions\/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\/resourceGroups\/(missionspec-[a-z0-9]{2,10})-telemetry\/providers\/Microsoft\.Network\/networkSecurityPerimeters\/\2-queue-[a-z0-9]{8,16}(?:\/(?:resourceAssociations\/queue-storage-v1|profiles\/queue-storage-v1(?:\/accessRules\/same-subscription-v1)?))?\?api-version=2025-09-01$/iu.exec(args[args.indexOf('--url') + 1] ?? '');
+    const storageNspConfiguration = /^https:\/\/management\.azure\.com\/subscriptions\/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\/resourceGroups\/missionspec-[a-z0-9]{2,10}-telemetry\/providers\/Microsoft\.Storage\/storageAccounts\/msrtq[a-z0-9]{8,16}\/networkSecurityPerimeterConfigurations\/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.queue-storage-v1\?api-version=2025-01-01$/iu.exec(args[args.indexOf('--url') + 1] ?? '');
+    const nspAbsent = nspResource ?? storageNspConfiguration;
+    if (args[0] === 'rest' && args[args.indexOf('--method') + 1] === 'GET' && status === 404 && code === 'NotFound' &&
+        nspAbsent && sameId(nspAbsent[1], args[args.indexOf('--subscription') + 1])) return null;
     const safe = new Error('ARM_OPERATION_FAILED'); safe.armCode = code; safe.httpStatus = status;
     safe.diagnostics = processFailureMetadata(error, timeout, performance.now() - started, azureStep(args), status, code);
     throw safe;
@@ -235,7 +258,7 @@ export async function az(args, timeout = 60000, run = execute) {
 }
 function azureStep(args) {
   if (args[0] === 'deployment' && ['group', 'sub'].includes(args[1]) && ['validate', 'what-if'].includes(args[2])) return `deployment.${args[1]}.${args[2]}`;
-  if (args[0] === 'rest' && ['GET', 'POST', 'PUT'].includes(args[args.indexOf('--method') + 1])) return `arm.${args[args.indexOf('--method') + 1].toLowerCase()}`;
+  if (args[0] === 'rest' && ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(args[args.indexOf('--method') + 1])) return `arm.${args[args.indexOf('--method') + 1].toLowerCase()}`;
   return 'azure-cli';
 }
 export function processFailureMetadata(error, timeoutMs, elapsedMs, step, httpStatus = null, armCode = null) {
@@ -252,7 +275,7 @@ export function safeOperationFailure(error) {
     httpStatus: Number.isInteger(error?.httpStatus) && error.httpStatus >= 100 && error.httpStatus <= 599 ? error.httpStatus : null,
     bridgeCode: typeof error?.bridgeCode === 'string' && /^[A-Z_]+$/u.test(error.bridgeCode) ? error.bridgeCode : null,
     diagnostics: d ? {
-      step: typeof d.step === 'string' && /^(?:what-if\.(?:start|poll|region)|deployment\.(?:group|sub)\.(?:validate|what-if)|arm\.(?:get|post|put)|azure-cli)$/u.test(d.step) ? d.step : 'unclassified',
+      step: typeof d.step === 'string' && /^(?:what-if\.(?:start|poll|region)|deployment\.(?:group|sub)\.(?:validate|what-if)|arm\.(?:get|post|put|patch|delete)|azure-cli)$/u.test(d.step) ? d.step : 'unclassified',
       kind: ['process-timeout', 'http-error', 'process-or-response-error'].includes(d.kind) ? d.kind : 'unclassified',
       configuredTimeoutMs: Number.isFinite(d.configuredTimeoutMs) ? d.configuredTimeoutMs : null,
       elapsedMs: Number.isFinite(d.elapsedMs) ? d.elapsedMs : null, killed: d.killed === true, timeoutObserved: d.timeoutObserved === true,
@@ -306,10 +329,13 @@ async function azureCliPython() {
   fail('AZURE_CLI_RUNTIME_UNAVAILABLE');
 }
 export function whatIfRequestContext(c, phase) {
+  if (phase.kind === 'fixed-private-link-control-phase') return privateLinkWhatIfContext(c, phase);
+  if (phase.kind === 'fixed-private-link-runtime-phase') return privateLinkRuntimeWhatIfContext(c, phase);
   const r = ids(c), scope = ['project-budget', 'upload-role', 'queue-role'].includes(phase.phase) ? 'subscription' : 'group';
+  const instance = phase.windowInstance ?? (phase.phase === 'nsp-subscription-readmit' ? phase.instance : undefined);
   if ([...TOGGLE_PHASES, ...IMAGE_PHASES].includes(phase.phase)) validateWindowInstance(c, phase.windowInstance);
   if (phase.scope !== (scope === 'subscription' ? r.sub : r.group) ||
-      phase.deploymentId !== `${phase.scope}/providers/Microsoft.Resources/deployments/${deploymentName(c, phase.phase, phase.windowInstance)}`) fail('FIXED_WHAT_IF_PHASE_REQUIRED');
+      phase.deploymentId !== `${phase.scope}/providers/Microsoft.Resources/deployments/${deploymentName(c, phase.phase, instance)}`) fail('FIXED_WHAT_IF_PHASE_REQUIRED');
   const inspect = value => {
     if (typeof value === 'string' && /^\s*\[/u.test(value)) fail('STATIC_WHAT_IF_TEMPLATE_REQUIRED');
     if (Array.isArray(value)) value.forEach(inspect);
@@ -323,7 +349,7 @@ export function whatIfRequestContext(c, phase) {
     mode: 'Incremental', parameters: {}, template: phase.template, whatIfSettings: { resultFormat: 'FullResourcePayloads' } } });
   const fields = { subscriptionId: c.subscriptionId, tenantId: c.tenantId, location: c.location,
     namePrefix: c.namePrefix, runId: c.runId, phase: phase.phase, scope, phaseSha256: digest(json(phase)), bodySha256: digest(body),
-    windowInstanceId: phase.windowInstance?.id ?? null, predecessorSha256: phase.windowInstance?.predecessorSha256 ?? null };
+    windowInstanceId: instance?.id ?? null, predecessorSha256: instance?.predecessorSha256 ?? null };
   return { ...fields, contextSha256: digest(Object.values(fields).join('\n')), body };
 }
 export async function authenticatedWhatIfRequest(context, directory, operation, run = execute, locate = azureCliPython) {
@@ -334,7 +360,9 @@ export async function authenticatedWhatIfRequest(context, directory, operation, 
   else if (pollUrl !== null || initialResponseFile !== null) fail('WHAT_IF_START_HANDLE_FORBIDDEN');
   const id = randomUUID(), requestFile = `whatif-request-${id}.json`, responseFile = `whatif-response-${id}.json`;
   const { body, ...fields } = context;
-  await saveImmutable(directory, requestFile, { version: 2, ...fields, action, body: action === 'start' ? body : null,
+  await saveImmutable(directory, requestFile, { version: Object.hasOwn(fields, 'runtimeTargetSha256') ? 4
+    : Object.hasOwn(fields, 'migrationKey') ? 3 : 2,
+    ...fields, action, body: action === 'start' ? body : null,
     pollUrl, initialResponseFile, timeoutMs, deadlineMs });
   const started = performance.now();
   try {
@@ -442,18 +470,19 @@ export async function asyncWhatIf(c, phase, directory, options = {}) {
     throw error;
   }
 }
-export function transport(c, phase, directory, invoke = az, topology) {
+export function transport(c, phase, directory, invoke = az, topology, policyReads = new Set()) {
   const r = ids(c);
   const forbiddenOperations = new Set(['listkeys', 'listsecrets', 'listaccountsas', 'listservicesas', 'regeneratekey', 'register']);
   if (topology) verifyQueueTopology(c, topology);
   const diagnosticTargets = [r.workspace, r.environment, r.app, ...(topology ? [topology.ids.account, topology.ids.service] : [])]
     .map(id => id + '/providers/Microsoft.Insights/diagnosticSettings');
   return async (method, id, version, body, filter, beforeDispatch, beforeAssignmentWrite, beforeToggleWrite) => {
+    const policyRead = method === 'GET' && body === undefined && policyReads.has(json([id, version, filter ?? null]));
     const diagnosticRead = diagnosticTargets.includes(id) && method === 'GET' && version === DIAGNOSTIC_API && body === undefined && filter === undefined;
     const queueOperationsRead = topology && id === '/providers/Microsoft.Storage/operations' && method === 'GET' &&
       version === '2025-01-01' && body === undefined && filter === undefined;
-    if (!['GET', 'POST', 'PUT'].includes(method) || (!queueOperationsRead && id !== r.sub && !id.startsWith(`${r.sub}/`)) ||
-        /[?#\\]|\.\.|%/u.test(id) || (!/^\d{4}-\d{2}-\d{2}$/u.test(version) && !diagnosticRead) ||
+    if (!['GET', 'POST', 'PUT'].includes(method) || (!queueOperationsRead && !policyRead && id !== r.sub && !id.startsWith(`${r.sub}/`)) ||
+        /[?#\\]|\.\.|%/u.test(id) || (!/^\d{4}-\d{2}-\d{2}$/u.test(version) && !diagnosticRead && !policyRead) ||
         (id.toLowerCase().includes('/providers/microsoft.insights/diagnosticsettings') && !diagnosticRead) ||
         id.split('/').some(component => forbiddenOperations.has(component.toLowerCase()))) fail('ARM_SCOPE_FORBIDDEN');
     if (method === 'PUT' && id !== phase.deploymentId) fail('FIXED_PHASE_PUT_ONLY');
@@ -465,7 +494,7 @@ export function transport(c, phase, directory, invoke = az, topology) {
     if (method === 'POST' && id !== `${r.sub}/providers/Microsoft.ContainerRegistry/checkNameAvailability`) fail('NONMUTATING_POST_ONLY');
     const inventoryMetadata = method === 'GET' && id === `${r.group}/resources` && version === '2021-04-01' &&
       body === undefined && filter === '$expand=createdTime,changedTime';
-    if (filter && !filter.startsWith('$filter=') && !inventoryMetadata) fail('QUERY_NOT_SUPPORTED');
+    if (filter && !filter.startsWith('$filter=') && !inventoryMetadata && !policyRead) fail('QUERY_NOT_SUPPORTED');
     const args = ['rest', '--method', method, '--url', `https://management.azure.com${id}?api-version=${version}${filter ? '&' + filter : ''}`,
       '--subscription', c.subscriptionId, '--only-show-errors', '--output', 'json'];
     let name;
@@ -482,7 +511,7 @@ export function transport(c, phase, directory, invoke = az, topology) {
       // No await between the guard and transport invocation, including body-file preparation.
       if (method === 'PUT' && beforeDispatch() !== undefined) fail('DISPATCH_GUARD_REQUIRED');
       const result = await invoke(args);
-      if (result?.nextLink) fail('PAGINATION_REQUIRES_REVIEW');
+      if (result?.nextLink && !policyRead) fail('PAGINATION_REQUIRES_REVIEW');
       return result;
     } finally { if (name) await rm(resolve(directory, name)); }
   };
@@ -555,7 +584,12 @@ export async function publishedSourceDigest(commitSha, run = execute) {
     await run('git', ['merge-base', '--is-ancestor', commitSha, 'HEAD'], options);
     const file = async path => (await run('git', ['--no-pager', 'show', `${commitSha}:${path}`], options)).stdout;
     const hash = createHash('sha256');
-    for (const name of ['definition.mjs', 'policy.mjs', 'controller.mjs']) hash.update(name).update(await file(`infrastructure/arm/telemetry/${name}`));
+    let controller;
+    for (const name of ['definition.mjs', 'policy.mjs', 'controller.mjs']) {
+      const bytes = await file(`infrastructure/arm/telemetry/${name}`);
+      if (name === 'controller.mjs') controller = bytes.toString();
+      hash.update(name).update(bytes);
+    }
     const bridgePath = 'infrastructure/arm/telemetry/arm-whatif.py';
     const bridge = (await run('git', ['ls-tree', '--name-only', commitSha, '--', bridgePath], options)).stdout.toString().trim();
     if (bridge) {
@@ -573,6 +607,31 @@ export async function publishedSourceDigest(commitSha, run = execute) {
     if (queue) {
       if (queue !== queuePath) fail('PUBLISHED_ORIGIN_INVALID');
       hash.update('durable-queue.mjs').update(await file(queuePath));
+    }
+    // Historical controllers did not import this module or include it in their digest.
+    if (controller.includes("from './effective-policy.mjs'")) {
+      hash.update('effective-policy.mjs').update(await file('infrastructure/arm/telemetry/effective-policy.mjs'));
+    }
+    let privateLinkController;
+    for (const name of ['queue-adoption.mjs', 'nsp.mjs', 'nsp-controller.mjs', 'nsp-reconciliation.mjs', 'queue-defender.mjs',
+      'private-link.mjs', 'private-link-whatif.mjs', 'private-link-controller.mjs', 'private-link-readback.mjs',
+      'private-link-runtime.mjs']) {
+      const dependency = name === 'private-link-readback.mjs' ? 'private-link-controller.mjs' : name;
+      if (controller.includes(`from './${dependency}'`)) {
+        const bytes = await file(`infrastructure/arm/telemetry/${name}`);
+        if (name === 'private-link-controller.mjs') privateLinkController = bytes.toString();
+        hash.update(name).update(bytes);
+      }
+    }
+    if (controller.includes("from './private-link-runtime.mjs'")) {
+      hash.update('private-link-exec.py').update(await file('infrastructure/arm/telemetry/private-link-exec.py'));
+    }
+    if (controller.includes("from './private-link-artifacts.mjs'")) {
+      hash.update('private-link-artifacts.mjs').update(await file('infrastructure/arm/telemetry/private-link-artifacts.mjs'));
+    }
+    if (controller.includes("from './private-link-nsg-adoption.mjs'") ||
+        privateLinkController?.includes("from './private-link-nsg-adoption.mjs'")) {
+      hash.update('private-link-nsg-adoption.mjs').update(await file('infrastructure/arm/telemetry/private-link-nsg-adoption.mjs'));
     }
     const schema = JSON.parse(await file('assets/schemas/telemetry-event.schema.json'));
     const columns = JSON.parse(await file('services/telemetry-ingest/schema/storage-columns.json'));
@@ -719,14 +778,28 @@ async function reconciliationContext(c, origins, arm, invoke, candidate) {
   }
   return { workspace, identities, imagePublication, roleDefinitions };
 }
+export function reconciliationReceiverCandidate(proposal, candidate) {
+  if (![4, 5, 6].includes(proposal?.version)) return null;
+  const match = [candidate, candidate?.priorCandidate].find(value => value &&
+    value.publication !== null && value.publication !== undefined &&
+    digest(json(value)) === proposal.receiverCandidateSha256);
+  if (!match) fail('RECONCILIATION_RECEIVER_PUBLICATION_REQUIRED');
+  return match;
+}
+function publishedReceiverCandidate(candidate) {
+  const value = candidate?.version === 2 && candidate.publication === null ? candidate.priorCandidate : candidate;
+  return value?.publication !== undefined && value.publication !== null ? value : null;
+}
 export async function collectReconciliation(c, origin, directory, evidence, invoke = az, lookup = publishedSourceDigest, options = {}) {
   const now = options.now ?? Date.now, deadline = Math.min(options.deadline ?? now() + 120000, now() + 120000);
   const policySource = await sourceDigest();
   invoke = limitReadConcurrency(boundedInvoke(deadline, invoke, now));
   const foundation = verifyFoundationBudgets(c, evidence.foundationBudgets), origins = evidence.reconciliation.origins;
   const suppliedCandidate = evidence.receiverCandidate ?? evidence.reconciliation.receiverCandidate;
-  const receiverCandidate = suppliedCandidate?.publication !== undefined && suppliedCandidate.publication !== null ? suppliedCandidate : null;
-  const overlay = evidence.receiverUpgrade ? { receiverUpgrade: evidence.receiverUpgrade, queueRecords: evidence.queueRecords ?? {} } : null;
+  const receiverCandidate = publishedReceiverCandidate(suppliedCandidate);
+  const nsp = evidence.queueRecords?.['queue-storage']?.kind === 'reviewed-queue-storage-adoption';
+  const overlay = evidence.receiverUpgrade ? { receiverUpgrade: evidence.receiverUpgrade, queueRecords: evidence.queueRecords ?? {},
+    ...(nsp ? { nspNetwork: evidence.nspNetwork } : {}) } : null;
   const contract = await storageContract();
   await verifyPublishedOrigins(c, foundation, origins, lookup, contract);
   if (receiverCandidate) {
@@ -738,6 +811,7 @@ export async function collectReconciliation(c, origin, directory, evidence, invo
     await verifyPublishedWindowPredecessor(c, overlay.receiverUpgrade, lookup, options.sourceRun);
     knownResourceIds(c, { queueRecords: overlay.queueRecords });
     await verifyPublishedQueueRecords(c, overlay.queueRecords, lookup);
+    if (nsp) await verifyPublishedNspEvidence(c, overlay.nspNetwork, overlay.queueRecords['queue-storage'].topology, overlay.queueRecords['queue-storage'], lookup);
   }
   const r = ids(c), arm = transport(c, origins.records[0].phase, directory, invoke);
   const account = await invoke(['account', 'show', '--subscription', c.subscriptionId, '--only-show-errors', '--output', 'json']);
@@ -761,16 +835,24 @@ export async function collectReconciliation(c, origin, directory, evidence, invo
     () => arm('GET', `${r.group}/resources`, '2021-04-01', undefined, '$expand=createdTime,changedTime'),
     () => arm('GET', r.managedGroup, '2024-03-01'),
   ], read => read());
+  const nspReadback = nsp ? {
+    nspObservation: await collectNspObservation(overlay.nspNetwork.topology, nspReadIO(c, directory, invoke, { now }), deadline,
+      { c, adoption: overlay.queueRecords['queue-storage'] }),
+    nspLineageHead: await readNspHead(overlay.nspNetwork),
+  } : {};
   if (await sourceDigest() !== policySource) fail('RECONCILIATION_SOURCE_CHANGED');
-  const proposal = { version: overlay ? 5 : receiverCandidate ? 4 : 3, kind: 'read-only-completed-phases', sourceSha256: policySource,
+  const proposal = { version: nsp ? 6 : overlay ? 5 : receiverCandidate ? 4 : 3, kind: 'read-only-completed-phases', sourceSha256: policySource,
     ...(receiverCandidate ? { receiverCandidateSha256: digest(json(receiverCandidate)) } : {}),
     ...(overlay ? { receiverUpgradeSha256: digest(json(overlay.receiverUpgrade)), queueRecordsSha256: digest(json(overlay.queueRecords)) } : {}),
+    ...(nsp ? { queueAdoptionSha256: digest(json(overlay.queueRecords['queue-storage'])), nspNetworkSha256: digest(json(overlay.nspNetwork)) } : {}),
+    ...nspReadback,
     configSha256: digest(json(c)), executionOriginsSha256: digest(json(origins)), baselineSha256,
     checkedAt: new Date().toISOString(), results, stateBudget, ...context, inventory, managedGroup };
   verifyReconciliation(c, foundation, origins, proposal, proposal.sourceSha256, null, contract, receiverCandidate, overlay);
   if (overlay && Object.keys(overlay.queueRecords).length) {
     const topology = overlay.queueRecords['queue-storage'].topology;
-    await readQueueRecords(c, topology, overlay.queueRecords, transport(c, origins.records[0].phase, directory, invoke, topology));
+    await readQueueRecords(c, topology, overlay.queueRecords, transport(c, origins.records[0].phase, directory, invoke, topology),
+      nspReadIO(c, directory, invoke, { now }), deadline);
   }
   if (now() >= deadline) fail('WINDOW_READ_DEADLINE');
   return proposal;
@@ -779,12 +861,14 @@ export async function reviewedReconciliationReceipts(c, foundation, evidence, so
   if (!evidence?.origins || !evidence.proposal || !evidence.review) fail('RECONCILIATION_REVIEW_REQUIRED');
   const contract = await storageContract();
   await verifyPublishedOrigins(c, foundation, evidence.origins, lookup, contract);
-  const receiverCandidate = [4, 5].includes(evidence.proposal.version) ? evidence.receiverCandidate : null;
-  const overlay = evidence.proposal.version === 5 ? { receiverUpgrade: evidence.receiverUpgrade, queueRecords: evidence.queueRecords ?? {} } : null;
+  const receiverCandidate = reconciliationReceiverCandidate(evidence.proposal, evidence.receiverCandidate);
+  const overlay = [5, 6].includes(evidence.proposal.version) ? { receiverUpgrade: evidence.receiverUpgrade, queueRecords: evidence.queueRecords ?? {},
+    ...(evidence.proposal.version === 6 ? { nspNetwork: evidence.nspNetwork } : {}) } : null;
   if (receiverCandidate) await verifyReceiverSource(receiverCandidate, options.sourceRun, lookup);
   if (overlay) {
     await verifyPublishedWindowPredecessor(c, overlay.receiverUpgrade, lookup, options.sourceRun);
     await verifyPublishedQueueRecords(c, overlay.queueRecords, lookup);
+    if (evidence.proposal.version === 6) await verifyPublishedNspEvidence(c, overlay.nspNetwork, overlay.queueRecords['queue-storage'].topology, overlay.queueRecords['queue-storage'], lookup);
   }
   verifyReconciliation(c, foundation, evidence.origins, evidence.proposal, sourceSha256, evidence.review, contract, receiverCandidate, overlay);
   return Object.fromEntries(evidence.origins.records.map(record => {
@@ -801,14 +885,13 @@ export async function reviewedReconciliationReceipts(c, foundation, evidence, so
 export async function verifyFreshReconciliation(c, directory, evidence, invoke = az, transition, imageContext = {}) {
   invoke = limitReadConcurrency(invoke);
   const arm = transport(c, evidence.origins.records[0].phase, directory, invoke);
-  const receiverCandidate = imageContext.receiverCandidate ?? evidence.receiverCandidate;
-  const historicalCandidate = evidence.proposal.version === 4 && receiverCandidate?.version === 2 ? receiverCandidate.priorCandidate : receiverCandidate;
-  if ([4, 5].includes(evidence.proposal.version) && (!historicalCandidate ||
-      evidence.proposal.receiverCandidateSha256 !== digest(json(historicalCandidate)))) fail('RECONCILIATION_RECEIVER_PUBLICATION_REQUIRED');
+  const suppliedCandidate = imageContext.receiverCandidate ?? evidence.receiverCandidate;
+  const historicalCandidate = reconciliationReceiverCandidate(evidence.proposal, suppliedCandidate);
+  const receiverCandidate = publishedReceiverCandidate(suppliedCandidate) ?? historicalCandidate;
   const context = await reconciliationContext(c, evidence.origins, arm, invoke, receiverCandidate);
   if (context.workspace && !isDeepStrictEqual(executionIdentity(context.workspace), executionIdentity(evidence.proposal.workspace))) fail('RESOURCE_IDENTITY_CHANGED');
   const currentApps = await readBatch(evidence.origins.records, async record => {
-    const current = await readReconciledPhase(c, record, arm, { ...context, ...imageContext,
+    const current = await readReconciledPhase(c, record, arm, { ...context, ...imageContext, receiverCandidate,
       publication: evidence.origins.imagePublication?.receipt, transition });
     if (!isDeepStrictEqual(current.identityPins, evidence.proposal.results[record.phase.phase].identityPins)) fail('RESOURCE_IDENTITY_CHANGED');
     return record.phase.phase === 'disabled-app' ? {
@@ -938,10 +1021,11 @@ export async function validateReadOnly(c, phase, receipts, directory, invoke = a
   if (now() >= deadline) fail('WINDOW_READ_DEADLINE');
   const context = [...TOGGLE_PHASES, ...IMAGE_PHASES, ...QUEUE_PHASES].includes(phase.phase) ? { config: c, ...resourceContext(c, receipts),
     ...(options.queueTopology ? { queueTopology: options.queueTopology } : {}),
+    ...(options.networkContext ? { networkContext: options.networkContext } : {}),
     ...(options.receiverCandidate ? { receiverCandidate: options.receiverCandidate } : {}),
     app: currentApp ?? receiverAnchor(c, receipts) } : undefined;
   const queuePreview = QUEUE_PHASES.includes(phase.phase)
-    ? verifyQueueWhatIf(c, phase, options.queueTopology, whatif, known, context.identities[r.ingestIdentity]) : undefined;
+    ? verifyQueueWhatIf(c, phase, options.queueTopology, whatif, known, context.identities[r.ingestIdentity], options.networkContext ?? null) : undefined;
   const whatIfSha256 = queuePreview?.whatIfSha256 ?? verifyWhatIf(phase, whatif, known, context);
   if (queuePreview) await save(directory, `${phase.phase}-preview-uncertainty.json`, queuePreview);
   if (now() >= deadline) fail('WINDOW_READ_DEADLINE');
@@ -959,13 +1043,36 @@ export function knownResourceIds(c, receipts) {
     const last = QUEUE_PHASES.filter(name => Object.hasOwn(receipts.queueRecords, name)).at(-1);
     const topology = receipts.queueRecords[last]?.topology;
     known.push(...Object.keys(qualifiedQueueRecords(c, receipts.queueRecords, topology, last)));
+    const adoption = receipts.queueRecords['queue-storage'];
+    if (adoption.version === 3) known.push(...Object.keys(queueDefenderInventory(c, adoption.origin,
+      adoption.proposal.defender, adoption.observation.defender)));
+  }
+  if (receipts.nspNetwork) {
+    const adoption = receipts.queueRecords?.['queue-storage'];
+    const tip = verifyNspEvidence(c, receipts.nspNetwork, adoption?.topology, adoption);
+    if (tip) known.push(...Object.entries(tip.observation.resources).filter(([, value]) => value !== null).map(([id]) => id));
   }
   return [...new Set(known)];
 }
-export async function readQueueRecords(c, topology, records, arm) {
+export async function readQueueRecords(c, topology, records, arm, defenderIO = null, deadline = null) {
   if (!Object.keys(records).length) return;
   qualifiedQueueRecords(c, records, topology, QUEUE_PHASES.filter(name => Object.hasOwn(records, name)).at(-1));
   await readBatch(Object.values(records), async record => {
+    if (record.kind === 'reviewed-queue-storage-adoption') {
+      const adopted = verifyQueueAdoptionRecord(c, record), resources = {};
+      const deployment = await arm('GET', record.origin.phase.deploymentId, '2022-09-01');
+      verifyDeploymentIdentity(adopted.deployment, deployment);
+      await readBatch([topology.ids.account, topology.ids.service, topology.ids.queue], async id => {
+        resources[id] = await arm('GET', id, NSP_STORAGE_API);
+      });
+      const access = resources[topology.ids.account]?.properties?.publicNetworkAccess;
+      verifyAdoptedQueueStorage(c, record, resources, access);
+      if (record.version === 3) {
+        if (!defenderIO || typeof defenderIO.read !== 'function' || typeof defenderIO.now !== 'function') fail('QUEUE_DEFENDER_READ_PORT_REQUIRED');
+        await collectQueueDefender(c, record.origin, record.proposal.defender, defenderIO, deadline);
+      }
+      return;
+    }
     const deployment = await arm('GET', record.phase.deploymentId, '2022-09-01');
     verifyDeploymentIdentity(record.receipt.deployment, deployment);
     await readBatch(record.phase.resources, async descriptor => {
@@ -982,6 +1089,9 @@ export async function readQueueRecords(c, topology, records, arm) {
 }
 export async function verifyPublishedQueueRecords(c, records, lookup = publishedSourceDigest) {
   for (const record of Object.values(records)) {
+    if (record.kind === 'reviewed-queue-storage-adoption') {
+      await verifyQueueAdoptionSources(c, record, lookup); continue;
+    }
     verifyQueueRecord(c, record);
     if (await lookup(record.publication.commitSha) !== record.publication.sourceSha256) fail('QUEUE_PUBLISHED_SOURCE_CHANGED');
   }
@@ -993,7 +1103,420 @@ export async function readQueuePrivacy(topology, arm) {
   verifyQueuePrivacy(topology, value);
   return value;
 }
+export async function checkEffectivePolicies(c, phase, directory, invoke, topology, expectedSha256, options = {}) {
+  if (effectivePolicyScopes(phase).some(scope => !sameId(scope, ids(c).sub) && !sameId(scope, ids(c).group))) fail('EFFECTIVE_POLICY_SCOPE_FORBIDDEN');
+  const now = options.now ?? Date.now, deadline = Math.min(options.deadline ?? invokeDeadlines.get(invoke) ?? now() + 120000, now() + 120000);
+  const policyReads = new Set(), arm = transport(c, phase, directory,
+    limitReadConcurrency(boundedInvoke(deadline, invoke, now)), topology, policyReads);
+  const name = `${phase.phase}-effective-policy${expectedSha256 ? '-dispatch' : ''}`;
+  let failedRead;
+  try {
+    const evidence = await collectEffectivePolicies(phase, async (id, apiVersion, filter) => {
+      policyReads.add(json([id, apiVersion, filter ?? null]));
+      try { return await arm('GET', id, apiVersion, undefined, filter); }
+      catch (error) { failedRead ??= { id, apiVersion, filter: filter ?? null }; throw error; }
+    }, readBatch, snapshot => save(directory, `${name}-reads.json`, snapshot));
+    if (now() >= deadline) fail('WINDOW_READ_DEADLINE');
+    await save(directory, `${name}.json`, evidence);
+    if (!evidence.qualified) fail('EFFECTIVE_POLICY_CONFLICT');
+    verifyEffectivePolicyEvidence(phase, evidence);
+    const effectivePolicySha256 = digest(json(evidence));
+    if (expectedSha256 && expectedSha256 !== effectivePolicySha256) fail('EFFECTIVE_POLICY_DRIFT');
+    return { effectivePolicyVersion: 1, effectivePolicySha256, effectivePolicy: evidence };
+  } catch (error) {
+    await save(directory, `${name}-failure.json`, { phaseSha256: digest(json(phase)), failure: safeOperationFailure(error),
+      ...(failedRead ? { failedRead, failedReadSha256: digest(json(failedRead)) } : {}) });
+    throw error;
+  }
+}
+function nspContext(c, receipts, evidence) {
+  const adoption = receipts.queueRecords?.['queue-storage'];
+  if (adoption?.kind !== 'reviewed-queue-storage-adoption') return null;
+  const admission = evidence.nspNetwork ?? receipts.nspNetwork;
+  if (!admission) fail('NSP_CURRENT_ADMISSION_REQUIRED');
+  verifyNspAdmission(c, admission, adoption.topology, adoption);
+  return { adoption, admission };
+}
+function nspHeadName(network) { return `nsp-head-${nspTargetKey(network)}.json`; }
+function nspFenceName(network) { return `nsp-intent-fence-${nspTargetKey(network)}.json`; }
+export async function readNspHead(evidence, pending = null, read = load) {
+  const root = resolve(here, '.operator-private'), expected = nspLineageHead(evidence);
+  const actual = await read(root, nspHeadName(evidence.topology), true);
+  const empty = actual === null && evidence.records.length === 0;
+  const ownedPending = pending && isDeepStrictEqual(actual, pending) && isDeepStrictEqual(pending.previousHead, expected);
+  if (!empty && !ownedPending && !isDeepStrictEqual(actual, expected)) fail('NSP_CANONICAL_HEAD_CHANGED');
+  const fence = await read(root, nspFenceName(evidence.topology), true);
+  if (empty) {
+    const firstIntent = await read(root, `nsp-intent-${nspIntentKey(evidence, { phase: 'nsp-empty-boundary', instance: null })}.json`, true);
+    if (fence !== null || firstIntent !== null) fail('NSP_UNRESOLVED_GLOBAL_INTENT');
+    return expected;
+  }
+  if (!fence?.reservation || !isDeepStrictEqual(fence, nspIntentFence(evidence, fence.reservation))) fail('NSP_INTENT_FENCE_CHANGED');
+  const archived = await read(root, `nsp-intent-${fence.intentKey}.json`, true);
+  if (!isDeepStrictEqual(archived, fence.reservation)) fail('NSP_INTENT_ARCHIVE_CHANGED');
+  if (ownedPending) {
+    if (!isDeepStrictEqual(actual, nspPendingHead(evidence, archived.phase, archived.journal))) fail('NSP_INTENT_FENCE_CHANGED');
+    return expected;
+  }
+  const record = evidence.records.at(-1);
+  if (!record) fail('NSP_UNRESOLVED_GLOBAL_INTENT');
+  const reservation = record.kind === 'reviewed-nsp-reconciliation' ? record.original.reservation : {
+    phase: record.phase, approvalSha256: digest(json(record.approval)),
+    journal: { ...Object.fromEntries(['version', 'phaseSha256', 'approvalSha256', 'requestSha256', 'predecessorSha256', 'intentAt']
+      .map(key => [key, record.journal[key]])), outcome: 'submission-possible', transportDispatchAttempted: false },
+  };
+  if (!isDeepStrictEqual(fence.reservation, reservation)) fail('NSP_UNRESOLVED_GLOBAL_INTENT');
+  return actual;
+}
+export async function reserveNspIntent(evidence, phase, journal, store = { read: load, save, saveImmutable }) {
+  const root = resolve(here, '.operator-private');
+  await readNspHead(evidence, null, store.read);
+  const reservation = { phase, approvalSha256: journal.approvalSha256, journal };
+  // Fence the physical target before either archive or head persistence can fail.
+  await store.save(root, nspFenceName(evidence.topology), nspIntentFence(evidence, reservation));
+  await store.saveImmutable(root, `nsp-intent-${nspIntentKey(evidence, phase)}.json`, reservation);
+  const pending = nspPendingHead(evidence, phase, journal);
+  await store.save(root, nspHeadName(evidence.topology), pending);
+  return pending;
+}
+export function nspReadIO(c, directory, invoke = az, options = {}, phase = null, binding = null) {
+  const now = options.now ?? Date.now, policyReads = new Set();
+  const dispatch = (args, timeout, deadline) => {
+    if (!Number.isSafeInteger(deadline) || now() >= deadline) fail('NSP_READ_DEADLINE');
+    return invoke(args, Math.min(timeout, NSP_LIMITS.commandMs, deadline - now()));
+  };
+  const limitedReads = limitReadConcurrency(dispatch);
+  const io = {
+    now, binding, batch: readBatch,
+    invoke: (args, timeout, deadline) => args[args.indexOf('--method') + 1] === 'GET'
+      ? limitedReads(args, timeout, deadline) : dispatch(args, timeout, deadline),
+    policyReadAllowed: request => policyReads.has(json(request)),
+    allowPolicyRead: request => policyReads.add(json(request)),
+    describeFailure: safeOperationFailure,
+    retainRead: (request, pages, outcome) => saveImmutable(directory, `nsp-read-${randomUUID()}.json`, { request, pages, outcome }),
+    prepareBody: async body => {
+      const name = `request-${randomUUID()}.json`; await saveImmutable(directory, name, body);
+      return { name, path: resolve(directory, name) };
+    },
+    removeBody: prepared => rm(prepared.path),
+  };
+  return { ...io, ...nspTransport(c, phase, io) };
+}
+export async function verifyPublishedNspEvidence(c, evidence, topology, adoption, lookup = publishedSourceDigest) {
+  verifyNspEvidence(c, evidence, topology, adoption);
+  await verifyQueueAdoptionSources(c, adoption, lookup);
+  await readBatch(evidence.records, async record => {
+    if (await lookup(record.publication.commitSha) !== record.publication.sourceSha256) fail('NSP_PUBLISHED_SOURCE_CHANGED');
+    if (record.kind === 'reviewed-nsp-reconciliation' &&
+        await lookup(record.original.publication.commitSha) !== record.original.publication.sourceSha256) fail('NSP_ORIGINAL_PUBLISHED_SOURCE_CHANGED');
+  });
+}
+export async function originalNspAttempt(phase, evidence, directory) {
+  const reservation = await load(resolve(here, '.operator-private'), `nsp-intent-${nspIntentKey(evidence, phase)}.json`);
+  return { phase, publication: await load(directory, 'nsp-policy-publication.json'),
+    approval: await load(directory, `${phase.phase}-approval.json`), preflight: await load(directory, `${phase.phase}-preflight.json`),
+    preview: await load(directory, `${phase.phase}-what-if.json`), validation: await load(directory, `${phase.phase}-validation.json`),
+    reservation, journal: await load(directory, `${phase.phase}-journal.json`), receipt: await load(directory, `${phase.phase}-receipt.json`, true) };
+}
+export function nspReconciliationIO(c, original, topology, adoption, prior, billing, directory, invoke = az, options = {}) {
+  const now = options.now ?? Date.now, root = resolve(here, '.operator-private');
+  return {
+    ...nspReadIO(c, directory, invoke, options), sourceDigest,
+    billingReview: billing.review, billingEvidence: billing.evidence,
+    pendingHead: async () => {
+      const pending = nspPendingHead(prior, original.phase, original.reservation.journal);
+      await readNspHead(prior, pending);
+      return pending;
+    },
+    compareAndAppend: async (expected, record, nextHead) => {
+      await readNspHead(prior, expected);
+      const unchanged = await originalNspAttempt(original.phase, prior, directory);
+      if (!isDeepStrictEqual(unchanged, original)) fail('NSP_ORIGINAL_ATTEMPT_CHANGED');
+      const guard = async () => {
+        if (now() >= canonicalInstant(record.review.expiresAt) ||
+            now() >= canonicalInstant(record.proposal.networkBillingReview.expiresAt) ||
+            now() - record.proposal.state.observation.startedAt > NSP_LIMITS.freshnessMs ||
+            await sourceDigest() !== record.publication.sourceSha256) fail('NSP_RECONCILIATION_COMMIT_EXPIRED');
+        await readNspHead(prior, expected);
+      };
+      await guard();
+      const result = { ...prior, records: [...prior.records, record] };
+      verifyNspEvidence(c, result, topology, adoption);
+      await saveImmutable(directory, `${original.phase.phase}-reconciled-record.json`, record);
+      await saveImmutable(directory, `${original.phase.phase}-reconciled-network.json`, result);
+      await guard();
+      await saveImmutable(root, `nsp-resolution-${digest(json(original.reservation))}.json`, {
+        version: 1, kind: 'append-only-nsp-lineage-resolution', previousHead: expected, nextHead, record });
+      await guard();
+      await save(root, nspHeadName(prior.topology), nextHead);
+    },
+  };
+}
+export async function currentNspAdmission(c, context, evidence, directory, deadline, invoke = az, options = {}) {
+  const now = options.now ?? Date.now, sourceSha256 = await sourceDigest();
+  const io = nspReadIO(c, directory, invoke, options);
+  const [networkObservation, networkLineageHead] = await readBatch([
+    () => collectNspObservation(context.admission.topology, io, deadline, { c, adoption: context.adoption }),
+    () => readNspHead(context.admission, null, options.headRead ?? load),
+  ], read => read());
+  const proof = { sourceSha256, networkObservation, networkLineageHead,
+    networkBillingReview: evidence.nspBillingReview, networkBillingEvidence: evidence.nspBillingEvidence,
+    ...nspReadinessBinding(context, networkLineageHead, evidence.nspBillingReview, networkObservation) };
+  verifyNspQueuePreflight(c, context, proof, now());
+  if (now() >= deadline || await sourceDigest() !== sourceSha256) fail('NSP_CURRENT_CHECK_EXPIRED');
+  return proof;
+}
+export async function checkQueuedPublication(c, receipts, evidence, directory, invoke = az, options = {}) {
+  const candidate = evidence.receiverCandidate;
+  if (candidate?.version !== 2) fail('QUEUE_PROFILE_PHASE_REQUIRED');
+  const now = options.now ?? Date.now, deadline = now() + NSP_LIMITS.stageMs, source = await sourceDigest();
+  invoke = limitReadConcurrency(boundedInvoke(deadline, invoke, now));
+  verifyReceiverCandidate(c, candidate, now(), false);
+  if (candidate.review.sourceSha256 !== source) fail('IMAGE_SOURCE_CHANGED');
+  const lookup = options.lookup ?? publishedSourceDigest;
+  await verifyReceiverSource(candidate, options.sourceRun, lookup);
+  const historical = reconciliationReceiverCandidate(evidence.reconciliation?.proposal, candidate);
+  if (!isDeepStrictEqual(historical, candidate.priorCandidate)) fail('QUEUE_PRIOR_RECEIVER_CHANGED');
+  const reconciled = await reviewedReconciliationReceipts(c, evidence.foundationBudgets,
+    { ...evidence.reconciliation, receiverCandidate: candidate }, source, lookup, options);
+  if (Object.entries(reconciled).some(([name, value]) => !isDeepStrictEqual(receipts[name], value))) fail('RECONCILIATION_RECEIPTS_REQUIRED');
+  if (!receipts.receiverUpgrade || !isDeepStrictEqual(receipts.receiverUpgrade.candidate, historical)) fail('QUEUE_PRIOR_RECEIVER_CHANGED');
+  await verifyFreshReconciliation(c, directory, { ...evidence.reconciliation, receiverCandidate: candidate }, invoke, undefined,
+    { receiverCandidate: historical, imageDescriptor: receipts.receiverUpgrade.phase.resources[0] });
+  qualifiedQueueRecords(c, receipts.queueRecords, candidate.topology);
+  const context = nspContext(c, receipts, evidence);
+  if (!context) fail('NSP_CURRENT_ADMISSION_REQUIRED');
+  await verifyPublishedNspEvidence(c, context.admission, candidate.topology, context.adoption, lookup);
+  const arm = transport(c, evidence.reconciliation.origins.records[0].phase, directory, invoke, candidate.topology);
+  await readQueueRecords(c, candidate.topology, receipts.queueRecords, arm, nspReadIO(c, directory, invoke, { now }), deadline);
+  const publicationReadback = await readPublishedImage(c, evidence.reconciliation.origins.imagePublication, arm, invoke, historical);
+  if (!isDeepStrictEqual(executionIdentity(publicationReadback.registry, 'Microsoft.ContainerRegistry/registries'),
+    executionIdentity(receipts.core.resources[ids(c).registry], 'Microsoft.ContainerRegistry/registries'))) fail('RESOURCE_IDENTITY_CHANGED');
+  const inventory = { repositories: publicationReadback.repositories, manifests: publicationReadback.manifests,
+    referrers: publicationReadback.referrers };
+  const publicationPreview = prepareReceiverPublication(c, candidate, inventory, now());
+  const proof = await currentNspAdmission(c, context, evidence, directory, deadline, invoke, options);
+  Object.assign(proof, { candidateSha256: digest(json(candidate)), priorCandidateSha256: digest(json(historical)),
+    reconciliationProposalSha256: digest(json(evidence.reconciliation.proposal)),
+    reconciliationReviewSha256: digest(json(evidence.reconciliation.review)), inventory, inventorySha256: digest(json(inventory)),
+    publicationPreview });
+  if (await sourceDigest() !== source || now() >= deadline) fail('NSP_PUBLICATION_PREFLIGHT_CHANGED');
+  await save(directory, 'nsp-publication-preflight.json', proof);
+  return proof;
+}
+export async function captureQueuedPublication(c, candidate, directory, invoke = az, options = {}) {
+  verifyReceiverCandidate(c, candidate, undefined, candidate?.publication !== null);
+  if (candidate.version !== 2) fail('QUEUE_PROFILE_PHASE_REQUIRED');
+  const now = options.now ?? Date.now, deadline = now() + NSP_LIMITS.stageMs;
+  const bounded = boundedInvoke(deadline, invoke, now), digestValue = candidate.profile.manifestDigest;
+  try {
+    const [manifest, manifests] = await readBatch([
+      () => bounded(['acr', 'manifest', 'show', '--registry', c.registryName,
+        '--name', `missionspec/telemetry-ingest@${digestValue}`, '--subscription', c.subscriptionId, '--only-show-errors', '--output', 'json']),
+      () => bounded(['acr', 'manifest', 'list-metadata', '--registry', c.registryName,
+        '--name', 'missionspec/telemetry-ingest', '--subscription', c.subscriptionId, '--only-show-errors', '--output', 'json']),
+    ], read => read());
+    const observation = { version: 1, kind: 'queued-publication-readback-not-admission', observedAt: new Date(now()).toISOString(),
+      registryId: ids(c).registry, digest: digestValue, manifest, manifests,
+      qualified: false, networkAdmissionQualified: false, replayAuthorized: false };
+    await saveImmutable(directory, 'queued-publication-observation.json', observation);
+    return observation;
+  } catch (error) {
+    await saveImmutable(directory, 'queued-publication-observation-failure.json', {
+      digest: digestValue, failure: safeOperationFailure(error), replayAuthorized: false });
+    throw error;
+  }
+}
+export function nspIO(c, phase, receipts, origin, evidence, directory, invoke = az, options = {}) {
+  const now = options.now ?? Date.now, topology = evidence.queueTopology;
+  const rawInvoke = invoke;
+  let activeDeadline = now() + NSP_LIMITS.stageMs;
+  const sharedReads = limitReadConcurrency((args, timeout) => boundedInvoke(activeDeadline, rawInvoke, now)(args, timeout));
+  invoke = (args, timeout) => args[0] === 'rest' && ['PUT', 'PATCH', 'DELETE'].includes(args[args.indexOf('--method') + 1])
+    ? boundedInvoke(activeDeadline, rawInvoke, now)(args, timeout) : sharedReads(args, timeout);
+  const adoption = receipts.queueRecords?.['queue-storage'], network = evidence.nspNetwork;
+  verifyNspEvidence(c, network, topology, adoption);
+  const port = nspReadIO(c, directory, invoke, options, phase, { topology, adoption, evidence: network });
+  const disabledEvidence = { ...evidence, receiverCandidate: receipts.receiverUpgrade?.candidate };
+  const common = receiverUpgradeIO(c, phase, receipts, origin, disabledEvidence, directory, invoke, options);
+  let pending = null;
+  const at = deadline => transport(c, phase, directory, limitReadConcurrency(boundedInvoke(deadline, invoke, now)), topology);
+  const disabled = async deadline => {
+    const observation = await common.observe(deadline), record = receipts.receiverUpgrade;
+    if (!record || admissionFlag(observation.app) !== 'false') fail('NSP_DISABLED_RECEIVER_REQUIRED');
+    verifyDisabledImageRecord(c, record);
+    verifyResource(c, record.phase, record.phase.resources[0], observation.app, observation.context);
+    if (!isDeepStrictEqual(executionIdentity(observation.app, 'Microsoft.App/containerApps'),
+      executionIdentity(record.receipt.resources[ids(c).app], 'Microsoft.App/containerApps'))) fail('NSP_RECEIVER_IDENTITY_CHANGED');
+    const identity = observation.context.identities[ids(c).ingestIdentity];
+    if (!sameId(identity.id, network.topology.identity) || identity.properties.tenantId !== c.tenantId ||
+        !sameId(observation.app.id, network.topology.host)) fail('NSP_CALLER_SCOPE_CHANGED');
+    const arm = at(deadline), q = topology.ids;
+    const [role, assignment, ...grants] = await readBatch([
+      () => arm('GET', q.role, '2022-04-01'), () => arm('GET', q.assignment, '2022-04-01'),
+      ...[q.account, q.service, q.queue].map(scope => () =>
+        port.read({ id: `${scope}/providers/Microsoft.Authorization/roleAssignments`, apiVersion: '2022-04-01', filter: '$filter=atScope()' }, deadline, true)),
+    ], read => read());
+    const expectedRole = phase.instance ? receipts.queueRecords?.['queue-role'] : null;
+    const expectedAssignment = phase.instance ? receipts.queueRecords?.['queue-assignment'] : null;
+    for (const [expected, actual] of [[expectedRole, role], [expectedAssignment, assignment]]) {
+      if (expected) verifyQueueResource(c, topology, expected.phase.resources[0], actual);
+      else if (actual !== null) fail('NSP_UNREVIEWED_QUEUE_GRANT');
+    }
+    for (const list of grants) for (const grant of list.value) {
+      const p = grant?.properties;
+      if (!p || typeof p.scope !== 'string' || typeof p.principalId !== 'string' || typeof p.roleDefinitionId !== 'string') fail('NSP_GRANT_EVIDENCE_UNVERIFIED');
+      const scoped = [q.account, q.service, q.queue].some(scope => sameId(p.scope, scope) || p.scope.toLowerCase().startsWith(scope.toLowerCase() + '/'));
+      if ((scoped || sameId(p.principalId, identity.properties.principalId)) &&
+          (!expectedAssignment || !sameId(grant.id, q.assignment) || !sameId(p.scope, q.queue) ||
+            !sameId(p.principalId, identity.properties.principalId) || !sameId(p.roleDefinitionId, q.role) || p.condition)) fail('NSP_UNREVIEWED_QUEUE_GRANT');
+    }
+  };
+  const io = {
+    ...port, sourceDigest, sleep: options.sleep ?? pause, cancelled: options.cancelled,
+    describeFailure: safeOperationFailure,
+    topologyReview: evidence.nspReview, billingReview: evidence.nspBillingReview, billingEvidence: evidence.nspBillingEvidence,
+    readHead: value => readNspHead(value, pending),
+    retainPolicy: snapshot => save(directory, `${phase.phase}-effective-policy-reads.json`, snapshot),
+    foundation: async deadline => {
+      activeDeadline = deadline;
+      verifyScannerAdoption(c, origin, evidence.scannerAdoption);
+      const foundation = verifyFoundationBudgets(c, evidence.foundationBudgets);
+      await verifyPublishedNspEvidence(c, network, topology, adoption, options.lookup ?? publishedSourceDigest);
+      const reconciled = await reviewedReconciliationReceipts(c, foundation, evidence.reconciliation, await sourceDigest(), options.lookup ?? publishedSourceDigest, options);
+      for (const [name, value] of Object.entries(reconciled)) {
+        if (!isDeepStrictEqual(receipts[name], value)) fail('NSP_RECONCILIATION_REQUIRED');
+      }
+      const account = await boundedInvoke(deadline, invoke, now)(['account', 'show', '--subscription', c.subscriptionId,
+        '--only-show-errors', '--output', 'json']);
+      if (account?.id !== c.subscriptionId || account.tenantId !== c.tenantId ||
+          account.state !== 'Enabled' || account.environmentName !== 'AzureCloud') fail('EXPLICIT_ACCOUNT_MISMATCH');
+      await readBatch([
+        () => verifyOrigin(origin, at(deadline), c, evidence.scannerAdoption),
+        () => verifyFreshReconciliation(c, directory, evidence.reconciliation, boundedInvoke(deadline, invoke, now), undefined,
+          { receiverCandidate: receipts.receiverUpgrade.candidate, imageDescriptor: receipts.receiverUpgrade.phase.resources[0] }),
+        () => common.security(deadline),
+        () => disabled(deadline),
+      ], read => read());
+      const known = knownResourceIds(c, { ...receipts, nspNetwork: network });
+      const inventory = await port.read({ id: `${ids(c).group}/resources`, apiVersion: '2021-04-01', filter: null }, deadline, true);
+      if (inventory.value.some(value => !known.some(id => sameId(id, value.id)))) fail('UNEXPECTED_TELEMETRY_RESOURCE');
+      const providers = await port.read({ id: `${ids(c).sub}/providers`, apiVersion: '2021-04-01', filter: null }, deadline, true);
+      const networkProviders = providers.value.filter(value => sameId(value.namespace, 'Microsoft.Network'));
+      if (networkProviders.length !== 1) fail('NSP_PROVIDER_NOT_QUALIFIED');
+      const provider = networkProviders[0];
+      verifyNspApiCatalog(provider);
+      verifyQueueApiCatalog(providers.value.find(value => sameId(value.namespace, 'Microsoft.Storage')));
+      if (phase.deploymentId && await at(deadline)('GET', phase.deploymentId, '2022-09-01')) fail('NSP_DEPLOYMENT_ALREADY_EXISTS');
+      return { known, providerCatalog: provider, baselineSha256: origin.policyBaselineSha256, binding: {
+        executionOriginsSha256: digest(json(evidence.reconciliation.origins)),
+        reconciliationSha256: digest(json(evidence.reconciliation)), receiverRecordSha256: digest(json(receipts.receiverUpgrade)),
+        receiverManifestDigest: receipts.receiverUpgrade.candidate.profile.manifestDigest,
+        receiverConfigDigest: receipts.receiverUpgrade.candidate.profile.configDigest } };
+    },
+    preview: async deadline => {
+      activeDeadline = deadline;
+      await save(directory, `${phase.phase}-template.json`, phase.template);
+      const validation = await boundedInvoke(deadline, invoke, now)(['deployment', 'group', 'validate', '--subscription', c.subscriptionId,
+        '--resource-group', `${c.namePrefix}-telemetry`, '--name', phase.deploymentId.split('/').at(-1),
+        '--template-file', resolve(directory, `${phase.phase}-template.json`), '--only-show-errors', '--output', 'json']);
+      if (validation?.properties?.provisioningState !== 'Succeeded' || validation.error || validation.properties.error || validation.nextLink) fail('NSP_TEMPLATE_NOT_VALIDATED');
+      const result = await asyncWhatIf(c, phase, directory, { ...options, deadline });
+      await save(directory, `${phase.phase}-what-if-raw.json`, result.raw);
+      return { validation, preview: result.result };
+    },
+    saveCheck: async (proof, preview) => {
+      await save(directory, `${phase.phase}-preflight.json`, proof);
+      await save(directory, `${phase.phase}-what-if.json`, preview.preview);
+      await save(directory, `${phase.phase}-validation.json`, preview.validation);
+    },
+    loadJournal: () => load(directory, `${phase.phase}-journal.json`, true),
+    saveJournal: journal => save(directory, `${phase.phase}-journal.json`, journal),
+    saveReceipt: receipt => saveImmutable(directory, `${phase.phase}-receipt.json`, receipt),
+    reserve: async journal => {
+      pending = await reserveNspIntent(network, phase, journal);
+    },
+    observe: async deadline => {
+      activeDeadline = deadline;
+      const deployment = phase.deploymentId ? await at(deadline)('GET', phase.deploymentId, '2022-09-01') : null;
+      if (phase.deploymentId && deployment?.properties?.provisioningState !== 'Succeeded') return { deployment, observation: null };
+      return { deployment, observation: await collectNspObservation(network.topology, port, deadline, { c, adoption }) };
+    },
+    verifyCurrent: async (proof, deadline) => {
+      activeDeadline = deadline;
+      await readNspHead(network, pending);
+      await readBatch([() => common.security(deadline), () => disabled(deadline)], read => read());
+      const [observation, permissions] = await readBatch([
+        () => collectNspObservation(network.topology, port, deadline, { c, adoption }),
+        () => collectNspPermissions(c, phase, network.topology, port, deadline),
+      ], read => read());
+      verifyNspObservation(c, network.topology, adoption, observation, phase.beforeStage);
+      if (!isDeepStrictEqual(nspState(observation), nspState(proof.observation)) ||
+          !isDeepStrictEqual(permissions, proof.permissions)) fail('NSP_DISPATCH_STATE_CHANGED');
+      const effective = await collectNspEffectivePolicies(phase, io, deadline);
+      if (digest(json(effective)) !== proof.effectivePolicySha256) fail('NSP_EFFECTIVE_POLICY_DRIFT');
+      if (phase.deploymentId && await at(deadline)('GET', phase.deploymentId, '2022-09-01')) fail('NSP_DEPLOYMENT_ALREADY_EXISTS');
+    },
+  };
+  io.check = () => {
+    activeDeadline = now() + NSP_LIMITS.stageMs;
+    return checkNspReadOnly(c, phase, topology, adoption, network, io);
+  };
+  return io;
+}
+async function checkQueuedDisableReadOnly(c, phase, origin, receipts, directory, evidence, invoke, lookup, transition, options) {
+  const now = options.now ?? Date.now, startedAt = now();
+  const deadline = Math.min(options.deadline ?? startedAt + 120000, startedAt + 120000);
+  invoke = limitReadConcurrency(boundedInvoke(deadline, invoke, now));
+  const source = await sourceDigest(), candidate = receipts.receiverUpgrade?.candidate;
+  if (phase.phase !== 'synthetic-disable' || phase.ingestEnabled !== false || candidate?.version !== 2 ||
+      !transition || transition.source !== source ||
+      !isDeepStrictEqual(transition.phases?.['synthetic-disable'], phase)) fail('PAIRED_RECEIVER_DISABLE_REQUIRED');
+  verifySyntheticWindow(c, transition.phases, transition.window, transition.approvals, source, now(), false);
+  if (transition.window.receiptsSha256 !== digest(json(receipts)) || transition.window.originSha256 !== digest(json(origin)) ||
+      !isDeepStrictEqual(phase, buildPhase(c, 'synthetic-disable', null, receipts, evidence.foundationBudgets,
+        evidence.reconciliation, phase.windowInstance))) fail('RECEIVER_DISABLE_PREREQUISITES_CHANGED');
+  verifyScannerAdoption(c, origin, evidence.scannerAdoption);
+  const foundation = verifyFoundationBudgets(c, evidence.foundationBudgets);
+  verifyDisabledImageRecord(c, receipts.receiverUpgrade);
+  await verifyReceiverSource(candidate, options.sourceRun, lookup);
+  const history = { ...evidence.reconciliation, receiverCandidate: candidate,
+    queueRecords: receipts.queueRecords, nspNetwork: receipts.nspNetwork };
+  const reconciled = await reviewedReconciliationReceipts(c, foundation, history, source, lookup, options);
+  if (Object.entries(reconciled).some(([name, value]) => !isDeepStrictEqual(receipts[name], value))) fail('RECONCILIATION_RECEIPTS_REQUIRED');
+  if (!evidence.windowPredecessor) fail('TERMINAL_WINDOW_PREDECESSOR_REQUIRED');
+  verifyWindowInstancePredecessor(c, phase.windowInstance, evidence.windowPredecessor);
+  await verifyPublishedWindowPredecessor(c, evidence.windowPredecessor, lookup, options.sourceRun);
+  const account = await invoke(['account', 'show', '--subscription', c.subscriptionId, '--only-show-errors', '--output', 'json']);
+  if (account?.id !== c.subscriptionId || account.tenantId !== c.tenantId ||
+      account.state !== 'Enabled' || account.environmentName !== 'AzureCloud') fail('EXPLICIT_ACCOUNT_MISMATCH');
+  const r = ids(c), arm = transport(c, phase, directory, invoke);
+  const [app, ingest, pull] = await readBatch([
+    [r.app, '2025-07-01'], [r.ingestIdentity, '2023-01-31'], [r.pullIdentity, '2023-01-31'],
+  ], ([id, api]) => arm('GET', id, api));
+  const context = { ...resourceContext(c, receipts), identities: { [r.ingestIdentity]: ingest, [r.pullIdentity]: pull } };
+  const observedFlag = verifyWindowState(c, transition.phases, transition.window, transition.approvals,
+    transition.journals, app, context, source);
+  const validation = await validateReadOnly(c, phase, receipts, directory, invoke, app, { ...options, deadline, receiverCandidate: candidate });
+  const cost = durableQueueCost();
+  const proof = { startedAt, completedAt: now(), qualified: cost.withinEstimate,
+    qualificationKind: 'paired-receiver-disable-only-preflight', liveQueueNetworkRechecked: false,
+    liveFoundationRechecked: false, costBasis: 'unchanged-reviewed-receiver-estimate-not-current-network-billing',
+    configSha256: digest(json(c)), phaseSha256: digest(json(phase)), sourceSha256: source,
+    originSha256: digest(json(origin)), receiptsSha256: digest(json(receipts)),
+    baselineSha256: origin.policyBaselineSha256, whatIfSha256: validation.whatIfSha256,
+    transitionSha256: syntheticTransitionHash(phase), observedFlag, appObservationSha256: digest(json(app)),
+    cost, computedValuesReviewed: phase.computedReadbacksRequired.length === 0 };
+  if (await sourceDigest() !== source || now() >= deadline) fail('WINDOW_READ_DEADLINE');
+  await save(directory, `${phase.phase}-preflight.json`, proof);
+  if (now() >= deadline) fail('WINDOW_READ_DEADLINE');
+  return proof;
+}
 export async function checkReadOnly(c, phase, origin, receipts, directory, evidenceFiles, invoke = az, lookup = publishedSourceDigest, transition, options = {}) {
+  if (phase.phase === 'synthetic-disable' && receipts.receiverUpgrade?.candidate.version === 2 &&
+      receipts.queueRecords?.['queue-storage']?.kind === 'reviewed-queue-storage-adoption' && transition) {
+    return checkQueuedDisableReadOnly(c, phase, origin, receipts, directory, evidenceFiles, invoke, lookup, transition, options);
+  }
   const now = options.now ?? Date.now, started = now(), deadline = Math.min(options.deadline ?? invokeDeadlines.get(invoke) ?? started + 120000, started + 120000);
   const bounded = boundedInvoke(deadline, invoke, now);
   invoke = limitReadConcurrency(async (args, timeout) => {
@@ -1006,6 +1529,7 @@ export async function checkReadOnly(c, phase, origin, receipts, directory, evide
   });
   const topology = evidenceFiles.queueTopology ?? evidenceFiles.receiverCandidate?.topology ?? receipts.receiverUpgrade?.candidate.topology;
   const queuePhase = QUEUE_PHASES.includes(phase.phase);
+  const networkContext = phase.phase === 'synthetic-disable' ? null : nspContext(c, receipts, evidenceFiles);
   const arm = transport(c, phase, directory, invoke, topology), r = ids(c);
   const foundation = verifyFoundationBudgets(c, evidenceFiles.foundationBudgets);
   if (evidenceFiles.reconciliation?.origins?.records.some(v => v.phase.phase === phase.phase)) fail('COMPLETED_PHASE_REQUIRES_RECONCILIATION');
@@ -1029,8 +1553,8 @@ export async function checkReadOnly(c, phase, origin, receipts, directory, evide
   if (transition && (!TOGGLE_PHASES.includes(phase.phase) || transition.source !== source)) fail('CURRENT_WINDOW_SOURCE_REQUIRED');
   let reconciled = {};
   if (evidenceFiles.reconciliation?.origins) {
-    const historicalCandidate = evidenceFiles.reconciliation.proposal?.version === 4 && receiverCandidate?.version === 2 ? receiverCandidate.priorCandidate : receiverCandidate;
-    if (receiverCandidate && (![4, 5].includes(evidenceFiles.reconciliation.proposal?.version) ||
+    const historicalCandidate = reconciliationReceiverCandidate(evidenceFiles.reconciliation.proposal, receiverCandidate);
+    if (receiverCandidate && (![4, 5, 6].includes(evidenceFiles.reconciliation.proposal?.version) ||
         evidenceFiles.reconciliation.proposal.receiverCandidateSha256 !== digest(json(historicalCandidate)))) fail('VERSIONED_RECEIVER_RECONCILIATION_REQUIRED');
     reconciled = await reviewedReconciliationReceipts(c, foundation,
       { ...evidenceFiles.reconciliation, ...(historicalCandidate ? { receiverCandidate: historicalCandidate } : {}) }, source, lookup, options);
@@ -1095,6 +1619,7 @@ export async function checkReadOnly(c, phase, origin, receipts, directory, evide
   }
   const baseline = digest(json({ policies: evidence.policies, defender: evidence.defender }));
   if (baseline !== origin.policyBaselineSha256) fail('POLICY_OR_SECURITY_DRIFT');
+  const effectivePolicy = queuePhase ? await checkEffectivePolicies(c, phase, directory, invoke, topology, undefined, { now, deadline }) : undefined;
   const known = knownResourceIds(c, receipts);
   if (evidence['telemetry-inventory'].value.some(v => !known.some(id => sameId(id, v.id)))) fail('UNEXPECTED_TELEMETRY_RESOURCE');
   let providerOperationsSha256;
@@ -1102,7 +1627,7 @@ export async function checkReadOnly(c, phase, origin, receipts, directory, evide
     const operations = await arm('GET', '/providers/Microsoft.Storage/operations', '2025-01-01');
     providerOperationsSha256 = verifyQueueProviderOperations(operations);
     await save(directory, 'queue-provider-operations.json', operations);
-    await readQueueRecords(c, topology, receipts.queueRecords ?? {}, arm);
+    await readQueueRecords(c, topology, receipts.queueRecords ?? {}, arm, nspReadIO(c, directory, invoke, { now }), deadline);
   }
   if (phase.phase === 'core') {
     const q = evidence.quota.value.find(v => v.name?.value === 'ManagedEnvironmentCount');
@@ -1152,7 +1677,9 @@ export async function checkReadOnly(c, phase, origin, receipts, directory, evide
     await save(directory, 'assignments-role-definitions.json', { checkedAt: new Date().toISOString(), ...definitions, roleDefinitionsSha256 });
   }
   const validationProof = await validateReadOnly(c, phase, receipts, directory, invoke, currentApp,
-    { ...options, deadline, receiverCandidate, queueTopology: topology });
+    { ...options, deadline, receiverCandidate, queueTopology: topology, networkContext });
+  const networkProof = networkContext
+    ? await currentNspAdmission(c, networkContext, evidenceFiles, directory, deadline, invoke, { now }) : null;
   const { whatIfSha256 } = validationProof;
   const cost = topology ? durableQueueCost() : firstReleaseCost(receiverCandidate ? 2 : 1);
   const verifiedSource = await sourceDigest();
@@ -1165,6 +1692,8 @@ export async function checkReadOnly(c, phase, origin, receipts, directory, evide
     ...(roleDefinitionsSha256 ? { foundationBaselineSha256: baseline, roleDefinitionsSha256 } : {}),
     ...(receiverCandidate ? { receiverScanExpiresAt: receiverCandidate.profile.scan.databaseNextUpdate } : {}),
     ...(topology ? { topologyReviewSha256: digest(json(evidenceFiles.queueReview)), providerOperationsSha256, preservedIds: known } : {}),
+    ...(effectivePolicy ?? {}),
+    ...(networkProof ?? {}),
     ...(currentApp ? { ...(imagePhase ? {} : { transitionSha256: syntheticTransitionHash(phase) }), observedFlag: admissionFlag(currentApp),
       appObservationSha256: digest(json(currentApp)) } : {}),
     cost, computedValuesReviewed: phase.computedReadbacksRequired.length === 0 };
@@ -1455,6 +1984,10 @@ export class SyntheticWindowDriver {
       if (method === 'GET') { if (++run.healthGets > SYNTHETIC_LIMITS.maximumHealthGets) fail('SYNTHETIC_HTTP_BOUND'); }
       else if (disabled) { if (++run.disabledPosts > SYNTHETIC_LIMITS.maximumDisabledPosts) fail('SYNTHETIC_POST_RETRY_FORBIDDEN'); }
       else if (++run.enabledPosts > SYNTHETIC_LIMITS.maximumEnabledPosts) fail('SYNTHETIC_POST_RETRY_FORBIDDEN');
+      if (!disabled && method === 'POST' && this.io.beforeRuntimeDispatch) {
+        await this.io.beforeRuntimeDispatch(Math.min(deadlines.workDeadline ?? initialDeadline, this.io.now() + NSP_LIMITS.stageMs));
+        admit();
+      }
       const entry = { stage: run.stage, method, path, fixture: fixture ?? null, intentAt: new Date(this.io.now()).toISOString(), transportDispatchAttempted: false };
       run.requests.push(entry); await persist();
       const source = await this.io.sourceDigest();
@@ -1738,7 +2271,7 @@ export function buildSyntheticWindow(c, phases, receipts, origin, source, whatif
   const anchorApp = receiverAnchor(c, receipts);
   if (!anchorApp || admissionFlag(anchorApp) !== 'false') fail('QUALIFIED_DISABLED_ANCHOR_REQUIRED');
   const context = { config: c, ...resourceContext(c, receipts), app: anchorApp };
-  const known = Object.values(receipts).flatMap(v => Object.keys(v.resources ?? {}));
+  const known = knownResourceIds(c, receipts);
   const entries = {};
   for (const name of TOGGLE_PHASES) {
     const phase = phases[name], whatif = whatifs[name];
@@ -1800,7 +2333,7 @@ export async function readSyntheticQuery(c, expectedWorkspace, expectedSource, s
   if (onDispatch() !== undefined) fail('SYNTHETIC_QUERY_GUARD_REQUIRED');
   return invoke(args, Math.min(30000, remaining));
 }
-export function syntheticWindowIO(c, phases, window, approvals, receipts, rawReceipts, origin, evidenceFiles, directory, cancelled = () => false, invoke = az) {
+export function syntheticWindowIO(c, phases, window, approvals, receipts, rawReceipts, origin, evidenceFiles, directory, cancelled = () => false, invoke = az, options = {}) {
   const r = ids(c);
   const observe = async deadline => {
     const arm = transport(c, phases['synthetic-disable'], directory, boundedInvoke(deadline, invoke));
@@ -1828,16 +2361,29 @@ export function syntheticWindowIO(c, phases, window, approvals, receipts, rawRec
       rawReceipts[name] = value; await save(directory, 'receipts.json', rawReceipts);
     },
     check: (phase, transition, deadline) => checkReadOnly(c, phase, origin, receipts, directory, evidenceFiles,
-      boundedInvoke(deadline, invoke), publishedSourceDigest, transition, {
-        deadline, cancelled: phase.phase === 'synthetic-admission' ? cancelled : () => false }),
+      boundedInvoke(deadline, invoke), options.lookup ?? publishedSourceDigest, transition, {
+        ...options, now: Date.now, deadline, cancelled: phase.phase === 'synthetic-admission' ? cancelled : () => false }),
     observe,
     deployment: (name, deadline) => transport(c, phases[name], directory, boundedInvoke(deadline, invoke))('GET', phases[name].deploymentId, '2022-09-01'),
-    arm: (phase, deadline) => transport(c, phase, directory, boundedInvoke(deadline, invoke)),
+    arm: (phase, deadline) => {
+      const arm = transport(c, phase, directory, boundedInvoke(deadline, invoke));
+      if (phase.phase !== 'synthetic-admission' || receipts.queueRecords?.['queue-storage']?.kind !== 'reviewed-queue-storage-adoption') return arm;
+      return (method, id, api, body, filter, guard, roleGuard, current) => arm(method, id, api, body, filter, guard, roleGuard,
+        method === 'PUT' ? async () => {
+          if (typeof current !== 'function') fail('PAIRED_TOGGLE_GUARD_REQUIRED');
+          await current();
+          await currentNspAdmission(c, nspContext(c, receipts, evidenceFiles), evidenceFiles, directory, deadline, invoke);
+        } : current);
+    },
     rollout: async deadline => ({ ...await observe(deadline),
       revisions: await transport(c, phases['synthetic-disable'], directory, boundedInvoke(deadline, invoke))('GET', `${r.app}/revisions`, '2025-07-01') }),
     privacy: (phase, deadline) => readPrivacy(c, phase, transport(c, phase, directory, boundedInvoke(deadline, invoke))),
     loadRun: () => load(directory, 'synthetic-window-journal.json', true),
     saveRun: value => save(directory, 'synthetic-window-journal.json', value),
+    ...(receipts.queueRecords?.['queue-storage']?.kind === 'reviewed-queue-storage-adoption' ? {
+      beforeRuntimeDispatch: deadline => currentNspAdmission(c, nspContext(c, receipts, evidenceFiles),
+        evidenceFiles, directory, deadline, invoke),
+    } : {}),
     http: (method, path, event, guard, deadline) => syntheticHttp(window.anchorApp.properties.configuration.ingress.fqdn, method, path, event, guard, deadline),
     query: (start, end, guard, deadline, onDispatch) => readSyntheticQuery(c, receipts['workspace-access'].resources[r.workspace],
       window.sourceSha256, start, end, guard, deadline, invoke, sourceDigest, Date.now, onDispatch),
@@ -1848,7 +2394,9 @@ export function syntheticWindowIO(c, phases, window, approvals, receipts, rawRec
       }, topology);
       const actual = await arm('GET', topology.ids.queue, '2025-01-01');
       guard();
-      const descriptor = receipts.queueRecords['queue-storage'].phase.resources.find(v => v.id === topology.ids.queue);
+      const storageRecord = receipts.queueRecords['queue-storage'];
+      const descriptor = (storageRecord.kind === 'reviewed-queue-storage-adoption' ? storageRecord.origin.phase : storageRecord.phase)
+        .resources.find(v => v.id === topology.ids.queue);
       verifyQueueResource(c, topology, descriptor, actual);
       const result = { version: 1, kind: 'owned-arm-approximate-queue-count', queueId: topology.ids.queue,
         approximateMessageCount: actual.properties.approximateMessageCount, observedAt: new Date().toISOString() };
@@ -1892,7 +2440,14 @@ export function receiverUpgradeIO(c, phase, receipts, origin, evidence, director
     observe,
     deployment: until => armAt(until)('GET', phase.deploymentId, '2022-09-01'),
     arm: (method, id, api, body, filter, guard, roleGuard, current, deadline) =>
-      armAt(deadline)(method, id, api, body, filter, guard, roleGuard, current),
+      armAt(deadline)(method, id, api, body, filter, guard, roleGuard,
+        method === 'PUT' && phase.phase === 'disabled-queue-upgrade' &&
+          receipts.queueRecords?.['queue-storage']?.kind === 'reviewed-queue-storage-adoption'
+          ? async () => {
+            if (typeof current !== 'function') fail('PAIRED_TOGGLE_GUARD_REQUIRED');
+            await current();
+            await currentNspAdmission(c, nspContext(c, receipts, evidence), evidence, directory, deadline, invoke, { now });
+          } : current),
     security: async until => {
       const arm = armAt(until);
       const origins = evidence.reconciliation.origins, assignments = origins.records.find(v => v.phase.phase === 'assignments');
@@ -1943,7 +2498,8 @@ export function receiverUpgradeIO(c, phase, receipts, origin, evidence, director
           id, type: id === r.workspace ? 'Microsoft.OperationalInsights/workspaces'
             : id === r.environment ? 'Microsoft.App/managedEnvironments' : 'Microsoft.App/containerApps',
         })) }, arm),
-        ...(topology ? [readQueueRecords(c, topology, receipts.queueRecords ?? {}, arm)] : []),
+        ...(topology ? [readQueueRecords(c, topology, receipts.queueRecords ?? {}, arm,
+          nspReadIO(c, directory, invokeAt(until), { now }), until)] : []),
       ]);
       if (topology) {
         const inventory = await arm('GET', `${r.group}/resources`, '2021-04-01'), known = knownResourceIds(c, receipts);
@@ -1967,6 +2523,7 @@ export function queueTopologyIO(c, phase, receipts, origin, evidence, directory,
   const topology = evidence.queueTopology, now = options.now ?? Date.now;
   verifyQueueTopology(c, topology);
   const identity = receipts.core.resources[ids(c).ingestIdentity];
+  const networkContext = nspContext(c, receipts, evidence);
   const common = receiverUpgradeIO(c, phase, receipts, origin, evidence, directory, invoke, options);
   const armAt = deadline => transport(c, phase, directory, limitReadConcurrency(boundedInvoke(deadline, invoke, now)), topology);
   let proof;
@@ -1978,9 +2535,19 @@ export function queueTopologyIO(c, phase, receipts, origin, evidence, directory,
       return proof;
     },
     verifyCurrent: async deadline => {
-      if (!isDeepStrictEqual(phase, buildQueuePhase(c, phase.phase, topology, identity))) fail('QUEUE_PHASE_CHANGED');
+      if (proof?.effectivePolicyVersion !== 1 || proof.effectivePolicySha256 !== digest(json(proof.effectivePolicy))) fail('EFFECTIVE_POLICY_BINDING_REQUIRED');
+      verifyEffectivePolicyEvidence(phase, proof.effectivePolicy);
+      if (!isDeepStrictEqual(phase, buildQueuePhase(c, phase.phase, topology, identity, networkContext))) fail('QUEUE_PHASE_CHANGED');
       verifyQueueReview(c, topology, evidence.queueReview, await sourceDigest(), now());
       await common.security(deadline);
+      if (networkContext) {
+        const current = await currentNspAdmission(c, networkContext, evidence, directory, deadline, invoke, { now });
+        if (!isDeepStrictEqual(current.networkBinding, proof.networkBinding) ||
+            !isDeepStrictEqual(current.networkLineageHead, proof.networkLineageHead) ||
+            !isDeepStrictEqual(current.networkBillingReview, proof.networkBillingReview)) fail('NSP_DISPATCH_STATE_CHANGED');
+      }
+      await checkEffectivePolicies(c, phase, directory, limitReadConcurrency(boundedInvoke(deadline, invoke, now)),
+        topology, proof.effectivePolicySha256, { now, deadline });
       const arm = armAt(deadline);
       const operations = await arm('GET', '/providers/Microsoft.Storage/operations', '2025-01-01');
       if (verifyQueueProviderOperations(operations) !== proof.providerOperationsSha256) fail('QUEUE_PROVIDER_PERMISSION_MISMATCH');
@@ -2011,15 +2578,163 @@ export function queueTopologyIO(c, phase, receipts, origin, evidence, directory,
   };
 }
 
+export async function preparePrivateLinkLocal(c, operation, directory, io = {
+  read: load, save: saveImmutable, source: sourceDigest, readHead: readNspHead, lookup: publishedSourceDigest,
+}) {
+  if (!['preview-private-link', 'check-private-link-plan'].includes(operation)) fail('FIXED_PHASE_COMMAND_REQUIRED');
+  const source = await io.source(), context = await io.read(directory, 'private-link-context.json');
+  verifyPrivateLinkContext(c, context);
+  await io.readHead(context.network, context.pendingHead);
+  await verifyPublishedNspEvidence(c, context.network, context.adoption.topology, context.adoption, io.lookup);
+  if (await io.lookup(context.original.publication.commitSha) !== context.original.publication.sourceSha256) {
+    fail('NSP_ORIGINAL_PUBLISHED_SOURCE_CHANGED');
+  }
+  const input = await io.read(directory, 'private-link-input.json');
+  const plan = buildPrivateLinkPlan(c, context, input, source);
+  const saved = operation === 'check-private-link-plan' ? await io.read(directory, 'private-link-plan.json') : plan;
+  if (!isDeepStrictEqual(saved, plan)) fail('PRIVATE_LINK_PLAN_DRIFT');
+  const result = verifyPrivateLinkPlan(c, context, saved, source);
+  await io.readHead(context.network, context.pendingHead);
+  if (await io.source() !== source) fail('PRIVATE_LINK_SOURCE_CHANGED');
+  if (operation === 'preview-private-link') await io.save(directory, 'private-link-plan.json', plan);
+  return result;
+}
+
+export const PRIVATE_LINK_CONTROL_COMMANDS = Object.freeze({
+  'prepare-private-link': 'prepare', 'check-private-link': 'check', 'execute-private-link': 'execute',
+  'reconcile-private-link': 'reconcile', 'recover-private-link': 'recover', 'retire-private-link': 'retire',
+});
+export const PRIVATE_LINK_RUNTIME_COMMANDS = Object.freeze({
+  'prepare-private-link-image': 'prepare-image', 'publish-private-link-image': 'publish-image',
+  'prepare-private-link-receiver': 'prepare-receiver', 'create-private-link-receiver': 'create-receiver',
+  'prepare-private-link-window': 'prepare-window', 'qualify-private-link-window': 'qualify-window',
+  'prepare-private-link-disable-recovery': 'prepare-disable-recovery',
+  'recover-private-link-disable': 'recover-disable', 'reconcile-private-link-receiver': 'reconcile-receiver',
+  'prepare-private-link-public-cleanup': 'prepare-public-cleanup',
+  'recover-private-link-public-cleanup': 'recover-public-cleanup',
+  'reconcile-private-link-public-probe': 'reconcile-public-probe',
+});
+export const PRIVATE_LINK_NSG_COMMANDS = Object.freeze({
+  'observe-private-link-nsg-adoption': 'observe-nsg-adoption', 'adopt-private-link-nsg': 'adopt-nsg',
+});
+
+export async function dispatchPrivateLinkOperation(c, operation, stage, directoryArg, io = {
+  directory: privateDirectory, read: loadPrivateLinkArtifact, immutable: savePrivateLinkArtifact,
+  control: runPrivateLinkControl, runtime: runPrivateLinkRuntime, nsg: runPrivateLinkNsgAdoption,
+}) {
+  const control = Object.hasOwn(PRIVATE_LINK_CONTROL_COMMANDS, operation);
+  const runtime = Object.hasOwn(PRIVATE_LINK_RUNTIME_COMMANDS, operation);
+  const nsg = Object.hasOwn(PRIVATE_LINK_NSG_COMMANDS, operation);
+  if (control ? !PRIVATE_LINK_CONTROL_STAGES.includes(stage) : nsg ? stage !== 'private-link-nsg-adoption'
+    : !runtime || stage !== 'private-link-runtime') {
+    fail('FIXED_PHASE_COMMAND_REQUIRED');
+  }
+  const directory = await io.directory(directoryArg);
+  const context = await io.read(directory, 'private-link-control-context.json');
+  const evidence = await io.read(directory, 'private-link-control-evidence.json');
+  if (nsg) {
+    const action = PRIVATE_LINK_NSG_COMMANDS[operation];
+    const inputs = await io.read(directory, 'private-link-nsg-adoption-inputs.json');
+    closed(inputs, ['original', 'originalDirectory', 'publication', 'policyRevision',
+      'costReview', 'costEvidence', 'migrationReview', ...(action === 'observe-nsg-adoption' ? ['provenance'] : ['proposal', 'review'])]);
+    return io.nsg(c, context, evidence, action, directoryArg, inputs);
+  }
+  if (control) {
+    const action = PRIVATE_LINK_CONTROL_COMMANDS[operation];
+    const keys = ['publication', 'costReview', 'costEvidence', 'migrationReview'];
+    const inputs = await io.read(directory, 'private-link-control-inputs.json');
+    const fields = action === 'prepare' ? [] : [...keys,
+      ...(['execute', 'retire'].includes(action) ? ['proof', 'approval'] : []),
+      ...(['reconcile', 'recover'].includes(action) ? ['original'] : []),
+      ...(action === 'recover' ? ['proposal', 'recoveryReview'] : []),
+      ...(stage.startsWith('retire-old-') || stage.includes('steady-budget') || stage === 'record-migration' ? ['runtimeCompletion'] : []),
+    ];
+    if (inputs && Object.hasOwn(inputs, 'policyRevision')) fields.push('policyRevision');
+    if (['retire-old-receiver', 'retire-old-environment', 'set-project-steady-budget', 'set-telemetry-steady-budget', 'record-migration'].includes(stage) &&
+        inputs && Object.hasOwn(inputs, 'nameProjection')) fields.push('nameProjection');
+    if (['prepare', 'check', 'execute', 'retire'].includes(action) &&
+        inputs && Object.hasOwn(inputs, 'continuation')) fields.push('continuation');
+    if (evidence.version === 2 && ['reconcile', 'recover'].includes(action)) fields.push('originalDirectory');
+    closed(inputs, fields);
+    return io.control(c, context, evidence, stage, action, directoryArg, inputs);
+  }
+  const action = PRIVATE_LINK_RUNTIME_COMMANDS[operation];
+  const inputs = await io.read(directory, 'private-link-runtime-inputs.json');
+  const result = await io.runtime(c, context, evidence, action, directoryArg, inputs);
+  if (action === 'publish-image') await io.immutable(directory, 'private-link-published-candidate.json', result);
+  if (action === 'qualify-window' && result?.outcome !== 'qualified-private-delivery-disabled') {
+    fail('PRIVATE_LINK_WINDOW_STOPPED_INSPECT_RETAINED_RESULT');
+  }
+  return result;
+}
+
 async function main() {
   const [operation, phaseName, directoryArg, ...extra] = process.argv.slice(2);
+  if (Object.hasOwn(PRIVATE_LINK_CONTROL_COMMANDS, operation) || Object.hasOwn(PRIVATE_LINK_RUNTIME_COMMANDS, operation) ||
+      Object.hasOwn(PRIVATE_LINK_NSG_COMMANDS, operation)) {
+    if (!directoryArg || extra.length ||
+        (Object.hasOwn(PRIVATE_LINK_CONTROL_COMMANDS, operation) ? !PRIVATE_LINK_CONTROL_STAGES.includes(phaseName)
+          : Object.hasOwn(PRIVATE_LINK_NSG_COMMANDS, operation) ? phaseName !== 'private-link-nsg-adoption'
+            : phaseName !== 'private-link-runtime')) fail('FIXED_PHASE_COMMAND_REQUIRED');
+    if (Object.entries(process.env).some(([key, value]) => value && /^(CI$|GITHUB_|ACTIONS_|RUNNER_)/u.test(key))) fail('UNTRUSTED_RUNNER_FORBIDDEN');
+    const directory = await privateDirectory(directoryArg), c = validateConfig(await load(directory, 'config.json'));
+    const result = await dispatchPrivateLinkOperation(c, operation, phaseName, directoryArg);
+    console.log(json({ operation, stage: phaseName, resultKind: result?.kind ?? null,
+      resultSha256: digestJson(result), outcome: result?.outcome ?? null }));
+    return;
+  }
+  const privateLinkOperation = ['preview-private-link', 'check-private-link-plan'].includes(operation);
+  if (privateLinkOperation !== (phaseName === 'private-link-migration')) fail('FIXED_PHASE_COMMAND_REQUIRED');
   if (!['prepare', 'check', 'validate-preview', 'prepare-window', 'run-window', 'execute-disable',
     'reconcile', 'qualify-reconciliation', 'image-before-push', 'image-readback', 'execute',
     'prepare-image', 'check-image', 'execute-image', 'preview-image-publication',
-    'preview-queue', 'prepare-queue', 'check-queue', 'execute-queue'].includes(operation) ||
-      ![...PHASES, ...IMAGE_PHASES, ...QUEUE_PHASES].includes(phaseName) || !directoryArg || extra.length) fail('FIXED_PHASE_COMMAND_REQUIRED');
+    'preview-queue', 'prepare-queue', 'check-queue', 'execute-queue',
+    'observe-queue-adoption', 'adopt-queue-storage', 'preview-nsp', 'prepare-nsp', 'check-nsp', 'execute-nsp',
+    'reconcile-nsp', 'prepare-nsp-reconciliation', 'qualify-nsp-reconciliation', 'check-image-publication',
+    'preview-private-link', 'check-private-link-plan'].includes(operation) ||
+      ![...PHASES, ...IMAGE_PHASES, ...QUEUE_PHASES, ...NSP_PHASES, 'private-link-migration'].includes(phaseName) ||
+      !directoryArg || extra.length) fail('FIXED_PHASE_COMMAND_REQUIRED');
   const directory = await privateDirectory(directoryArg), c = validateConfig(await load(directory, 'config.json'));
   if (Object.entries(process.env).some(([key, value]) => value && /^(CI$|GITHUB_|ACTIONS_|RUNNER_)/u.test(key))) fail('UNTRUSTED_RUNNER_FORBIDDEN');
+  if (privateLinkOperation) {
+    await preparePrivateLinkLocal(c, operation, directory);
+    console.log(operation === 'preview-private-link' ? 'PRIVATE_LINK_LOCAL_PLAN_NO_CLOUD_OR_RETIREMENT_AUTHORITY'
+      : 'PRIVATE_LINK_LOCAL_CONTRACT_VALID_CLOUD_STATE_UNVERIFIED');
+    return;
+  }
+  if (operation === 'image-readback' && phaseName === 'disabled-queue-upgrade') {
+    await captureQueuedPublication(c, await load(directory, 'receiver-candidate.json'), directory);
+    console.log('QUEUED_IMAGE_READBACK_CAPTURED_NO_RETRY_OR_ADMISSION_AUTHORITY'); return;
+  }
+  if (['observe-queue-adoption', 'adopt-queue-storage'].includes(operation)) {
+    if (phaseName !== 'queue-storage') fail('FIXED_QUEUE_ADOPTION_COMMAND_REQUIRED');
+    const origin = await load(directory, 'queue-storage-origin.json');
+    if (operation === 'observe-queue-adoption') {
+      const readIO = nspReadIO(c, directory);
+      const proposal = await collectQueueAdoption(c, origin, { now: Date.now, sourceDigest,
+        read: (request, deadline) => readIO.read(request, deadline) },
+      await load(directory, 'queue-defender-evidence.json', true));
+      await saveImmutable(directory, 'queue-adoption-proposal.json', proposal);
+      console.log('QUEUE_EXISTENCE_OBSERVED_NO_OPERATIONAL_AUTHORITY'); return;
+    }
+    const proposal = await load(directory, 'queue-adoption-proposal.json'), review = await load(directory, 'queue-adoption-review.json');
+    const publication = await load(directory, 'queue-adoption-publication.json');
+    const record = adoptQueueStorage(c, proposal, origin, review, publication, Date.now());
+    if (publication.sourceSha256 !== await sourceDigest()) fail('QUEUE_ADOPTION_SOURCE_CHANGED');
+    await verifyQueueAdoptionSources(c, record, publishedSourceDigest);
+    await saveImmutable(directory, 'queue-storage-adoption-record.json', record);
+    console.log('QUEUE_STORAGE_ADOPTED_READONLY_NOT_NETWORK_QUALIFIED'); return;
+  }
+  if (operation === 'preview-nsp') {
+    if (phaseName !== 'nsp-empty-boundary') fail('FIXED_NSP_PHASE_REQUIRED');
+    const adoption = await load(directory, 'queue-storage-adoption-record.json');
+    const topology = nspTopology(c, adoption.topology, adoption), evidence = emptyNspEvidence(topology);
+    await saveImmutable(directory, 'nsp-network.json', evidence);
+    await saveImmutable(directory, 'nsp-preview.json', { version: 1, kind: 'unapproved-nsp-preview',
+      evidence, phase: buildNspPhase(c, phaseName, adoption.topology, adoption, evidence),
+      sourceSha256: await sourceDigest(), qualified: false, executionAuthorized: false });
+    console.log('UNAPPROVED_NSP_PREVIEW_NO_CLOUD_CALLS'); return;
+  }
   if (operation === 'preview-queue') {
     if (phaseName !== 'queue-storage') fail('FIXED_QUEUE_PHASE_REQUIRED');
     const input = await load(directory, 'queue-namespace.json'); closed(input, ['namespace']);
@@ -2041,13 +2756,61 @@ async function main() {
     queueReview: await load(directory, 'queue-review.json', true),
     receiverUpgrade: await load(directory, 'receiver-upgrade.json', true),
     queueRecords: await load(directory, 'queue-records.json', true),
+    nspNetwork: await load(directory, 'nsp-network.json', true),
+    nspReview: await load(directory, 'nsp-review.json', true),
+    nspBillingReview: await load(directory, 'nsp-billing-review.json', true),
+    nspBillingEvidence: await load(directory, 'nsp-billing-evidence.json', true),
     reconciliation: { origins: await load(directory, 'execution-origins-v3.json', true),
       proposal: await load(directory, 'reconciliation-proposal.json', true),
       review: await load(directory, 'reconciliation-review.json', true) } };
-  evidenceFiles.reconciliation.receiverCandidate = evidenceFiles.reconciliation.proposal?.version === 4
-    ? evidenceFiles.receiverCandidate?.priorCandidate ?? evidenceFiles.receiverCandidate : evidenceFiles.receiverCandidate;
+  evidenceFiles.reconciliation.receiverCandidate = evidenceFiles.reconciliation.proposal
+    ? reconciliationReceiverCandidate(evidenceFiles.reconciliation.proposal, evidenceFiles.receiverCandidate)
+    : publishedReceiverCandidate(evidenceFiles.receiverCandidate);
   evidenceFiles.reconciliation.receiverUpgrade = evidenceFiles.receiverUpgrade;
   evidenceFiles.reconciliation.queueRecords = evidenceFiles.queueRecords ?? {};
+  evidenceFiles.reconciliation.nspNetwork = evidenceFiles.nspNetwork;
+  if (['prepare-nsp-reconciliation', 'qualify-nsp-reconciliation'].includes(operation)) {
+    if (!NSP_PHASES.includes(phaseName)) fail('FIXED_NSP_COMMAND_REQUIRED');
+    const prior = evidenceFiles.nspNetwork, topology = evidenceFiles.queueTopology, adoption = evidenceFiles.queueRecords?.['queue-storage'];
+    verifyNspEvidence(c, prior, topology, adoption);
+    const phase = buildNspPhase(c, phaseName, topology, adoption, prior, await load(directory, 'nsp-instance.json', true));
+    const original = await originalNspAttempt(phase, prior, directory);
+    const billing = { review: await load(directory, 'nsp-reconciliation-billing-review.json'),
+      evidence: await load(directory, 'nsp-reconciliation-billing-evidence.json') };
+    const io = nspReconciliationIO(c, original, topology, adoption, prior, billing, directory);
+    verifyNspStoppedAttempt(c, original, topology, adoption, prior, await io.pendingHead());
+    await verifyPublishedNspEvidence(c, prior, topology, adoption);
+    if (await publishedSourceDigest(original.publication.commitSha) !== original.publication.sourceSha256) fail('NSP_ORIGINAL_PUBLISHED_SOURCE_CHANGED');
+    if (operation === 'prepare-nsp-reconciliation') {
+      const proposal = await collectNspReconciliation(c, original, topology, adoption, prior, io);
+      await saveImmutable(directory, `${phaseName}-reconciliation-proposal.json`, proposal);
+      console.log('NSP_CURRENT_STATE_PROPOSED_ORIGINAL_FAILURE_PRESERVED'); return;
+    }
+    const proposal = await load(directory, `${phaseName}-reconciliation-proposal.json`);
+    const review = await load(directory, `${phaseName}-reconciliation-review.json`);
+    const publication = await load(directory, 'nsp-reconciliation-publication.json');
+    closed(publication, ['commitSha', 'sourceSha256']);
+    if (publication.sourceSha256 !== await sourceDigest() || await publishedSourceDigest(publication.commitSha) !== publication.sourceSha256) fail('NSP_SOURCE_NOT_PUBLISHED');
+    const lockPath = resolve(here, '../../opentofu/telemetry/.operator-private/controller.lock'), lock = await open(lockPath, 'wx', 0o600);
+    try {
+      await qualifyNspReconciliation(c, original, topology, adoption, prior, proposal, review, publication, io);
+      console.log('NSP_CURRENT_CONTROL_STATE_RECONCILED_NOT_ORIGINAL_EXECUTION_SUCCESS');
+    } finally { await lock.close(); await rm(lockPath); }
+    return;
+  }
+  if (operation === 'reconcile-nsp') {
+    if (!NSP_PHASES.includes(phaseName)) fail('FIXED_NSP_COMMAND_REQUIRED');
+    const adoption = evidenceFiles.queueRecords?.['queue-storage'], evidence = evidenceFiles.nspNetwork;
+    verifyNspEvidence(c, evidence, evidenceFiles.queueTopology, adoption);
+    const phase = buildNspPhase(c, phaseName, evidenceFiles.queueTopology, adoption, evidence, await load(directory, 'nsp-instance.json', true));
+    const journal = await load(directory, `${phaseName}-journal.json`);
+    if (journal.phaseSha256 !== digest(json(phase))) fail('NSP_RECONCILIATION_PHASE_CHANGED');
+    const observation = await collectNspObservation(evidence.topology, nspReadIO(c, directory), Date.now() + NSP_LIMITS.stageMs, { c, adoption });
+    await saveImmutable(directory, `${phaseName}-reconciliation.json`, { version: 1,
+      kind: 'observed-nsp-reconciliation-not-execution-proof', phaseSha256: digest(json(phase)), journalSha256: digest(json(journal)),
+      sourceSha256: await sourceDigest(), observation, qualified: false, originalHistoryModified: false, replayAuthorized: false });
+    console.log('NSP_STATE_OBSERVED_HISTORY_PRESERVED_NO_REPLAY'); return;
+  }
   if (!evidenceFiles.reconciliation.origins && await load(directory, 'execution-origins-v2.json', true)) fail('RECONCILIATION_REVISION_REQUIRED');
   verifyScannerAdoption(c, origin, evidenceFiles.scannerAdoption);
   verifyFoundationBudgets(c, evidenceFiles.foundationBudgets);
@@ -2055,7 +2818,18 @@ async function main() {
     if (!['disabled-image-upgrade', 'disabled-queue-upgrade'].includes(phaseName)) fail('FIXED_DISABLED_IMAGE_PHASE_REQUIRED');
     const candidate = evidenceFiles.receiverCandidate;
     if ((phaseName === 'disabled-queue-upgrade') !== (candidate?.version === 2)) fail('QUEUE_PROFILE_PHASE_REQUIRED');
-    const inventory = await load(directory, 'receiver-publication-inventory.json');
+    let inventory;
+    if (candidate?.version === 2 && evidenceFiles.queueRecords?.['queue-storage']?.kind === 'reviewed-queue-storage-adoption') {
+      qualifiedQueueRecords(c, evidenceFiles.queueRecords, candidate.topology);
+      const context = nspContext(c, { queueRecords: evidenceFiles.queueRecords }, evidenceFiles);
+      const proof = await load(directory, 'nsp-publication-preflight.json');
+      if (proof.sourceSha256 !== await sourceDigest() || proof.candidateSha256 !== digest(json(candidate)) ||
+          proof.inventorySha256 !== digest(json(proof.inventory)) ||
+          !isDeepStrictEqual(proof.publicationPreview, prepareReceiverPublication(c, candidate, proof.inventory, Date.now()))) fail('NSP_PUBLICATION_PREFLIGHT_CHANGED');
+      verifyNspQueuePreflight(c, context, proof, Date.now());
+      await readNspHead(context.admission);
+      inventory = proof.inventory;
+    } else inventory = await load(directory, 'receiver-publication-inventory.json');
     await verifyReceiverSource(candidate);
     const preview = prepareReceiverPublication(c, candidate, inventory, Date.now());
     if (candidate.review.sourceSha256 !== await sourceDigest()) fail('IMAGE_SOURCE_CHANGED');
@@ -2097,11 +2871,61 @@ async function main() {
     knownResourceIds(c, { queueRecords });
     receipts = { ...receipts, queueRecords };
   }
+  if (evidenceFiles.nspNetwork) {
+    receipts = { ...receipts, nspNetwork: evidenceFiles.nspNetwork,
+      nspBillingReview: evidenceFiles.nspBillingReview, nspBillingEvidence: evidenceFiles.nspBillingEvidence };
+    knownResourceIds(c, receipts);
+  }
+  if (['check-image-publication', 'image-before-push'].includes(operation) && phaseName === 'disabled-queue-upgrade') {
+    await checkQueuedPublication(c, receipts, evidenceFiles, directory);
+    console.log('QUEUED_IMAGE_NETWORK_CHECK_PASSED_NO_PUSH_AUTHORITY');
+    return;
+  }
+  if (operation === 'check-image-publication') fail('QUEUE_PROFILE_PHASE_REQUIRED');
+  if (NSP_PHASES.includes(phaseName)) {
+    if (!['prepare-nsp', 'check-nsp', 'execute-nsp', 'reconcile-nsp'].includes(operation)) fail('FIXED_NSP_COMMAND_REQUIRED');
+    const adoption = receipts.queueRecords?.['queue-storage'], topology = evidenceFiles.queueTopology, evidence = evidenceFiles.nspNetwork;
+    verifyNspEvidence(c, evidence, topology, adoption);
+    const instance = await load(directory, 'nsp-instance.json', true);
+    const phase = buildNspPhase(c, phaseName, topology, adoption, evidence, instance), source = await sourceDigest();
+    if (operation === 'prepare-nsp') {
+      if (await load(directory, `${phaseName}-journal.json`, true) || await load(directory, `${phaseName}-approval.json`, true)) fail('PRESERVE_PHASE_HISTORY');
+      await saveImmutable(directory, `${phaseName}-plan.json`, { version: 1, phase, sourceSha256: source,
+        qualified: false, executionAuthorized: false });
+      console.log('UNAPPROVED_NSP_PHASE_NO_CLOUD_CALLS'); return;
+    }
+    const io = nspIO(c, phase, receipts, origin, evidenceFiles, directory);
+    const plan = await load(directory, `${phaseName}-plan.json`);
+    if (plan.sourceSha256 !== source || !isDeepStrictEqual(plan.phase, phase)) fail('NSP_PREPARED_PHASE_DRIFT');
+    if (operation === 'check-nsp') {
+      await io.check(); console.log('NSP_READONLY_CHECK_PASSED_NO_EXECUTION_AUTHORITY'); return;
+    }
+    const publication = await load(directory, 'nsp-policy-publication.json');
+    closed(publication, ['commitSha', 'sourceSha256']);
+    if (publication.sourceSha256 !== source || await publishedSourceDigest(publication.commitSha) !== source) fail('NSP_SOURCE_NOT_PUBLISHED');
+    const approval = await load(directory, `${phaseName}-approval.json`);
+    const lockPath = resolve(here, '../../opentofu/telemetry/.operator-private/controller.lock'), lock = await open(lockPath, 'wx', 0o600);
+    try {
+      const receipt = await new NspController(c, phase, topology, adoption, evidence, io).execute(approval);
+      const record = { version: 1, kind: 'reviewed-nsp-phase', phase, publication, approval,
+        preflight: await load(directory, `${phaseName}-preflight.json`), preview: await load(directory, `${phaseName}-what-if.json`),
+        validation: await load(directory, `${phaseName}-validation.json`), journal: await load(directory, `${phaseName}-journal.json`), receipt };
+      const result = { ...evidence, records: [...evidence.records, record] };
+      verifyNspEvidence(c, result, topology, adoption);
+      await saveImmutable(directory, `${phaseName}-record.json`, record);
+      await saveImmutable(directory, `${phaseName}-network.json`, result);
+      await save(resolve(here, '.operator-private'), nspHeadName(evidence.topology), nspLineageHead(result));
+      console.log('NSP_CONTROL_PLANE_QUALIFIED_NO_RUNTIME_OR_INGESTION_AUTHORITY');
+    } finally { await lock.close(); await rm(lockPath); }
+    return;
+  }
+  if (['prepare-nsp', 'check-nsp', 'execute-nsp', 'reconcile-nsp'].includes(operation)) fail('FIXED_NSP_COMMAND_REQUIRED');
   if (['prepare-queue', 'check-queue', 'execute-queue'].includes(operation)) {
     if (!QUEUE_PHASES.includes(phaseName)) fail('FIXED_QUEUE_PHASE_REQUIRED');
     const topology = verifyQueueTopology(c, evidenceFiles.queueTopology), source = await sourceDigest();
     const identity = receipts.core.resources[ids(c).ingestIdentity];
-    const phase = buildQueuePhase(c, phaseName, topology, identity);
+    const networkContext = nspContext(c, receipts, evidenceFiles);
+    const phase = buildQueuePhase(c, phaseName, topology, identity, networkContext);
     const priorRecords = receipts.queueRecords ?? {};
     closed(priorRecords, phase.requiredReceipts);
     if (phase.requiredReceipts.length) qualifiedQueueRecords(c, priorRecords, topology, phase.requiredReceipts.at(-1));
@@ -2126,9 +2950,10 @@ async function main() {
     const lockPath = resolve(here, '../../opentofu/telemetry/.operator-private/controller.lock'), lock = await open(lockPath, 'wx', 0o600);
     try {
       const controller = new QueueTopologyController(c, phase, topology, evidenceFiles.queueReview,
-        queueTopologyIO(c, phase, receipts, origin, evidenceFiles, directory));
+        queueTopologyIO(c, phase, receipts, origin, evidenceFiles, directory), networkContext);
       const receipt = await controller.execute(approval);
-      const record = { version: 1, kind: 'reviewed-queue-phase', topology, review: evidenceFiles.queueReview,
+      const record = { version: networkContext ? 2 : 1, kind: networkContext ? 'reviewed-nsp-queue-phase' : 'reviewed-queue-phase',
+        ...(networkContext ? { networkAdmission: networkContext.admission } : {}), topology, review: evidenceFiles.queueReview,
         publication, identity, priorRecords, phase, approval, preflight: await load(directory, `${phaseName}-preflight.json`),
         validation: await load(directory, `${phaseName}-validation.json`),
         providerOperations: await load(directory, 'queue-provider-operations.json'),

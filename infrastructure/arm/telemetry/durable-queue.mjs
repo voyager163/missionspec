@@ -2,6 +2,9 @@ import { isDeepStrictEqual } from 'node:util';
 import { assertOwned, BUDGET, closed, deploymentName, digest, fail, firstReleaseCost, ids, json,
   ownerTags, sameId, stableGuid, validateConfig } from './definition.mjs';
 import { canonicalInstant, verifyApproval, verifyDeploymentIdentity, verifyFreshReview } from './policy.mjs';
+import { verifyEffectivePolicyEvidence } from './effective-policy.mjs';
+import { verifyQueueAdoptionRecord } from './queue-adoption.mjs';
+import { verifyNspAdmission, verifyNspQueuePreflight } from './nsp.mjs';
 
 export const QUEUE_PHASES = Object.freeze(['queue-storage', 'queue-role', 'queue-assignment']);
 export const QUEUE_PROFILE_KIND = 'reviewed-durable-queue-receiver';
@@ -171,11 +174,25 @@ export function queueResources(c, topology, identity) {
       properties: { roleDefinitionId: q.role, principalId: identity.properties.principalId, principalType: 'ServicePrincipal' } })] : [],
   };
 }
-export function buildQueuePhase(c, name, topology, identity) {
+function networkBinding(c, topology, context) {
+  closed(context, ['adoption', 'admission']);
+  verifyQueueAdoptionRecord(c, context.adoption);
+  if (!isDeepStrictEqual(context.adoption.topology, topology)) fail('QUEUE_NSP_TOPOLOGY_CHANGED');
+  verifyNspAdmission(c, context.admission, topology, context.adoption);
+  return { adoptionSha256: digest(json(context.adoption)), admissionSha256: digest(json(context.admission)) };
+}
+export function buildQueuePhase(c, name, topology, identity, networkContext = null) {
   if (!QUEUE_PHASES.includes(name)) fail('FIXED_QUEUE_PHASE_REQUIRED');
+  let binding;
+  if (networkContext !== null) {
+    if (!['queue-role', 'queue-assignment'].includes(name)) fail('QUEUE_NSP_OPERATIONAL_PHASE_REQUIRED');
+    binding = networkBinding(c, topology, networkContext);
+    if (identity !== undefined && !isDeepStrictEqual(identity, networkContext.adoption.identity)) fail('QUEUE_NSP_IDENTITY_CHANGED');
+  }
   const resources = queueResources(c, topology, identity)[name], scope = name === 'queue-role' ? ids(c).sub : ids(c).group;
   if (!resources.length) fail('QUEUE_IDENTITY_REQUIRED');
-  return { version: 1, phase: name, configSha256: digest(json(c)), topologySha256: digest(json(topology)), scope,
+  return { version: binding ? 2 : 1, phase: name, configSha256: digest(json(c)), topologySha256: digest(json(topology)), scope,
+    ...(binding ? { networkBinding: binding } : {}),
     deploymentId: `${scope}/providers/Microsoft.Resources/deployments/${deploymentName(c, name)}`,
     resources, template: {
       $schema: `https://schema.management.azure.com/schemas/${name === 'queue-role' ? '2018-05-01/subscriptionDeploymentTemplate' : '2019-04-01/deploymentTemplate'}.json#`,
@@ -207,13 +224,14 @@ export function queuePostCreateRequirements(c, topology) {
     [topology.ids.queue, 'Microsoft.Storage/storageAccounts/queueServices/queues', 'properties.metadata', {}],
   ].map(([resourceId, type, path, expected]) => ({ resourceId, type, apiVersion: api, path, expected }));
 }
-function only(value, fields) {
-  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(k => !fields.includes(k))) fail('QUEUE_RESOURCE_DRIFT');
+function only(value, fields, code = 'QUEUE_RESOURCE_DRIFT') {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(k => !fields.includes(k))) fail(code);
 }
 export function verifyQueueResource(c, topology, descriptor, actual, whatIf = false) {
   verifyQueueTopology(c, topology);
   const e = descriptor.expected, p = actual?.properties;
-  only(actual, ['id', 'name', 'type', 'apiVersion', 'location', 'tags', 'kind', 'sku', 'properties', 'systemData', 'etag', 'scope', 'dependsOn']);
+  const shapeCode = whatIf ? 'QUEUE_RESOURCE_DRIFT' : 'QUEUE_READBACK_SHAPE_UNREVIEWED';
+  only(actual, ['id', 'name', 'type', 'apiVersion', 'location', 'tags', 'kind', 'sku', 'properties', 'systemData', 'etag', 'scope', 'dependsOn'], shapeCode);
   if (!sameId(actual.id, descriptor.id) || !sameId(actual.type, e.type) ||
       (actual.apiVersion !== undefined && actual.apiVersion !== descriptor.apiVersion) ||
       (actual.scope !== undefined && actual.scope !== e.scope) ||
@@ -226,7 +244,7 @@ export function verifyQueueResource(c, topology, descriptor, actual, whatIf = fa
   if (e.type === 'Microsoft.Storage/storageAccounts') {
     only(p, [...Object.keys(e.properties), 'provisioningState', 'creationTime', 'primaryLocation', 'statusOfPrimary',
       'primaryEndpoints', 'privateEndpointConnections', 'accessTier', 'isHnsEnabled', 'isLocalUserEnabled',
-      'isSftpEnabled', 'allowCrossTenantReplication', 'keyCreationTime']);
+      'isSftpEnabled', 'allowCrossTenantReplication', 'keyCreationTime'], shapeCode);
     only(actual.sku, ['name', 'tier']);
     if (actual.kind !== 'StorageV2' || actual.sku.name !== 'Standard_LRS' ||
         (actual.sku.tier !== undefined && actual.sku.tier !== 'Standard') ||
@@ -235,9 +253,13 @@ export function verifyQueueResource(c, topology, descriptor, actual, whatIf = fa
         [p.isHnsEnabled, p.isLocalUserEnabled, p.isSftpEnabled, p.allowCrossTenantReplication].some(v => v !== undefined && v !== false) ||
         (p.accessTier !== undefined && p.accessTier !== 'Hot')) fail('QUEUE_RESOURCE_DRIFT');
     for (const [k, v] of Object.entries(e.properties)) {
-      if (k === 'encryption') continue;
-      if (!isDeepStrictEqual(p[k], v)) fail('QUEUE_RESOURCE_DRIFT');
+      if (['encryption', 'networkAcls'].includes(k)) continue;
+      if (!isDeepStrictEqual(p[k], v)) fail(k === 'publicNetworkAccess' ? 'QUEUE_NETWORK_POLICY_MISMATCH' : 'QUEUE_RESOURCE_DRIFT');
     }
+    only(p.networkAcls, [...Object.keys(e.properties.networkAcls), ...(!whatIf ? ['ipv6Rules'] : [])], shapeCode);
+    const hasIpv6Rules = Object.hasOwn(p.networkAcls, 'ipv6Rules');
+    if (hasIpv6Rules && !isDeepStrictEqual(p.networkAcls.ipv6Rules, [])) fail('QUEUE_IPV6_RULES_DRIFT');
+    if (!isDeepStrictEqual(p.networkAcls, hasIpv6Rules ? { ...e.properties.networkAcls, ipv6Rules: [] } : e.properties.networkAcls)) fail('QUEUE_NETWORK_POLICY_MISMATCH');
     only(p.encryption, ['keySource', 'services', 'requireInfrastructureEncryption']);
     if (p.encryption.keySource !== 'Microsoft.Storage' ||
         (p.encryption.requireInfrastructureEncryption !== undefined && typeof p.encryption.requireInfrastructureEncryption !== 'boolean')) fail('QUEUE_RESOURCE_DRIFT');
@@ -249,8 +271,11 @@ export function verifyQueueResource(c, topology, descriptor, actual, whatIf = fa
     if (!p.encryption.services.queue || (!whatIf && p.primaryEndpoints?.queue !== `https://${topology.ids.accountName}.queue.core.windows.net/`)) fail('QUEUE_ENDPOINT_DRIFT');
     if (!whatIf && !Number.isFinite(Date.parse(p.creationTime))) fail('QUEUE_CREATION_IDENTITY_REQUIRED');
   } else if (e.type.endsWith('/queueServices')) {
-    only(p, ['cors']);
-    if (!isDeepStrictEqual(p, e.properties)) fail('QUEUE_CORS_DRIFT');
+    only(p, ['cors', ...(!whatIf ? ['logging'] : [])], shapeCode);
+    const logging = { delete: false, read: false, write: false, version: '1.0', retentionPolicy: { enabled: false } };
+    const hasLogging = Object.hasOwn(p, 'logging');
+    if (hasLogging && !isDeepStrictEqual(p.logging, logging)) fail('QUEUE_LOGGING_DRIFT');
+    if (!isDeepStrictEqual(p, hasLogging ? { ...e.properties, logging } : e.properties)) fail('QUEUE_CORS_DRIFT');
   } else if (e.type.endsWith('/queues')) {
     only(p, ['metadata', 'approximateMessageCount']);
     if (!isDeepStrictEqual(p.metadata, {}) ||
@@ -291,8 +316,8 @@ function verifyQueueCreatePreview(descriptor, actual) {
   }
   return omissions;
 }
-export function verifyQueueWhatIf(c, phase, topology, result, preservedIds = [], identity) {
-  if (!isDeepStrictEqual(phase, buildQueuePhase(c, phase.phase, topology, identity))) fail('QUEUE_PHASE_CHANGED');
+export function verifyQueueWhatIf(c, phase, topology, result, preservedIds = [], identity, networkContext = null) {
+  if (!isDeepStrictEqual(phase, buildQueuePhase(c, phase.phase, topology, identity, networkContext))) fail('QUEUE_PHASE_CHANGED');
   if (result?.status !== 'Succeeded' || !Array.isArray(result.changes)) fail('WHAT_IF_INCOMPLETE');
   closed(result, ['status', 'changes']);
   const pending = new Map(phase.resources.map(v => [v.id.toLowerCase(), v])), seen = new Set();
@@ -326,9 +351,42 @@ export function queuePreflightBaseline(proof) {
     'preservedIdsSha256', 'queuePreviewSha256', 'requiredPostCreateReadbacksSha256', 'validatedTemplateSha256'];
   const values = { ...proof, preservedIdsSha256: digest(json(proof.preservedIds)) };
   if (keys.some(key => !sha(values[key]))) fail('QUEUE_PREFLIGHT_BINDING_REQUIRED');
+  const policyFields = ['effectivePolicyVersion', 'effectivePolicySha256', 'effectivePolicy'];
+  if (policyFields.some(key => Object.hasOwn(proof, key))) {
+    if (!policyFields.every(key => Object.hasOwn(proof, key)) || proof.effectivePolicyVersion !== 1 ||
+        !sha(proof.effectivePolicySha256) || proof.effectivePolicy?.qualified !== true ||
+        proof.effectivePolicySha256 !== digest(json(proof.effectivePolicy))) fail('QUEUE_PREFLIGHT_BINDING_REQUIRED');
+    keys.push('effectivePolicyVersion', 'effectivePolicySha256');
+  }
+  const networkFields = ['networkBinding', 'networkPreflight', 'networkObservation',
+    'networkBillingReview', 'networkBillingEvidence', 'networkLineageHead'];
+  if (networkFields.some(key => Object.hasOwn(proof, key))) {
+    if (!networkFields.every(key => Object.hasOwn(proof, key))) fail('QUEUE_NSP_PREFLIGHT_REQUIRED');
+    closed(proof.networkBinding, ['adoptionSha256', 'admissionSha256']);
+    closed(proof.networkPreflight, ['version', 'admissionSha256', 'adoptionSha256',
+      'lineageHeadSha256', 'billingReviewSha256', 'observationSha256']);
+    if (!Object.values(proof.networkBinding).every(sha) || proof.networkPreflight.version !== 1 ||
+        Object.entries(proof.networkPreflight).some(([key, value]) => key !== 'version' && !sha(value)) ||
+        proof.networkBinding.adoptionSha256 !== proof.networkPreflight.adoptionSha256 ||
+        proof.networkBinding.admissionSha256 !== proof.networkPreflight.admissionSha256 ||
+        proof.networkPreflight.observationSha256 !== digest(json(proof.networkObservation)) ||
+        proof.networkPreflight.billingReviewSha256 !== digest(json(proof.networkBillingReview)) ||
+        proof.networkPreflight.lineageHeadSha256 !== digest(json(proof.networkLineageHead))) fail('QUEUE_NSP_PREFLIGHT_REQUIRED');
+    values.networkBindingSha256 = digest(json(proof.networkBinding));
+    values.networkPreflightSha256 = digest(json(proof.networkPreflight));
+    keys.push('networkBindingSha256', 'networkPreflightSha256');
+  }
   return digest(json(Object.fromEntries(keys.map(key => [key, values[key]]))));
 }
-export function verifyQueuePreflight(c, phase, topology, proof) {
+export function verifyQueuePreflight(c, phase, topology, proof, networkContext = null, at = proof?.completedAt) {
+  if (phase.version === 2) {
+    const binding = networkBinding(c, topology, networkContext);
+    if (!['queue-role', 'queue-assignment'].includes(phase.phase) ||
+        !isDeepStrictEqual(phase.networkBinding, binding) || !isDeepStrictEqual(proof.networkBinding, binding) ||
+        !isDeepStrictEqual(proof.networkPreflight, verifyNspQueuePreflight(c, networkContext, proof, at))) fail('QUEUE_NSP_PREFLIGHT_REQUIRED');
+  } else if (phase.version !== 1 || networkContext !== null ||
+      ['networkBinding', 'networkPreflight', 'networkObservation', 'networkBillingReview',
+        'networkBillingEvidence', 'networkLineageHead'].some(key => Object.hasOwn(proof, key))) fail('QUEUE_NSP_VERSION_REQUIRED');
   const required = phase.phase === 'queue-storage' ? queuePostCreateRequirements(c, topology) : [];
   const preview = proof.queuePreview;
   closed(preview, ['version', 'kind', 'phaseSha256', 'whatIfSha256', 'returnedFieldsMatchTemplate',
@@ -349,6 +407,7 @@ export function verifyQueuePreflight(c, phase, topology, proof) {
       proof.computedValuesReviewed !== (required.length === 0) ||
       proof.baselineSha256 !== queuePreflightBaseline(proof) ||
       !Array.isArray(preview.requestedButNotPredicted)) fail('QUEUE_PREFLIGHT_BINDING_REQUIRED');
+  if (Object.hasOwn(proof, 'effectivePolicyVersion')) verifyEffectivePolicyEvidence(phase, proof.effectivePolicy);
   const seen = new Set();
   for (const omission of preview.requestedButNotPredicted) {
     closed(omission, ['resourceId', 'type', 'path', 'requested']);
@@ -359,9 +418,10 @@ export function verifyQueuePreflight(c, phase, topology, proof) {
     seen.add(key);
   }
 }
-export function queuePostCreateEvidence(c, phase, topology, resources) {
+export function queuePostCreateEvidence(c, phase, topology, resources, networkContext = null) {
   const required = phase.phase === 'queue-storage' ? queuePostCreateRequirements(c, topology) : [];
-  if (phase.phase !== 'queue-assignment' && !isDeepStrictEqual(phase, buildQueuePhase(c, phase.phase, topology))) fail('QUEUE_PHASE_CHANGED');
+  if ((phase.phase !== 'queue-assignment' || networkContext !== null || phase.version !== 1) &&
+      !isDeepStrictEqual(phase, buildQueuePhase(c, phase.phase, topology, networkContext?.adoption.identity, networkContext))) fail('QUEUE_PHASE_CHANGED');
   if (!isDeepStrictEqual(phase.computedReadbacksRequired, required)) fail('QUEUE_POSTCREATE_REQUIREMENTS_CHANGED');
   closed(resources, phase.resources.map(v => v.id));
   for (const descriptor of phase.resources) verifyQueueResource(c, topology, descriptor, resources[descriptor.id]);
@@ -394,24 +454,34 @@ export function verifyQueueDrain(verification, observation) {
 // An immutable record is required before the new account becomes known inventory.
 // A "qualified" field alone never adopts a resource or changes historical receipts.
 export function verifyQueueRecord(c, record) {
+  if (record?.kind === 'reviewed-queue-storage-adoption') return verifyQueueAdoptionRecord(c, record);
+  const nsp = record?.version === 2;
   closed(record, ['version', 'kind', 'topology', 'review', 'publication', 'identity', 'priorRecords', 'phase',
-    'approval', 'preflight', 'providerOperations', 'validation', 'whatIf', 'journal', 'receipt']);
+    'approval', 'preflight', 'providerOperations', 'validation', 'whatIf', 'journal', 'receipt',
+    ...(nsp ? ['networkAdmission'] : [])]);
   const { topology, phase, receipt, preflight, journal, approval, publication } = record;
   closed(publication, ['commitSha', 'sourceSha256']);
-  if (record.version !== 1 || record.kind !== 'reviewed-queue-phase' || !sha(publication.sourceSha256) ||
+  if (!(record.version === 1 && record.kind === 'reviewed-queue-phase' ||
+        nsp && record.kind === 'reviewed-nsp-queue-phase' && ['queue-role', 'queue-assignment'].includes(phase?.phase)) ||
+      !sha(publication.sourceSha256) ||
       !/^[0-9a-f]{40}$/u.test(publication.commitSha ?? '')) fail('QUEUE_RECORD_INVALID');
+  const context = nsp ? { adoption: record.priorRecords?.['queue-storage'], admission: record.networkAdmission } : null;
   const at = canonicalInstant(journal.intentAt);
   verifyQueueReview(c, topology, record.review, publication.sourceSha256, at);
-  if (!isDeepStrictEqual(phase, buildQueuePhase(c, phase.phase, topology, record.identity))) fail('QUEUE_PHASE_CHANGED');
+  if (!isDeepStrictEqual(phase, buildQueuePhase(c, phase.phase, topology, record.identity, context))) fail('QUEUE_PHASE_CHANGED');
   closed(record.priorRecords, phase.requiredReceipts);
   for (const [name, previous] of Object.entries(record.priorRecords)) {
+    const adopted = previous?.kind === 'reviewed-queue-storage-adoption';
+    if ((!nsp && previous?.version !== 1) || (nsp && previous?.version !== 2 &&
+        !(adopted && name === 'queue-storage' && previous.version === 3))) fail('QUEUE_NSP_VERSION_REQUIRED');
+    if ((adopted ? name !== 'queue-storage' : previous.phase?.phase !== name) || !isDeepStrictEqual(previous.topology, topology) ||
+        !isDeepStrictEqual(previous.identity, record.identity) ||
+        canonicalInstant(adopted ? previous.adoptedAt : previous.receipt.completedAt) > at) fail('QUEUE_PREREQUISITE_CHANGED');
     verifyQueueRecord(c, previous);
-    if (previous.phase.phase !== name || !isDeepStrictEqual(previous.topology, topology) ||
-        !isDeepStrictEqual(previous.identity, record.identity) || canonicalInstant(previous.receipt.completedAt) > at) fail('QUEUE_PREREQUISITE_CHANGED');
   }
   verifyApproval(approval, c, phase, publication.sourceSha256, at);
   verifyFreshReview(preflight, approval, preflight.startedAt, at);
-  verifyQueuePreflight(c, phase, topology, preflight);
+  verifyQueuePreflight(c, phase, topology, preflight, context, at);
   const operationsSha256 = verifyQueueProviderOperations(record.providerOperations);
   if (!isDeepStrictEqual(preflight.cost, durableQueueCost()) || preflight.providerOperationsSha256 !== operationsSha256 ||
       preflight.topologyReviewSha256 !== digest(json(record.review)) ||
@@ -431,10 +501,10 @@ export function verifyQueueRecord(c, record) {
       canonicalInstant(receipt.completedAt) < at || canonicalInstant(receipt.completedAt) > at + 120000 ||
       !sameId(receipt.deployment?.id, phase.deploymentId)) fail('QUEUE_RECORD_EXECUTION_INVALID');
   verifyDeploymentIdentity(receipt.deployment, receipt.deployment);
-  const preview = verifyQueueWhatIf(c, phase, topology, record.whatIf, preflight.preservedIds, record.identity);
+  const preview = verifyQueueWhatIf(c, phase, topology, record.whatIf, preflight.preservedIds, record.identity, context);
   if (!isDeepStrictEqual(preflight.queuePreview, preview)) fail('QUEUE_PREVIEW_EVIDENCE_CHANGED');
   closed(receipt.resources, phase.resources.map(v => v.id));
-  if (!isDeepStrictEqual(receipt.postCreateReadbacks, queuePostCreateEvidence(c, phase, topology, receipt.resources))) fail('QUEUE_POSTCREATE_READBACK_REQUIRED');
+  if (!isDeepStrictEqual(receipt.postCreateReadbacks, queuePostCreateEvidence(c, phase, topology, receipt.resources, context))) fail('QUEUE_POSTCREATE_READBACK_REQUIRED');
   if (phase.phase === 'queue-storage') {
     const created = Date.parse(receipt.resources[topology.ids.account].properties.creationTime);
     if (created < at || created > canonicalInstant(receipt.completedAt)) fail('QUEUE_CREATION_IDENTITY_REQUIRED');
@@ -448,26 +518,35 @@ export function qualifiedQueueRecords(c, records, topology, through = 'queue-ass
   closed(records, names);
   for (const name of names) {
     verifyQueueRecord(c, records[name]);
-    if (records[name].phase.phase !== name || !isDeepStrictEqual(records[name].topology, topology) ||
-        !isDeepStrictEqual(records[name].priorRecords, Object.fromEntries(names.slice(0, names.indexOf(name)).map(k => [k, records[k]])))) fail('QUEUE_RECORD_LINEAGE_CHANGED');
+    const adopted = records[name].kind === 'reviewed-queue-storage-adoption';
+    if ((adopted ? name !== 'queue-storage' : records[name].phase.phase !== name) ||
+        !isDeepStrictEqual(records[name].topology, topology) ||
+        (!adopted && !isDeepStrictEqual(records[name].priorRecords,
+          Object.fromEntries(names.slice(0, names.indexOf(name)).map(k => [k, records[k]]))))) fail('QUEUE_RECORD_LINEAGE_CHANGED');
   }
-  return Object.assign({}, ...names.map(name => records[name].receipt.resources));
+  return Object.assign({}, ...names.map(name => records[name].kind === 'reviewed-queue-storage-adoption'
+    ? records[name].observation.resources : records[name].receipt.resources));
 }
 
 export class QueueTopologyController {
-  constructor(c, phase, topology, review, io) { Object.assign(this, { c, phase, topology, review, io }); }
+  constructor(c, phase, topology, review, io, networkContext = null) {
+    Object.assign(this, { c, phase, topology, review, io, networkContext });
+  }
   async execute(approval) {
-    const { c, phase, topology, review, io } = this, source = await io.sourceDigest();
+    const { c, phase, topology, review, io, networkContext } = this, source = await io.sourceDigest();
     if (!QUEUE_PHASES.includes(phase.phase) || phase.topologySha256 !== digest(json(topology))) fail('FIXED_QUEUE_PHASE_REQUIRED');
     verifyQueueReview(c, topology, review, source, io.now());
     verifyApproval(approval, c, phase, source, io.now());
     if (await io.loadJournal()) fail('QUEUE_INTENT_REPLAY_FORBIDDEN');
     const started = io.now(), proof = await io.check();
     const guard = deadline => {
+      if ((networkContext !== null || phase.version !== 1) &&
+          !isDeepStrictEqual(phase, buildQueuePhase(c, phase.phase, topology, networkContext?.adoption.identity, networkContext))) fail('QUEUE_PHASE_CHANGED');
+      if (!Object.hasOwn(proof ?? {}, 'effectivePolicyVersion') || proof.effectivePolicyVersion !== 1) fail('QUEUE_EFFECTIVE_POLICY_REQUIRED');
       verifyQueueReview(c, topology, review, source, io.now());
       verifyApproval(approval, c, phase, source, io.now());
       verifyFreshReview(proof, approval, started, io.now());
-      verifyQueuePreflight(c, phase, topology, proof);
+      verifyQueuePreflight(c, phase, topology, proof, networkContext, io.now());
       if (!isDeepStrictEqual(proof.cost, durableQueueCost()) || proof.topologyReviewSha256 !== digest(json(review))) fail('QUEUE_COST_REVIEW_REQUIRED');
       if (io.cancelled?.() || io.now() >= deadline) fail('QUEUE_OPERATION_DEADLINE');
     };
@@ -500,7 +579,7 @@ export class QueueTopologyController {
           closed(observation.resources, phase.resources.map(d => d.id));
           if (!sameId(observation.deployment.id, phase.deploymentId)) fail('QUEUE_DEPLOYMENT_IDENTITY_CHANGED');
           verifyDeploymentIdentity(observation.deployment, observation.deployment);
-          const postCreateReadbacks = queuePostCreateEvidence(c, phase, topology, observation.resources);
+          const postCreateReadbacks = queuePostCreateEvidence(c, phase, topology, observation.resources, networkContext);
           verifyQueuePrivacy(topology, observation.privacy);
           guard(deadline);
           const receipt = { qualified: true, qualificationKind: 'new-durable-queue-phase', phaseSha256: digest(json(phase)),

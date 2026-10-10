@@ -170,6 +170,112 @@ test('queue resource readback refuses secrets, TLS weakening, role expansion, fo
   }
 });
 
+function disabledQueueLogging() {
+  return { delete: false, read: false, write: false, version: '1.0', retentionPolicy: { enabled: false } };
+}
+
+test('actual queue readbacks accept only optional empty IPv6 rules and exact disabled logging without mutation', async t => {
+  for (const defaults of [[], ['ipv6'], ['logging'], ['ipv6', 'logging']]) await t.test(defaults.join('+') || 'absent', async () => {
+    const f = baseFixture(), q = queuePhaseFixture(f, 'queue-storage');
+    if (defaults.includes('ipv6')) q.resources[f.topology.ids.account].properties.networkAcls.ipv6Rules = [];
+    if (defaults.includes('logging')) q.resources[f.topology.ids.service].properties.logging = disabledQueueLogging();
+    const original = structuredClone({ resources: q.resources, phase: q.phase, topology: f.topology });
+    const freeze = value => {
+      if (value && typeof value === 'object') { Object.values(value).forEach(freeze); Object.freeze(value); }
+    };
+    freeze(q.resources); freeze(q.phase); freeze(f.topology);
+    for (const descriptor of q.phase.resources) {
+      assert.equal(verifyQueueResource(f.c, f.topology, descriptor, q.resources[descriptor.id]), q.resources[descriptor.id]);
+    }
+    await q.controller.execute(q.approval);
+    const record = q.record(), before = structuredClone(record);
+    assert.equal(verifyQueueRecord(f.c, record), record.receipt);
+    assert.deepEqual(record, before);
+    assert.deepEqual({ resources: q.resources, phase: q.phase, topology: f.topology }, original);
+    assert.deepEqual(record.receipt.resources, original.resources);
+    assert.equal(record.receipt.postCreateReadbacks.observations.length, 8);
+    assert.equal(record.receipt.ingestionEnabled, false);
+    for (const descriptor of q.phase.resources.slice(0, 2)) {
+      if ((descriptor.id === f.topology.ids.account && defaults.includes('ipv6')) ||
+          (descriptor.id === f.topology.ids.service && defaults.includes('logging'))) {
+        assert.throws(() => verifyQueueResource(f.c, f.topology, descriptor, q.resources[descriptor.id], true),
+          { message: 'QUEUE_RESOURCE_DRIFT' });
+      }
+    }
+  });
+});
+
+test('actual IPv6 defaults reject nonempty/null/unknown types and retain every reviewed ACL field', async t => {
+  const cases = [
+    ['rule', p => { p.networkAcls.ipv6Rules = [{ value: '2001:db8::/32' }]; }, 'QUEUE_IPV6_RULES_DRIFT'],
+    ...[null, undefined, false, 0, '[]', {}].map((value, index) =>
+      [`type-${index}`, p => { p.networkAcls.ipv6Rules = value; }, 'QUEUE_IPV6_RULES_DRIFT']),
+    ['unknown field', p => { p.networkAcls.unknown = 'unreviewed'; }, 'QUEUE_READBACK_SHAPE_UNREVIEWED'],
+    ['null ACL', p => { p.networkAcls = null; }, 'QUEUE_READBACK_SHAPE_UNREVIEWED'],
+    ['ACL bypass', p => { p.networkAcls.bypass = 'AzureServices'; }, 'QUEUE_NETWORK_POLICY_MISMATCH'],
+    ['ACL action', p => { p.networkAcls.defaultAction = 'Deny'; }, 'QUEUE_NETWORK_POLICY_MISMATCH'],
+    ...['ipRules', 'virtualNetworkRules', 'resourceAccessRules'].flatMap(key => [
+      [`missing ${key}`, p => { delete p.networkAcls[key]; }, 'QUEUE_NETWORK_POLICY_MISMATCH'],
+      [`nonempty ${key}`, p => { p.networkAcls[key] = [{}]; }, 'QUEUE_NETWORK_POLICY_MISMATCH'],
+    ]),
+    ['network disabled', p => { p.publicNetworkAccess = 'Disabled'; }, 'QUEUE_NETWORK_POLICY_MISMATCH'],
+    ['shared key', p => { p.allowSharedKeyAccess = true; }, 'QUEUE_RESOURCE_DRIFT'],
+    ['OAuth default', p => { p.defaultToOAuthAuthentication = false; }, 'QUEUE_RESOURCE_DRIFT'],
+    ['TLS', p => { p.minimumTlsVersion = 'TLS1_0'; }, 'QUEUE_RESOURCE_DRIFT'],
+    ['HTTPS', p => { p.supportsHttpsTrafficOnly = false; }, 'QUEUE_RESOURCE_DRIFT'],
+  ];
+  for (const [name, mutate, code] of cases) await t.test(name, () => {
+    const f = baseFixture(), q = queuePhaseFixture(f, 'queue-storage'), descriptor = q.phase.resources[0];
+    const actual = q.resources[descriptor.id];
+    actual.properties.networkAcls.ipv6Rules = [];
+    mutate(actual.properties);
+    const before = structuredClone(actual);
+    assert.throws(() => verifyQueueResource(f.c, f.topology, descriptor, actual), { message: code });
+    assert.deepEqual(actual, before);
+  });
+});
+
+test('actual logging default requires every exact disabled flag, version and retention shape', async t => {
+  const cases = [
+    ...['delete', 'read', 'write'].flatMap(key => [
+      [`enabled ${key}`, p => { p.logging[key] = true; }],
+      [`missing ${key}`, p => { delete p.logging[key]; }],
+      [`mistyped ${key}`, p => { p.logging[key] = 'false'; }],
+    ]),
+    ['enabled retention', p => { p.logging.retentionPolicy.enabled = true; }],
+    ['retention days', p => { p.logging.retentionPolicy.days = 0; }],
+    ['missing retention flag', p => { delete p.logging.retentionPolicy.enabled; }],
+    ['mistyped retention flag', p => { p.logging.retentionPolicy.enabled = 0; }],
+    ['null retention', p => { p.logging.retentionPolicy = null; }],
+    ['missing retention', p => { delete p.logging.retentionPolicy; }],
+    ['version changed', p => { p.logging.version = '2.0'; }],
+    ['version mistyped', p => { p.logging.version = 1; }],
+    ['missing version', p => { delete p.logging.version; }],
+    ['extra logging field', p => { p.logging.unknown = false; }],
+    ...[null, undefined, false, 0, 'disabled', []].map((value, index) =>
+      [`logging type-${index}`, p => { p.logging = value; }]),
+  ];
+  for (const [name, mutate] of cases) await t.test(name, () => {
+    const f = baseFixture(), q = queuePhaseFixture(f, 'queue-storage'), descriptor = q.phase.resources[1];
+    const actual = q.resources[descriptor.id];
+    actual.properties.logging = disabledQueueLogging(); mutate(actual.properties);
+    const before = structuredClone(actual);
+    assert.throws(() => verifyQueueResource(f.c, f.topology, descriptor, actual), { message: 'QUEUE_LOGGING_DRIFT' });
+    assert.deepEqual(actual, before);
+  });
+  for (const [name, mutate, code] of [
+    ['missing CORS', p => { delete p.cors; }, 'QUEUE_CORS_DRIFT'],
+    ['nonempty CORS', p => { p.cors.corsRules = [{ allowedOrigins: ['*'] }]; }, 'QUEUE_CORS_DRIFT'],
+    ['extra CORS field', p => { p.cors.unknown = false; }, 'QUEUE_CORS_DRIFT'],
+    ['extra service field', p => { p.metrics = { enabled: false }; }, 'QUEUE_READBACK_SHAPE_UNREVIEWED'],
+  ]) await t.test(name, () => {
+    const f = baseFixture(), q = queuePhaseFixture(f, 'queue-storage'), descriptor = q.phase.resources[1];
+    const actual = q.resources[descriptor.id];
+    actual.properties.logging = disabledQueueLogging(); mutate(actual.properties);
+    assert.throws(() => verifyQueueResource(f.c, f.topology, descriptor, actual), { message: code });
+  });
+});
+
 test('queue controller anchors one durable intent, bounded final checks and 120s rollout without replay', async t => {
   for (const mode of ['success', 'late-check', 'late-body', 'unknown-write', 'late-read', 'provider-drift']) await t.test(mode, async () => {
     const f = baseFixture(), q = queuePhaseFixture(f, 'queue-storage');

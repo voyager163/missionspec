@@ -203,6 +203,43 @@ export function checkWorkflow(workflow, file = 'workflow') {
       problems.push(`${file}: dependency severity, license and no-comment policy must be explicit`);
     }
   }
+  if (file === '.github/workflows/repository.yml') {
+    const install = 'npm run check:package -- --install';
+    const restore = 'npm ci --ignore-scripts --no-audit --no-fund';
+    const targets = {
+      'repository-checks': { name: 'Repository checks (${{ matrix.os }})', check: 'npm run check' },
+      'windows-read-only': { name: 'Windows read-only compatibility', check: 'npm run check:portable' },
+    };
+    for (const [name, expected] of Object.entries(targets)) {
+      const job = workflow.jobs[name];
+      const steps = job?.steps;
+      if (!Array.isArray(steps) || job.name !== expected.name) {
+        problems.push(`${file}: preserve the installed-tarball check context ${name}`);
+        continue;
+      }
+      const installSteps = steps.filter((step) => step?.run === install);
+      const restoreIndex = steps.findIndex((step) => step?.run === restore);
+      const checkIndex = steps.findIndex((step) => step?.run === expected.check);
+      const installIndex = steps.findIndex((step) => step?.run === install);
+      if (installSteps.length !== 1 || restoreIndex < 0 || checkIndex <= restoreIndex || installIndex <= checkIndex ||
+          workflow.defaults !== undefined || job.defaults !== undefined ||
+          installSteps.some((step) => Object.keys(step).some((key) => !['name', 'run'].includes(key)))) {
+        problems.push(`${file}: ${name} must run one explicit offline installed-tarball check after locked restore and repository checks`);
+      }
+    }
+    const matrixJob = workflow.jobs['repository-checks'];
+    const matrix = matrixJob?.strategy?.matrix;
+    if (matrixJob?.['runs-on'] !== '${{ matrix.os }}' ||
+        JSON.stringify(matrix?.os) !== JSON.stringify(['ubuntu-latest', 'macos-latest']) ||
+        matrix?.include !== undefined || matrix?.exclude !== undefined ||
+        workflow.jobs['windows-read-only']?.['runs-on'] !== 'windows-latest') {
+      problems.push(`${file}: installed-tarball coverage requires the existing Linux/macOS matrix and Windows read-only runner`);
+    }
+    if (Object.entries(workflow.jobs).some(([name, job]) =>
+      !Object.hasOwn(targets, name) && Array.isArray(job?.steps) && job.steps.some((step) => step?.run === install))) {
+      problems.push(`${file}: do not duplicate the offline installed-tarball check in other qualification jobs`);
+    }
+  }
   return problems;
 }
 

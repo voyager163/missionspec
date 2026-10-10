@@ -39,6 +39,8 @@ jobs:
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Check repository contracts
         run: npm run check
+      - name: Check offline installed tarball
+        run: npm run check:package -- --install
       - name: Restore isolated telemetry-service dependencies
         run: npm --prefix services/telemetry-ingest ci --ignore-scripts --no-audit --no-fund
       - name: Check isolated service provenance and retained notices
@@ -64,6 +66,8 @@ jobs:
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Check portable contracts and read-only CLI
         run: npm run check:portable
+      - name: Check offline installed tarball
+        run: npm run check:package -- --install
   windows-private-state:
     name: Windows private-state qualification
     runs-on: windows-latest
