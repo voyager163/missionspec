@@ -305,11 +305,37 @@ an install smoke must never enable a collector or send events to Azure.
 The source checkout's `infrastructure/arm/telemetry/README.md` documents the
 collector UAT boundary; infrastructure is deliberately not packaged with the CLI.
 
+## Interpreting qualification evidence
+
+Keep retained read artifacts separate from observed command invocations. A
+bounded reader can reject unstarted queued requests with the first command's
+failure and retain a failed artifact for each request. Multiple artifacts carrying
+a timeout code therefore do not establish that the same number of commands were
+admitted or exceeded their deadlines. Establish command counts from actual
+admission, start, end, deadline and outcome observations; do not invent an
+artifact-to-command binding when those records are absent.
+
+Report authentication/setup, driver preparation, CHECK duration, actual read
+span and post-operation custody separately. Whole-process wall time is not a
+substitute for CHECK or command timing. Missing measurements remain unavailable,
+not zero or inferred successes. Preserve the original failure alongside separate
+reconciliation, custody and persistence failures. Source-free helper regressions
+and metadata review do not establish a genuine production CHECK or qualify an
+unchanged deadline.
+
+Finalize process logs and mutable-world custody only after the owned process
+group is quiescent. Authenticate retained bytes and the original observed file
+identities where available; byte-identical replacement is not original custody.
+Keep failed attempts and consumed grants immutable. A new attempt requires its
+own current review, genuinely valid facts and distinct authority. Reauthenticating
+old evidence does not renew its retrieval time or expiry, and a passed fixture
+does not authorize a scan, download, replay, publication or infrastructure effect.
+
 ## Remaining maintainer gates
 
 | Gate | Current boundary and required decision |
 | --- | --- |
-| Publishing identity and scope | Prior `npm whoami` returned `ENEEDAUTH`; unauthenticated `npm view` returned `E404`. Neither establishes who may publish, whether the scope is available, or that the package is unclaimed. The maintainer must separately authorize and establish registry identity, scope/name control and publishing rights. Do not publish to discover availability. |
+| Publishing identity and scope | Browser-based npm login was completed on 2026-10-10; `npm whoami --registry=https://registry.npmjs.org/` returned `voyager164`. This establishes that laptop's CLI identity only, not verified package/scope publishing rights or publication authority. Earlier `ENEEDAUTH` and unauthenticated `E404` observations remain historical; they do not establish name availability. Reauthenticate independently on a new laptop and verify the maintainer-asserted scope control. Never commit credentials or publish to discover availability. |
 | Release metadata and authority | Select a version, release/tag policy, distribution/access policy and supported platform matrix explicitly. Review corresponding manifest/check changes in a PR; keep `private: true` and `0.0.0` until that decision. Publication, tags and pushes require separate authority. |
 | Final candidate qualification | Rerun the normal repository/license checks and explicit offline install on the exact candidate. Qualify every advertised OS/architecture, native-addon load and package-manager executable surface, including Windows shims. A local macOS pass and earlier hosted source checks are not interchangeable. |
 | Native hosts and billing | Claude Code and Codex live pilots are deferred. Copilot default-model/zero-extra-charge evidence remains unresolved. No paid model calls are admitted by this checklist. Rendered skills and installed package smoke do not qualify live hosts or enable autonomous execution. |
