@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "platform": "linux/amd64",
   "identities": {
     "runtimeBase": "gcr.io/distroless/cc-debian13:nonroot@sha256:1ca671d851d5cd39326d095b949a1d4e6ec836f59c5022b21efcd2773bd3a6d5",
@@ -112,16 +112,16 @@
     },
     {
       "name": "libssl3t64",
-      "version": "3.5.7-1~deb13u2",
+      "version": "3.5.7-1~deb13u3",
       "architecture": "amd64",
       "source": "openssl",
-      "sourceVersion": "3.5.7-1~deb13u2",
+      "sourceVersion": "3.5.7-1~deb13u3",
       "metadataPath": "runtime/var/lib/dpkg/status.d/libssl3t64",
       "copyrightPath": "runtime/usr/share/doc/libssl3t64/copyright",
       "binaryProvenance": {
-        "url": "https://snapshot.debian.org/archive/debian-security/20260912T113611Z/pool/updates/main/o/openssl/libssl3t64_3.5.7-1~deb13u2_amd64.deb",
-        "sha256": "916f7f40b34a06e6ebfaefcdab331bff458328411da672598f126a760472467d",
-        "assemblyRevision": "c7d8b67bce5a65ae75ba33c4007dc112368949ca"
+        "url": "https://snapshot.debian.org/file/037457764b8a864be9be883a989f95b6b2a13c11",
+        "sha256": "ff16bc048bcd7d1b256094450b79c77947d8e76fe2a24bd99b91021d591fa074",
+        "overlayRevision": 1
       }
     },
     {
@@ -330,6 +330,18 @@
         "zlib_1.3.dfsg+really1.3.1-1.dsc",
         "zlib_1.3.dfsg+really1.3.1.orig.tar.gz",
         "zlib_1.3.dfsg+really1.3.1-1.debian.tar.xz"
+      ]
+    },
+    {
+      "name": "openssl",
+      "version": "3.5.7-1~deb13u3",
+      "snapshotApi": "https://snapshot.debian.org/mr/package/openssl/3.5.7-1~deb13u3/srcfiles",
+      "dsc": "openssl_3.5.7-1~deb13u3.dsc",
+      "artifacts": [
+        "openssl_3.5.7-1~deb13u3.dsc",
+        "openssl_3.5.7.orig.tar.gz",
+        "openssl_3.5.7.orig.tar.gz.asc",
+        "openssl_3.5.7-1~deb13u3.debian.tar.xz"
       ]
     }
   ],
@@ -571,6 +583,27 @@
       "size": 11358,
       "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
       "role": "assembly-license"
+    },
+    {
+      "filename": "openssl_3.5.7-1~deb13u3.dsc",
+      "url": "https://snapshot.debian.org/file/db56cd5070f847d98b8fec3dde05ce8ee276ba64",
+      "size": 2710,
+      "sha256": "9cdb0d9daf0773ca5c0f3f5ea1fc59b1106a99e005a5c048948b826e8d3b47e1",
+      "role": "debian-source"
+    },
+    {
+      "filename": "openssl_3.5.7-1~deb13u3.debian.tar.xz",
+      "url": "https://snapshot.debian.org/file/11a6b388b1ce45f8c60021ed66f8772f7c963c62",
+      "size": 147344,
+      "sha256": "0a427fdc3e773f4119a7dd5b36d1f0903a163cf4ea15d812bb823b251ff1cbc5",
+      "role": "debian-source"
+    },
+    {
+      "filename": "libssl3t64_3.5.7-1~deb13u3_amd64.deb",
+      "url": "https://snapshot.debian.org/file/037457764b8a864be9be883a989f95b6b2a13c11",
+      "size": 2458176,
+      "sha256": "ff16bc048bcd7d1b256094450b79c77947d8e76fe2a24bd99b91021d591fa074",
+      "role": "debian-security-binary"
     }
   ],
   "files": [
@@ -876,7 +909,7 @@
     },
     {
       "path": "runtime/var/lib/dpkg/status.d/libssl3t64",
-      "sha256": "860a1d3aeb0591ebdbd30949272ddf26a403ff0bc4bb39aacfbfc4d253c9c514",
+      "sha256": "2febb91c5ba0f976fc387ac45883cede2476889b7720aa7ae1881708d551bdfd",
       "size": 850
     },
     {
@@ -913,6 +946,16 @@
       "path": "runtime/var/lib/dpkg/status.d/zlib1g",
       "sha256": "34e862c1ccb0bac6c37bc7a6d165e8c9dd60d32f43daeffb9b1bd29377ca65ba",
       "size": 581
+    },
+    {
+      "path": "provenance/base/runtime/var/lib/dpkg/status.d/libssl3t64",
+      "sha256": "860a1d3aeb0591ebdbd30949272ddf26a403ff0bc4bb39aacfbfc4d253c9c514",
+      "size": 850
+    },
+    {
+      "path": "provenance/base/runtime/usr/share/doc/libssl3t64/copyright",
+      "sha256": "6a7da622fe0637a334d2a8fc470852d2ffb77d9a2b2f930f854e32a41ad6ef35",
+      "size": 2543
     }
   ],
   "blobs": {
@@ -973,13 +1016,159 @@
     "34e862c1ccb0bac6c37bc7a6d165e8c9dd60d32f43daeffb9b1bd29377ca65ba": "UGFja2FnZTogemxpYjFnClNvdXJjZTogemxpYiAoMToxLjMuZGZzZytyZWFsbHkxLjMuMS0xKQpWZXJzaW9uOiAxOjEuMy5kZnNnK3JlYWxseTEuMy4xLTErYjEKQXJjaGl0ZWN0dXJlOiBhbWQ2NApNYWludGFpbmVyOiBNYXJrIEJyb3duIDxicm9vbmllQGRlYmlhbi5vcmc+Ckluc3RhbGxlZC1TaXplOiAxNzMKRGVwZW5kczogbGliYzYgKD49IDIuMTQpCkNvbmZsaWN0czogemxpYjEgKDw9IDE6MS4wLjQtNykKQnJlYWtzOiBsaWJ4bWwyICg8PCAyLjcuNi5kZnNnLTIpLCB0ZXhsaXZlLWJpbmFyaWVzICg8PCAyMDIzLjIwMjMwMzExLjY2NTg5LTgpClByb3ZpZGVzOiBsaWJ6MQpTZWN0aW9uOiBsaWJzClByaW9yaXR5OiByZXF1aXJlZApNdWx0aS1BcmNoOiBzYW1lCkhvbWVwYWdlOiBodHRwOi8vemxpYi5uZXQvCkRlc2NyaXB0aW9uOiBjb21wcmVzc2lvbiBsaWJyYXJ5IC0gcnVudGltZQogemxpYiBpcyBhIGxpYnJhcnkgaW1wbGVtZW50aW5nIHRoZSBkZWZsYXRlIGNvbXByZXNzaW9uIG1ldGhvZCBmb3VuZAogaW4gZ3ppcCBhbmQgUEtaSVAuICBUaGlzIHBhY2thZ2UgaW5jbHVkZXMgdGhlIHNoYXJlZCBsaWJyYXJ5Lgo=",
     "8cd72e987a497379dfeb0c61e60910d479939dc2d1f0b20507c1e922fc7a216c": "ewogICJjcmVhdGVkIjogIjE5NzAtMDEtMDFUMDA6MDA6MDBaIiwKICAiY29uZmlnIjogewogICAgIkVudiI6IFsKICAgICAgIlBBVEg9L3Vzci9sb2NhbC9zYmluOi91c3IvbG9jYWwvYmluOi91c3Ivc2JpbjovdXNyL2Jpbjovc2JpbjovYmluIiwKICAgICAgIlNTTF9DRVJUX0ZJTEU9L2V0Yy9zc2wvY2VydHMvY2EtY2VydGlmaWNhdGVzLmNydCIKICAgIF0sCiAgICAiVXNlciI6ICI2NTUzMiIsCiAgICAiV29ya2luZ0RpciI6ICIvaG9tZS9ub25yb290IgogIH0sCiAgImhpc3RvcnkiOiBbCiAgICB7CiAgICAgICJjcmVhdGVkIjogIjE5NzAtMDEtMDFUMDA6MDA6MDBaIiwKICAgICAgImNyZWF0ZWRfYnkiOiAiYmF6ZWwgYnVpbGQgQHRyaXhpZS8vYmFzZS1maWxlcy9hbWQ2NDpkYXRhX3N0YXR1c2QiCiAgICB9LAogICAgewogICAgICAiY3JlYXRlZCI6ICIxOTcwLTAxLTAxVDAwOjAwOjAwWiIsCiAgICAgICJjcmVhdGVkX2J5IjogImJhemVsIGJ1aWxkIEB0cml4aWUvL25ldGJhc2UvYW1kNjQ6ZGF0YV9zdGF0dXNkIgogICAgfSwKICAgIHsKICAgICAgImNyZWF0ZWQiOiAiMTk3MC0wMS0wMVQwMDowMDowMFoiLAogICAgICAiY3JlYXRlZF9ieSI6ICJiYXplbCBidWlsZCBAdHJpeGllLy90emRhdGEvYW1kNjQ6ZGF0YV9zdGF0dXNkIgogICAgfSwKICAgIHsKICAgICAgImNyZWF0ZWQiOiAiMTk3MC0wMS0wMVQwMDowMDowMFoiLAogICAgICAiY3JlYXRlZF9ieSI6ICJiYXplbCBidWlsZCBAdHJpeGllLy90emRhdGEtbGVnYWN5L2FtZDY0OmRhdGFfc3RhdHVzZCIKICAgIH0sCiAgICB7CiAgICAgICJjcmVhdGVkIjogIjE5NzAtMDEtMDFUMDA6MDA6MDBaIiwKICAgICAgImNyZWF0ZWRfYnkiOiAiYmF6ZWwgYnVpbGQgQHRyaXhpZS8vbWVkaWEtdHlwZXMvYW1kNjQ6ZGF0YV9zdGF0dXNkIgogICAgfSwKICAgIHsKICAgICAgImNyZWF0ZWQiOiAiMTk3MC0wMS0wMVQwMDowMDowMFoiLAogICAgICAiY3JlYXRlZF9ieSI6ICJiYXplbCBidWlsZCAvL2NvbW1vbjpyb290ZnMiCiAgICB9LAogICAgewogICAgICAiY3JlYXRlZCI6ICIxOTcwLTAxLTAxVDAwOjAwOjAwWiIsCiAgICAgICJjcmVhdGVkX2J5IjogImJhemVsIGJ1aWxkIC8vY29tbW9uOnBhc3N3ZCIKICAgIH0sCiAgICB7CiAgICAgICJjcmVhdGVkIjogIjE5NzAtMDEtMDFUMDA6MDA6MDBaIiwKICAgICAgImNyZWF0ZWRfYnkiOiAiYmF6ZWwgYnVpbGQgLy9jb21tb246aG9tZSIKICAgIH0sCiAgICB7CiAgICAgICJjcmVhdGVkIjogIjE5NzAtMDEtMDFUMDA6MDA6MDBaIiwKICAgICAgImNyZWF0ZWRfYnkiOiAiYmF6ZWwgYnVpbGQgLy9jb21tb246Z3JvdXAiCiAgICB9LAogICAgewogICAgICAiY3JlYXRlZCI6ICIxOTcwLTAxLTAxVDAwOjAwOjAwWiIsCiAgICAgICJjcmVhdGVkX2J5IjogImJhemVsIGJ1aWxkIC8vY29tbW9uOnRtcCIKICAgIH0sCiAgICB7CiAgICAgICJjcmVhdGVkIjogIjE5NzAtMDEtMDFUMDA6MDA6MDBaIiwKICAgICAgImNyZWF0ZWRfYnkiOiAiYmF6ZWwgYnVpbGQgLy9zdGF0aWM6bnNzd2l0Y2giCiAgICB9LAogICAgewogICAgICAiY3JlYXRlZCI6ICIxOTcwLTAxLTAxVDAwOjAwOjAwWiIsCiAgICAgICJjcmVhdGVkX2J5IjogImJhemVsIGJ1aWxkIC8vY29tbW9uOm9zX3JlbGVhc2VfZGViaWFuMTMiCiAgICB9LAogICAgewogICAgICAiY3JlYXRlZCI6ICIxOTcwLTAxLTAxVDAwOjAwOjAwWiIsCiAgICAgICJjcmVhdGVkX2J5IjogImJhemVsIGJ1aWxkIC8vY29tbW9uOmNhY2VydHNfZGViaWFuMTNfYW1kNjRfdGFyIgogICAgfSwKICAgIHsKICAgICAgImNyZWF0ZWQiOiAiMTk3MC0wMS0wMVQwMDowMDowMFoiLAogICAgICAiY3JlYXRlZF9ieSI6ICJiYXplbCBidWlsZCBAdHJpeGllLy9saWJjNi9hbWQ2NDpkYXRhX3N0YXR1c2QiCiAgICB9LAogICAgewogICAgICAiY3JlYXRlZCI6ICIxOTcwLTAxLTAxVDAwOjAwOjAwWiIsCiAgICAgICJjcmVhdGVkX2J5IjogImJhemVsIGJ1aWxkIEB0cml4aWUvL2xpYnNzbDN0NjQvYW1kNjQ6ZGF0YV9zdGF0dXNkIgogICAgfSwKICAgIHsKICAgICAgImNyZWF0ZWQiOiAiMTk3MC0wMS0wMVQwMDowMDowMFoiLAogICAgICAiY3JlYXRlZF9ieSI6ICJiYXplbCBidWlsZCBAdHJpeGllLy9saWJ6c3RkMS9hbWQ2NDpkYXRhX3N0YXR1c2QiCiAgICB9LAogICAgewogICAgICAiY3JlYXRlZCI6ICIxOTcwLTAxLTAxVDAwOjAwOjAwWiIsCiAgICAgICJjcmVhdGVkX2J5IjogImJhemVsIGJ1aWxkIEB0cml4aWUvL3psaWIxZy9hbWQ2NDpkYXRhX3N0YXR1c2QiCiAgICB9LAogICAgewogICAgICAiY3JlYXRlZCI6ICIxOTcwLTAxLTAxVDAwOjAwOjAwWiIsCiAgICAgICJjcmVhdGVkX2J5IjogImJhemVsIGJ1aWxkIEB0cml4aWUvL2xpYmdvbXAxL2FtZDY0OmRhdGFfc3RhdHVzZCIKICAgIH0sCiAgICB7CiAgICAgICJjcmVhdGVkIjogIjE5NzAtMDEtMDFUMDA6MDA6MDBaIiwKICAgICAgImNyZWF0ZWRfYnkiOiAiYmF6ZWwgYnVpbGQgQHRyaXhpZS8vbGlic3RkYysrNi9hbWQ2NDpkYXRhX3N0YXR1c2QiCiAgICB9LAogICAgewogICAgICAiY3JlYXRlZCI6ICIxOTcwLTAxLTAxVDAwOjAwOjAwWiIsCiAgICAgICJjcmVhdGVkX2J5IjogImJhemVsIGJ1aWxkIEB0cml4aWUvL2xpYmdjYy1zMS9hbWQ2NDpkYXRhX3N0YXR1c2QiCiAgICB9LAogICAgewogICAgICAiY3JlYXRlZCI6ICIxOTcwLTAxLTAxVDAwOjAwOjAwWiIsCiAgICAgICJjcmVhdGVkX2J5IjogImJhemVsIGJ1aWxkIEB0cml4aWUvL2djYy0xNC1iYXNlL2FtZDY0OmRhdGFfc3RhdHVzZCIKICAgIH0KICBdLAogICJyb290ZnMiOiB7CiAgICAidHlwZSI6ICJsYXllcnMiLAogICAgImRpZmZfaWRzIjogWwogICAgICAic2hhMjU2Ojk0ODYyNjFiNWExM2Y2M2NhNjkwNGIzNjcyMTUyN2FjOGYxOWRmNTNkMzAwNTYwMTM4ZDY5YWU5YjRjMjAzZGUiLAogICAgICAic2hhMjU2OjYyMWMzNWU3NTFhNTFhOWE5ZGMzZTgwYWEwYjdmZThiZTJhOTM0MDJlYTZjY2QzMDdkMzA4NTJjZDc3NzZjZGEiLAogICAgICAic2hhMjU2Ojc2M2E3Nzc0NWYyN2I4NmNmMjZiOTc4ODdiNjg0MmQ4MzcyMGU2M2IxYzQ4ODQ4YzBiYTllZTU0ZTM1MWQ2M2EiLAogICAgICAic2hhMjU2OmYwZDBlZmY0YzIzMTJhN2JkNmUyMTc5N2JkZmVhNWViMzVmNjBlNzZiNTU1Y2UyYjIyNzk0NDI0YWYyY2FkMzYiLAogICAgICAic2hhMjU2OjI3NWEzMGRkOGNlOTU4YjIxZGFhOWFkOTYyYzZmYmMwOWY5ODMwNmVlMmY0ODZiNjVjOTA3NWRjMjU3YjE0MTIiLAogICAgICAic2hhMjU2OjRkMDQ5ZjgzZDljZjIxZDFmNWNjMGUxMWRlYWYzNmRmMDI3OTBkMGU2MGMxYTM4Mjk1MzhmYjRiNjE2ODUzNjgiLAogICAgICAic2hhMjU2OmFmNWFhOTdlYmU2Y2UxNjA0NzQ3ZWMxZTIxYWY3MTM2ZGVkMzkxYmNhYmU0YWNlZjg4MmU3MThhODdjODZiY2MiLAogICAgICAic2hhMjU2OjZmMWNkY2ViNmEzMTQ2ZjBjY2I5ODY1MjExNTZiZWY4YTQyMmNkYmIwODYzMzk2ZjdmNzUxZjU3NWJhMzA4ZjQiLAogICAgICAic2hhMjU2OmJkM2NkZmFlMWQzZmRkODNhMjIzMWQ2MDg5NjliMzhiODIzNDk3NzdjMmZmZjlhN2MxMmQ1NGY4YWM1YzliMzgiLAogICAgICAic2hhMjU2OjRjZGU2YjBiYjZmNTBhNWYyNTVlZWY3YjJhNDIxNjJjNjYxY2Y3NzZiODAzMjI1ZGNhYzlhNjU5ZTM5NmJiNmIiLAogICAgICAic2hhMjU2OmFkNTFkMDc2OWQxNmJhNTc4MTA2YTE3Nzk4N2RmZTNkMmUwMmMxNjY4Yzg1MmI3OTViMmY2YjAyNDA2ODI0MmEiLAogICAgICAic2hhMjU2OjE4N2NmYzZkMWUzZThhNDBhNWU2NDY1M2JjZDMyMzljMTQwODA3ZGNmMWMwOWU0ODAyMTE3ODcwNWE1YTYxMzkiLAogICAgICAic2hhMjU2OmYyMzkyYTk0ODRiZjZiMThmMDZiZWFmNzA1Yjk5NGUzMWRiYjI3MTZjOTljZjdkMDNjOWM0OTVjZDEwN2YzNjQiLAogICAgICAic2hhMjU2OjhhM2IzMTVkNDUwODBlY2IzOGUzOWQ0MmQyOGU5NTEzMDNjNjdjMmNlNzQ4MmJjZGJiYzNiNTQyNGJlMTkwMTMiLAogICAgICAic2hhMjU2OmFkYTg0MjFjNzQxMTg4YzgzYzJlNmRlOTY0NTAwNDNlNjVjZTYyMzNlN2QyYTFkODRjZDc4OWEwYWQ5N2Y0MjAiLAogICAgICAic2hhMjU2OmMwZTQwOTMxMmFkYzM2Njg5ODk2NzMwNzU2NWY2OTJiYjMzZDQzYTQzOWQzZGU0OGUyN2QxNGI3NDIzODk3MjUiLAogICAgICAic2hhMjU2OmU0YmE5NjZkN2YwNTI3ZGZlMGZjYjU1OWU0ZTE4ZDRkYTQyYzRlNmJlYWU5MjQ3MTkyNTVlMGRlZGI1NTRlZDAiLAogICAgICAic2hhMjU2OjFmNWQyOGJkNTE2NTBmNDI5MjkzZjc3MzBlZGUyNzRiODFkYzA3NDRhYTkxOGJjODg3MTMzYzRhZDYxMDI1OGMiLAogICAgICAic2hhMjU2OjZlMThhZDgwZjNkNjRhOGNiYmNkMWZmMmU4YTBkNWNlNzI4MmNmNjY0ZTgxNmI4NjE4M2E1OWQzMGE2MThlOGEiLAogICAgICAic2hhMjU2OmMxNmIyZWM0YjE0OTNiYWQxYjFkZTIzZDY1OWM4OTllNjBhYmIxNjZiZGE3NTZkMDI3OTJmMGEwM2JhNTRhNDMiLAogICAgICAic2hhMjU2OjdkYjUwNWQ5MDc1NjYyNmY0MjVjNmM1NDY4ZWNhNTY1YzgyZjU4OWIxNDRlY2FhNGY0MTFhZDliYmY3OWU2MTQiCiAgICBdCiAgfSwKICAiYXJjaGl0ZWN0dXJlIjogImFtZDY0IiwKICAib3MiOiAibGludXgiCn0=",
     "1ca671d851d5cd39326d095b949a1d4e6ec836f59c5022b21efcd2773bd3a6d5": "ewogICJzY2hlbWFWZXJzaW9uIjogMiwKICAibWVkaWFUeXBlIjogImFwcGxpY2F0aW9uL3ZuZC5vY2kuaW1hZ2UubWFuaWZlc3QudjEranNvbiIsCiAgImNvbmZpZyI6IHsKICAgICJtZWRpYVR5cGUiOiAiYXBwbGljYXRpb24vdm5kLm9jaS5pbWFnZS5jb25maWcudjEranNvbiIsCiAgICAic2l6ZSI6IDQ1ODksCiAgICAiZGlnZXN0IjogInNoYTI1Njo4Y2Q3MmU5ODdhNDk3Mzc5ZGZlYjBjNjFlNjA5MTBkNDc5OTM5ZGMyZDFmMGIyMDUwN2MxZTkyMmZjN2EyMTZjIgogIH0sCiAgImxheWVycyI6IFsKICAgIHsKICAgICAgInNpemUiOiAxMjQ1MjUsCiAgICAgICJkaWdlc3QiOiAic2hhMjU2OjJjYzdlZTI4NmJmM2E5ZTZhZjVmNzE3NTZkN2ZjOGUyMmUyM2NlNjVmZWM5MDQ3ZDc3NDUxMWZmY2VmNzlmYTgiLAogICAgICAibWVkaWFUeXBlIjogImFwcGxpY2F0aW9uL3ZuZC5vY2kuaW1hZ2UubGF5ZXIudjEudGFyK2d6aXAiCiAgICB9LAogICAgewogICAgICAic2l6ZSI6IDEyNjc1LAogICAgICAiZGlnZXN0IjogInNoYTI1NjpjMTcyZjIxODQxZGZmNGM4Y2Y0NWNkZTQ2NTg5YzFjMjYxNmNlZmU3ZTgxOTk2NWU5MmU2ZDM0NzVjNDI4YWEwIiwKICAgICAgIm1lZGlhVHlwZSI6ICJhcHBsaWNhdGlvbi92bmQub2NpLmltYWdlLmxheWVyLnYxLnRhcitnemlwIgogICAgfSwKICAgIHsKICAgICAgInNpemUiOiAyODgwNTcsCiAgICAgICJkaWdlc3QiOiAic2hhMjU2OjIxOGNmODQwZDBkOTVhODYyMzFlYjlkMzNkMjZhYzhhNTIwYTQyOTljNjA5NmNiNzBhMGMyZmIyYTg3YzllMGEiLAogICAgICAibWVkaWFUeXBlIjogImFwcGxpY2F0aW9uL3ZuZC5vY2kuaW1hZ2UubGF5ZXIudjEudGFyK2d6aXAiCiAgICB9LAogICAgewogICAgICAic2l6ZSI6IDI1NDY2OCwKICAgICAgImRpZ2VzdCI6ICJzaGEyNTY6ZjYwNjk5MzlmNzE4NjAxYjM4ZDI1ZWM1ZWQ1NjMxZWQwNDdlNGRhMjRhY2VjMmUyNTJmOGYyOWQyNTFiZTcxOCIsCiAgICAgICJtZWRpYVR5cGUiOiAiYXBwbGljYXRpb24vdm5kLm9jaS5pbWFnZS5sYXllci52MS50YXIrZ3ppcCIKICAgIH0sCiAgICB7CiAgICAgICJzaXplIjogMzIwOTMsCiAgICAgICJkaWdlc3QiOiAic2hhMjU2OmQ2YjFiODllY2NhY2MxNWMyNDIwYjI3NzZkNzJjMWRhZTMzNGEwMDgwNWVkOWFmNTRiZjJmNzFlNGQ1MzZmMjgiLAogICAgICAibWVkaWFUeXBlIjogImFwcGxpY2F0aW9uL3ZuZC5vY2kuaW1hZ2UubGF5ZXIudjEudGFyK2d6aXAiCiAgICB9LAogICAgewogICAgICAic2l6ZSI6IDY3LAogICAgICAiZGlnZXN0IjogInNoYTI1NjoyNzgwOTIwZTVkYmZiZTEwM2QwM2E1ODNlZDc1MzQ1MzA2ZTU3MmVjNWE0OGNiMTAzNjFmMDQ2NzY3ZDlmMjlhIiwKICAgICAgIm1lZGlhVHlwZSI6ICJhcHBsaWNhdGlvbi92bmQub2NpLmltYWdlLmxheWVyLnYxLnRhcitnemlwIgogICAgfSwKICAgIHsKICAgICAgInNpemUiOiAxODgsCiAgICAgICJkaWdlc3QiOiAic2hhMjU2OjdjMTI4OTViNzc3YmNhYThjY2FlMDYwNWI0ZGU2MzViNjhmYzMyZDYwZmEwOGY0MjFkYzM4MThiZjU1ZWUyMTIiLAogICAgICAibWVkaWFUeXBlIjogImFwcGxpY2F0aW9uL3ZuZC5vY2kuaW1hZ2UubGF5ZXIudjEudGFyK2d6aXAiCiAgICB9LAogICAgewogICAgICAic2l6ZSI6IDEyMywKICAgICAgImRpZ2VzdCI6ICJzaGEyNTY6MzIxNGFjZjM0NWMwY2M2YmJkYjU2YjY5OGE0MWNjZGVmYzYyNGEwOWQ2YmViMGQzOGI1ZGUwYjIzMDNlY2FmNCIsCiAgICAgICJtZWRpYVR5cGUiOiAiYXBwbGljYXRpb24vdm5kLm9jaS5pbWFnZS5sYXllci52MS50YXIrZ3ppcCIKICAgIH0sCiAgICB7CiAgICAgICJzaXplIjogMTYyLAogICAgICAiZGlnZXN0IjogInNoYTI1Njo1MjYzMGZjNzVhMTg2NzVjNTMwZWQ5ZWJhNWY1NWVjYTA5YjAzZTkxYmQ1YmMxNTMwNzkxOGJiYzFhN2U3Mjk2IiwKICAgICAgIm1lZGlhVHlwZSI6ICJhcHBsaWNhdGlvbi92bmQub2NpLmltYWdlLmxheWVyLnYxLnRhcitnemlwIgogICAgfSwKICAgIHsKICAgICAgInNpemUiOiA4MCwKICAgICAgImRpZ2VzdCI6ICJzaGEyNTY6ZGQ2NGJmMmRkMTc3NzU3NDUxYTk4ZmNkYzk5OWEzMzljMzVkZWU1ZDk4NzJkOGY0ZGM2OWM4ZjNjNGRkMDExMiIsCiAgICAgICJtZWRpYVR5cGUiOiAiYXBwbGljYXRpb24vdm5kLm9jaS5pbWFnZS5sYXllci52MS50YXIrZ3ppcCIKICAgIH0sCiAgICB7CiAgICAgICJzaXplIjogMzUxLAogICAgICAiZGlnZXN0IjogInNoYTI1NjpiODM5ZGZhZTAxZjY2ZTE1YzZhOGI2MzUyMDU1N2VkMzE1YmRmZTAzNjM0MmZhN2EwYzUzNzI1OWYxMGQ3YTlhIiwKICAgICAgIm1lZGlhVHlwZSI6ICJhcHBsaWNhdGlvbi92bmQub2NpLmltYWdlLmxheWVyLnYxLnRhcitnemlwIgogICAgfSwKICAgIHsKICAgICAgInNpemUiOiAzMTEsCiAgICAgICJkaWdlc3QiOiAic2hhMjU2OmViZGRjNTVmYWNkYzZiMWY3ZTBmMzA4MTZhNWZjN2NjNjJmMzhhYmRmNzZjMGE4YjBhMGNlNTIwODU3NTQ3OTUiLAogICAgICAibWVkaWFUeXBlIjogImFwcGxpY2F0aW9uL3ZuZC5vY2kuaW1hZ2UubGF5ZXIudjEudGFyK2d6aXAiCiAgICB9LAogICAgewogICAgICAic2l6ZSI6IDE0MzMzOCwKICAgICAgImRpZ2VzdCI6ICJzaGEyNTY6YzRiYzZmMzVmZjVlMjVhYTFhZmU3YTE0OGEwYjZmMTBhNzYwZjU0ZTI5OGY4NmE0YTRkNDRiOTFmMWFmYmZhYiIsCiAgICAgICJtZWRpYVR5cGUiOiAiYXBwbGljYXRpb24vdm5kLm9jaS5pbWFnZS5sYXllci52MS50YXIrZ3ppcCIKICAgIH0sCiAgICB7CiAgICAgICJzaXplIjogNTA3OTA3OSwKICAgICAgImRpZ2VzdCI6ICJzaGEyNTY6Yjk2ZmUyOTk1ZjkwZDBlZjBiZjE0ZjliNGE2N2I1ZjRlNzdkNDc4ZTYxMDgxNjZlMDU2NWFkYzllZmQ2ZTRhMyIsCiAgICAgICJtZWRpYVR5cGUiOiAiYXBwbGljYXRpb24vdm5kLm9jaS5pbWFnZS5sYXllci52MS50YXIrZ3ppcCIKICAgIH0sCiAgICB7CiAgICAgICJzaXplIjogMzA3MzA2NiwKICAgICAgImRpZ2VzdCI6ICJzaGEyNTY6NThjMGMyNjNkYzczZjIwYTY0ODhmNWExOTk4OTY0NWFlYTQyYmU5MzE0N2ViNWE1MmJmNjkxMTI5ODJlMzRhNSIsCiAgICAgICJtZWRpYVR5cGUiOiAiYXBwbGljYXRpb24vdm5kLm9jaS5pbWFnZS5sYXllci52MS50YXIrZ3ppcCIKICAgIH0sCiAgICB7CiAgICAgICJzaXplIjogMzcyNzcyLAogICAgICAiZGlnZXN0IjogInNoYTI1NjpiZDg5NjJlMjkyOTE4YzUwYzkwZWRlYmQ5Njg0YzA1M2JjMzg2YjljNTUwM2FjZDhmZWM3NWQwYzZmOTNhMGI3IiwKICAgICAgIm1lZGlhVHlwZSI6ICJhcHBsaWNhdGlvbi92bmQub2NpLmltYWdlLmxheWVyLnYxLnRhcitnemlwIgogICAgfSwKICAgIHsKICAgICAgInNpemUiOiA5NjE0OCwKICAgICAgImRpZ2VzdCI6ICJzaGEyNTY6Y2FjMmFlMDE5M2NiMDczZTc0OTIwNTBiMDVmYzM0MmE4ODg2NTFiNGJiYzk2NjkwOGM4NzkzZjg4OWMyOTliYSIsCiAgICAgICJtZWRpYVR5cGUiOiAiYXBwbGljYXRpb24vdm5kLm9jaS5pbWFnZS5sYXllci52MS50YXIrZ3ppcCIKICAgIH0sCiAgICB7CiAgICAgICJzaXplIjogMTU4NDQ3LAogICAgICAiZGlnZXN0IjogInNoYTI1NjpkZDBkOWJmZDNiZWUwODBhZDI1YTQ2NDM2MmVjNGYzN2VjNWNhNjI1Njk1YTRkNzE3OWZlNjlkMjA3ZGMwNjhkIiwKICAgICAgIm1lZGlhVHlwZSI6ICJhcHBsaWNhdGlvbi92bmQub2NpLmltYWdlLmxheWVyLnYxLnRhcitnemlwIgogICAgfSwKICAgIHsKICAgICAgInNpemUiOiA5MDEyOTEsCiAgICAgICJkaWdlc3QiOiAic2hhMjU2OjdjYzcwZGZkODhjZjIzMjdiYjgyNzEyM2M5MTU2ZjdjYjk1ZGU5NWIyZjk4ZjNhN2E5MzEyOTZhYWNlYzU3ODYiLAogICAgICAibWVkaWFUeXBlIjogImFwcGxpY2F0aW9uL3ZuZC5vY2kuaW1hZ2UubGF5ZXIudjEudGFyK2d6aXAiCiAgICB9LAogICAgewogICAgICAic2l6ZSI6IDg0MjE0LAogICAgICAiZGlnZXN0IjogInNoYTI1Njo4MjI0ZDkxZGE3MGI3OTkyNDMwZDNiMDQwNDBlYTM4ZWNkZWY0YTdiNzE5YmVlMzgzOTdjODlhYWE4ODZlMTk4IiwKICAgICAgIm1lZGlhVHlwZSI6ICJhcHBsaWNhdGlvbi92bmQub2NpLmltYWdlLmxheWVyLnYxLnRhcitnemlwIgogICAgfSwKICAgIHsKICAgICAgInNpemUiOiA1MTUzNSwKICAgICAgImRpZ2VzdCI6ICJzaGEyNTY6MWE0YmU1NTYyZDkyZDY1OWY5NWUwYjQ0YjI0NWVhNTIwOGJmNTMxNzQ4MWI5YTM1MWIwN2ZhZDdmZTUyNjVlYyIsCiAgICAgICJtZWRpYVR5cGUiOiAiYXBwbGljYXRpb24vdm5kLm9jaS5pbWFnZS5sYXllci52MS50YXIrZ3ppcCIKICAgIH0KICBdLAogICJhbm5vdGF0aW9ucyI6IHsKICAgICJvcmcub3BlbmNvbnRhaW5lcnMuaW1hZ2Uuc291cmNlIjogImh0dHBzOi8vZ2l0aHViLmNvbS9Hb29nbGVDb250YWluZXJUb29scy9kaXN0cm9sZXNzIgogIH0KfQo=",
-    "54df941ed0d06a1bd95ef5e0ce391fd8d9f94b64782dc9a60062727849ee3f97": "ewogICJzY2hlbWFWZXJzaW9uIjogMiwKICAibWVkaWFUeXBlIjogImFwcGxpY2F0aW9uL3ZuZC5vY2kuaW1hZ2UuaW5kZXgudjEranNvbiIsCiAgIm1hbmlmZXN0cyI6IFsKICAgIHsKICAgICAgIm1lZGlhVHlwZSI6ICJhcHBsaWNhdGlvbi92bmQub2NpLmltYWdlLm1hbmlmZXN0LnYxK2pzb24iLAogICAgICAiZGlnZXN0IjogInNoYTI1NjoxY2E2NzFkODUxZDVjZDM5MzI2ZDA5NWI5NDlhMWQ0ZTZlYzgzNmY1OWM1MDIyYjIxZWZjZDI3NzNiZDNhNmQ1IiwKICAgICAgInNpemUiOiA0MzkxLAogICAgICAicGxhdGZvcm0iOiB7CiAgICAgICAgIm9zIjogImxpbnV4IiwKICAgICAgICAiYXJjaGl0ZWN0dXJlIjogImFtZDY0IgogICAgICB9CiAgICB9LAogICAgewogICAgICAibWVkaWFUeXBlIjogImFwcGxpY2F0aW9uL3ZuZC5vY2kuaW1hZ2UubWFuaWZlc3QudjEranNvbiIsCiAgICAgICJkaWdlc3QiOiAic2hhMjU2OmM3MWNlM2JhYjU2OGUyMGQyZWY2MDQ3NmI4MTgwZmUzZTBhNjc5ODU4NGY5N2NjYmZlYThiNmM5MzhlOTgyYTkiLAogICAgICAic2l6ZSI6IDQzOTEsCiAgICAgICJwbGF0Zm9ybSI6IHsKICAgICAgICAib3MiOiAibGludXgiLAogICAgICAgICJhcmNoaXRlY3R1cmUiOiAiYXJtNjQiLAogICAgICAgICJ2YXJpYW50IjogInY4IgogICAgICB9CiAgICB9LAogICAgewogICAgICAibWVkaWFUeXBlIjogImFwcGxpY2F0aW9uL3ZuZC5vY2kuaW1hZ2UubWFuaWZlc3QudjEranNvbiIsCiAgICAgICJkaWdlc3QiOiAic2hhMjU2OmMwZmQxYTdkMTMxMzBiNTE0ZWRiZDIyMTI5OTc5ZTYyN2JhNDRiNDUxYjFlNTYzYWNjODY0ZGRlNDExMTA4YTIiLAogICAgICAic2l6ZSI6IDQzOTEsCiAgICAgICJwbGF0Zm9ybSI6IHsKICAgICAgICAib3MiOiAibGludXgiLAogICAgICAgICJhcmNoaXRlY3R1cmUiOiAiYXJtIiwKICAgICAgICAidmFyaWFudCI6ICJ2NyIKICAgICAgfQogICAgfSwKICAgIHsKICAgICAgIm1lZGlhVHlwZSI6ICJhcHBsaWNhdGlvbi92bmQub2NpLmltYWdlLm1hbmlmZXN0LnYxK2pzb24iLAogICAgICAiZGlnZXN0IjogInNoYTI1Njo4ZTBlNGNjYTdlYmY3OTEzM2FjNmIyMzcwMDc2ZmFmNTQxMjE3MWQ3YjNkYzQxNGE2NDM0NThlYTQ2YjkwZWYzIiwKICAgICAgInNpemUiOiA0MzkyLAogICAgICAicGxhdGZvcm0iOiB7CiAgICAgICAgIm9zIjogImxpbnV4IiwKICAgICAgICAiYXJjaGl0ZWN0dXJlIjogInMzOTB4IgogICAgICB9CiAgICB9LAogICAgewogICAgICAibWVkaWFUeXBlIjogImFwcGxpY2F0aW9uL3ZuZC5vY2kuaW1hZ2UubWFuaWZlc3QudjEranNvbiIsCiAgICAgICJkaWdlc3QiOiAic2hhMjU2OjM1MjkwNzM5NTk1Y2I3YmEwNmZkZWFkZjJlMDMxNDg0ZGExMWM0OTI1Yjk1OTliZjFjZDYyMTY2ZmFiYjY1ZjQiLAogICAgICAic2l6ZSI6IDQzOTIsCiAgICAgICJwbGF0Zm9ybSI6IHsKICAgICAgICAib3MiOiAibGludXgiLAogICAgICAgICJhcmNoaXRlY3R1cmUiOiAicHBjNjRsZSIKICAgICAgfQogICAgfSwKICAgIHsKICAgICAgIm1lZGlhVHlwZSI6ICJhcHBsaWNhdGlvbi92bmQub2NpLmltYWdlLm1hbmlmZXN0LnYxK2pzb24iLAogICAgICAiZGlnZXN0IjogInNoYTI1NjpmMzI5MGQ0ZGU2N2YzZGY0MTNlMzUzM2M4MDY3MmI4NzE1MDQ4Mzg2NmYxMjFkNmUxMmU0NjhmNmY5MjI0YTAyIiwKICAgICAgInNpemUiOiA0MzkxLAogICAgICAicGxhdGZvcm0iOiB7CiAgICAgICAgIm9zIjogImxpbnV4IiwKICAgICAgICAiYXJjaGl0ZWN0dXJlIjogInJpc2N2NjQiCiAgICAgIH0KICAgIH0KICBdCn0K"
+    "54df941ed0d06a1bd95ef5e0ce391fd8d9f94b64782dc9a60062727849ee3f97": "ewogICJzY2hlbWFWZXJzaW9uIjogMiwKICAibWVkaWFUeXBlIjogImFwcGxpY2F0aW9uL3ZuZC5vY2kuaW1hZ2UuaW5kZXgudjEranNvbiIsCiAgIm1hbmlmZXN0cyI6IFsKICAgIHsKICAgICAgIm1lZGlhVHlwZSI6ICJhcHBsaWNhdGlvbi92bmQub2NpLmltYWdlLm1hbmlmZXN0LnYxK2pzb24iLAogICAgICAiZGlnZXN0IjogInNoYTI1NjoxY2E2NzFkODUxZDVjZDM5MzI2ZDA5NWI5NDlhMWQ0ZTZlYzgzNmY1OWM1MDIyYjIxZWZjZDI3NzNiZDNhNmQ1IiwKICAgICAgInNpemUiOiA0MzkxLAogICAgICAicGxhdGZvcm0iOiB7CiAgICAgICAgIm9zIjogImxpbnV4IiwKICAgICAgICAiYXJjaGl0ZWN0dXJlIjogImFtZDY0IgogICAgICB9CiAgICB9LAogICAgewogICAgICAibWVkaWFUeXBlIjogImFwcGxpY2F0aW9uL3ZuZC5vY2kuaW1hZ2UubWFuaWZlc3QudjEranNvbiIsCiAgICAgICJkaWdlc3QiOiAic2hhMjU2OmM3MWNlM2JhYjU2OGUyMGQyZWY2MDQ3NmI4MTgwZmUzZTBhNjc5ODU4NGY5N2NjYmZlYThiNmM5MzhlOTgyYTkiLAogICAgICAic2l6ZSI6IDQzOTEsCiAgICAgICJwbGF0Zm9ybSI6IHsKICAgICAgICAib3MiOiAibGludXgiLAogICAgICAgICJhcmNoaXRlY3R1cmUiOiAiYXJtNjQiLAogICAgICAgICJ2YXJpYW50IjogInY4IgogICAgICB9CiAgICB9LAogICAgewogICAgICAibWVkaWFUeXBlIjogImFwcGxpY2F0aW9uL3ZuZC5vY2kuaW1hZ2UubWFuaWZlc3QudjEranNvbiIsCiAgICAgICJkaWdlc3QiOiAic2hhMjU2OmMwZmQxYTdkMTMxMzBiNTE0ZWRiZDIyMTI5OTc5ZTYyN2JhNDRiNDUxYjFlNTYzYWNjODY0ZGRlNDExMTA4YTIiLAogICAgICAic2l6ZSI6IDQzOTEsCiAgICAgICJwbGF0Zm9ybSI6IHsKICAgICAgICAib3MiOiAibGludXgiLAogICAgICAgICJhcmNoaXRlY3R1cmUiOiAiYXJtIiwKICAgICAgICAidmFyaWFudCI6ICJ2NyIKICAgICAgfQogICAgfSwKICAgIHsKICAgICAgIm1lZGlhVHlwZSI6ICJhcHBsaWNhdGlvbi92bmQub2NpLmltYWdlLm1hbmlmZXN0LnYxK2pzb24iLAogICAgICAiZGlnZXN0IjogInNoYTI1Njo4ZTBlNGNjYTdlYmY3OTEzM2FjNmIyMzcwMDc2ZmFmNTQxMjE3MWQ3YjNkYzQxNGE2NDM0NThlYTQ2YjkwZWYzIiwKICAgICAgInNpemUiOiA0MzkyLAogICAgICAicGxhdGZvcm0iOiB7CiAgICAgICAgIm9zIjogImxpbnV4IiwKICAgICAgICAiYXJjaGl0ZWN0dXJlIjogInMzOTB4IgogICAgICB9CiAgICB9LAogICAgewogICAgICAibWVkaWFUeXBlIjogImFwcGxpY2F0aW9uL3ZuZC5vY2kuaW1hZ2UubWFuaWZlc3QudjEranNvbiIsCiAgICAgICJkaWdlc3QiOiAic2hhMjU2OjM1MjkwNzM5NTk1Y2I3YmEwNmZkZWFkZjJlMDMxNDg0ZGExMWM0OTI1Yjk1OTliZjFjZDYyMTY2ZmFiYjY1ZjQiLAogICAgICAic2l6ZSI6IDQzOTIsCiAgICAgICJwbGF0Zm9ybSI6IHsKICAgICAgICAib3MiOiAibGludXgiLAogICAgICAgICJhcmNoaXRlY3R1cmUiOiAicHBjNjRsZSIKICAgICAgfQogICAgfSwKICAgIHsKICAgICAgIm1lZGlhVHlwZSI6ICJhcHBsaWNhdGlvbi92bmQub2NpLmltYWdlLm1hbmlmZXN0LnYxK2pzb24iLAogICAgICAiZGlnZXN0IjogInNoYTI1NjpmMzI5MGQ0ZGU2N2YzZGY0MTNlMzUzM2M4MDY3MmI4NzE1MDQ4Mzg2NmYxMjFkNmUxMmU0NjhmNmY5MjI0YTAyIiwKICAgICAgInNpemUiOiA0MzkxLAogICAgICAicGxhdGZvcm0iOiB7CiAgICAgICAgIm9zIjogImxpbnV4IiwKICAgICAgICAiYXJjaGl0ZWN0dXJlIjogInJpc2N2NjQiCiAgICAgIH0KICAgIH0KICBdCn0K",
+    "2febb91c5ba0f976fc387ac45883cede2476889b7720aa7ae1881708d551bdfd": "UGFja2FnZTogbGlic3NsM3Q2NApTb3VyY2U6IG9wZW5zc2wKVmVyc2lvbjogMy41LjctMX5kZWIxM3UzCkFyY2hpdGVjdHVyZTogYW1kNjQKTWFpbnRhaW5lcjogRGViaWFuIE9wZW5TU0wgVGVhbSA8cGtnLW9wZW5zc2wtZGV2ZWxAYWxpb3RoLWxpc3RzLmRlYmlhbi5uZXQ+Ckluc3RhbGxlZC1TaXplOiA4MTE1CkRlcGVuZHM6IGxpYmM2ICg+PSAyLjM4KSwgbGlienN0ZDEgKD49IDEuNS41KSwgemxpYjFnICg+PSAxOjEuMS40KSwgb3BlbnNzbC1wcm92aWRlci1sZWdhY3kKQnJlYWtzOiBmcmVlcmFkaXVzICg8PCAzLjIuNytkZnNnLTErZGViMTN1MSksIGxpYnNzbDMgKDw8IDMuNS43LTF+ZGViMTN1MyksIG9wZW5zc2gtY2xpZW50ICg8PCAxOjkuNHAxKSwgb3BlbnNzaC1zZXJ2ZXIgKDw8IDE6OS40cDEpLCBweXRob24zLW0yY3J5cHRvICg8PCAwLjM4LjAtNCkKUmVwbGFjZXM6IGxpYnNzbDMKUHJvdmlkZXM6IGxpYnNzbDMgKD0gMy41LjctMX5kZWIxM3UzKQpTZWN0aW9uOiBsaWJzClByaW9yaXR5OiBvcHRpb25hbApNdWx0aS1BcmNoOiBzYW1lCkhvbWVwYWdlOiBodHRwczovL29wZW5zc2wtbGlicmFyeS5vcmcKRGVzY3JpcHRpb246IFNlY3VyZSBTb2NrZXRzIExheWVyIHRvb2xraXQgLSBzaGFyZWQgbGlicmFyaWVzCiBUaGlzIHBhY2thZ2UgaXMgcGFydCBvZiB0aGUgT3BlblNTTCBwcm9qZWN0J3MgaW1wbGVtZW50YXRpb24gb2YgdGhlIFNTTAogYW5kIFRMUyBjcnlwdG9ncmFwaGljIHByb3RvY29scyBmb3Igc2VjdXJlIGNvbW11bmljYXRpb24gb3ZlciB0aGUKIEludGVybmV0LgogLgogSXQgcHJvdmlkZXMgdGhlIGxpYnNzbCBhbmQgbGliY3J5cHRvIHNoYXJlZCBsaWJyYXJpZXMuCg=="
   },
   "provenanceLimits": [
     "All downloaded artifact bytes and lengths are SHA256 pinned. Debian snapshot SHA1-addressed downloads were also checked against snapshot metadata during acquisition; each .dsc SHA256 table covers every included source component.",
     "Debian .dsc signatures and Node SHASUMS256.txt.asc are retained but signer trust, revocation, and signatures were not independently authenticated. SHA256 equality and HTTPS acquisition are not a signature-verification claim.",
     "The candidate Node binary and LICENSE match the official v24.21.0 linux-x64 distribution verified against SHASUMS256.txt. Its LICENSE also matches the exact official source tarball. This is identity verification, not a reproducible-build attestation.",
     "Installed Debian metadata identifies source versions. The GCC binaries here report gcc-14 14.2.0-19; no compiler-version-derived revision was substituted. zlib1g binary 1:1.3.dfsg+really1.3.1-1+b1 explicitly names source version 1:1.3.dfsg+really1.3.1-1, preserving its epoch and excluding the binary-only rebuild suffix.",
-    "The generator carries complete upstream/Debian build scripts and an allowlisted service snapshot but does not vendor every build dependency or promise bit-identical binaries. Original licenses and notices govern; this is not a legal opinion."
-  ]
+    "The generator carries complete upstream/Debian build scripts and an allowlisted service snapshot but does not vendor every build dependency or promise bit-identical binaries. Original licenses and notices govern; this is not a legal opinion.",
+    "Schema 2 preserves the original schema-1 base OCI identity and supporting assembly revision. libssl3t64 3.5.7-1~deb13u3 is a separate exact Debian security binary overlay, not a package from that old distroless assembly. All twelve installed package files, including five native libraries/engines, copyright, changelogs and dpkg control/md5sums, are replaced from verified archive members without executing maintainer scripts. Both original and overlaid complete OpenSSL source revisions are retained for lower-layer source correspondence.",
+    "The OpenSSL copyright is byte-identical to the original reviewed Debian notice (SHA256 6a7da622fe0637a334d2a8fc470852d2ffb77d9a2b2f930f854e32a41ad6ef35); original Apache-2.0 and source tooling notices remain authoritative. This records technical notice preservation, not new legal clearance or authenticated Debian signer verification.",
+    "The unmodified official Node 24.21.0 binary statically bundles OpenSSL 3.5.8. This Debian shared-library overlay does not patch it. Its QUIC build is disabled (no process.versions.ngtcp2) and Node exposes no DTLS API; these are limited applicability observations for CVE-2026-75804 and CVE-2026-84782, not proof of patching, general native-advisory clearance, or a waiver. Other native advisory conditions require separate review."
+  ],
+  "overlay": {
+    "schemaVersion": 1,
+    "method": "debian-security-binary-overlay",
+    "artifact": "libssl3t64_3.5.7-1~deb13u3_amd64.deb",
+    "snapshotApi": "https://snapshot.debian.org/mr/binary/libssl3t64/3.5.7-1~deb13u3/binfiles",
+    "basePackage": {
+      "name": "libssl3t64",
+      "version": "3.5.7-1~deb13u2",
+      "architecture": "amd64",
+      "source": "openssl",
+      "sourceVersion": "3.5.7-1~deb13u2",
+      "metadataPath": "runtime/var/lib/dpkg/status.d/libssl3t64",
+      "copyrightPath": "runtime/usr/share/doc/libssl3t64/copyright",
+      "binaryProvenance": {
+        "url": "https://snapshot.debian.org/archive/debian-security/20260912T113611Z/pool/updates/main/o/openssl/libssl3t64_3.5.7-1~deb13u2_amd64.deb",
+        "sha256": "916f7f40b34a06e6ebfaefcdab331bff458328411da672598f126a760472467d",
+        "assemblyRevision": "c7d8b67bce5a65ae75ba33c4007dc112368949ca"
+      }
+    },
+    "files": [
+      {
+        "path": "usr/lib/x86_64-linux-gnu/engines-3/afalg.so",
+        "archive": "data",
+        "member": "usr/lib/x86_64-linux-gnu/engines-3/afalg.so",
+        "sha256": "f6ed3d652c2030c2f49b5538998db3035cd156949991c8cec26f429f17e512cf",
+        "size": 22832,
+        "baseSha256": "1dc13554c487969b5fa9fbd997d0e6f0292b3afd519c662522e0ff7358f601f0",
+        "baseSize": 22832,
+        "mode": 420
+      },
+      {
+        "path": "usr/lib/x86_64-linux-gnu/engines-3/loader_attic.so",
+        "archive": "data",
+        "member": "usr/lib/x86_64-linux-gnu/engines-3/loader_attic.so",
+        "sha256": "2c99266b31bfc02d011955db1600bd36146554cd6970d3cbfe46011e11014c83",
+        "size": 51936,
+        "baseSha256": "e7279c2799db0fa179c93fafef0723c7ba53b2f90a439dd74f7d6cc4c7e4f225",
+        "baseSize": 51936,
+        "mode": 420
+      },
+      {
+        "path": "usr/lib/x86_64-linux-gnu/engines-3/padlock.so",
+        "archive": "data",
+        "member": "usr/lib/x86_64-linux-gnu/engines-3/padlock.so",
+        "sha256": "b843e42de64be186245c1b92306e807e11b9b9d7380d0752b6d597bd9c5f7369",
+        "size": 26688,
+        "baseSha256": "71cceabf628d52ab392b1e688c8531be43267fd28dd483a7ff0e96a31af7ba14",
+        "baseSize": 26688,
+        "mode": 420
+      },
+      {
+        "path": "usr/lib/x86_64-linux-gnu/libcrypto.so.3",
+        "archive": "data",
+        "member": "usr/lib/x86_64-linux-gnu/libcrypto.so.3",
+        "sha256": "8ae56f0a9481280a68c19f59809cd242a07a91ad7142944d21a878221992244b",
+        "size": 6521408,
+        "baseSha256": "8bb5f3fdffe280d4453eb79a4663c2c47af70b7c247fe2e94e2da703cee1fd3d",
+        "baseSize": 6517312,
+        "mode": 420
+      },
+      {
+        "path": "usr/lib/x86_64-linux-gnu/libssl.so.3",
+        "archive": "data",
+        "member": "usr/lib/x86_64-linux-gnu/libssl.so.3",
+        "sha256": "9592038e92d1f41affcbb625334d0b6e788714c889104fa6d5b107cf9fd657f2",
+        "size": 1109952,
+        "baseSha256": "4b34859318555bf96d518131bed5fc4d5e35fefa4e1729f49eaa26bd05263850",
+        "baseSize": 1101760,
+        "mode": 420
+      },
+      {
+        "path": "usr/share/doc/libssl3t64/NEWS.Debian.gz",
+        "archive": "data",
+        "member": "usr/share/doc/libssl3t64/NEWS.Debian.gz",
+        "sha256": "89f06e9c3b0b0a2d956552ef2ce2107a3c0a8caf2ed0d655f7fdb26ea16ca579",
+        "size": 299,
+        "baseSha256": "89f06e9c3b0b0a2d956552ef2ce2107a3c0a8caf2ed0d655f7fdb26ea16ca579",
+        "baseSize": 299,
+        "mode": 420
+      },
+      {
+        "path": "usr/share/doc/libssl3t64/changelog.Debian.gz",
+        "archive": "data",
+        "member": "usr/share/doc/libssl3t64/changelog.Debian.gz",
+        "sha256": "5e66f927694ed710606a2a801815378c1ef133659cc45fc2112d07e74d5491ef",
+        "size": 7907,
+        "baseSha256": "aa4ec4a36b9788e916677f49c3773e013a4a6a53fe6df56abffbbed98eb35bc8",
+        "baseSize": 7511,
+        "mode": 420
+      },
+      {
+        "path": "usr/share/doc/libssl3t64/changelog.gz",
+        "archive": "data",
+        "member": "usr/share/doc/libssl3t64/changelog.gz",
+        "sha256": "de7e88f075451ad8ebc3784a263a873c1079a940a56bb6d6f77155027f406b89",
+        "size": 271837,
+        "baseSha256": "de7e88f075451ad8ebc3784a263a873c1079a940a56bb6d6f77155027f406b89",
+        "baseSize": 271837,
+        "mode": 420
+      },
+      {
+        "path": "usr/share/doc/libssl3t64/copyright",
+        "archive": "data",
+        "member": "usr/share/doc/libssl3t64/copyright",
+        "sha256": "6a7da622fe0637a334d2a8fc470852d2ffb77d9a2b2f930f854e32a41ad6ef35",
+        "size": 2543,
+        "baseSha256": "6a7da622fe0637a334d2a8fc470852d2ffb77d9a2b2f930f854e32a41ad6ef35",
+        "baseSize": 2543,
+        "mode": 420
+      },
+      {
+        "path": "usr/share/lintian/overrides/libssl3t64",
+        "archive": "data",
+        "member": "usr/share/lintian/overrides/libssl3t64",
+        "sha256": "418ab624307a41fdee3c70f79632449caad9b6407c2d63ad06443a80852622c4",
+        "size": 54,
+        "baseSha256": "418ab624307a41fdee3c70f79632449caad9b6407c2d63ad06443a80852622c4",
+        "baseSize": 54,
+        "mode": 420
+      },
+      {
+        "path": "var/lib/dpkg/status.d/libssl3t64",
+        "archive": "control",
+        "member": "control",
+        "sha256": "2febb91c5ba0f976fc387ac45883cede2476889b7720aa7ae1881708d551bdfd",
+        "size": 850,
+        "baseSha256": "860a1d3aeb0591ebdbd30949272ddf26a403ff0bc4bb39aacfbfc4d253c9c514",
+        "baseSize": 850,
+        "mode": 420
+      },
+      {
+        "path": "var/lib/dpkg/status.d/libssl3t64.md5sums",
+        "archive": "control",
+        "member": "md5sums",
+        "sha256": "226084f059b90962cdc84d40991e2dda4a7b47ae5ad0623029bf4b2d6f41e76d",
+        "size": 755,
+        "baseSha256": "4e96958350517c3492e01c110e5e89cad16431b2dfe772043f7ff4979d6913c3",
+        "baseSize": 755,
+        "mode": 420
+      }
+    ]
+  }
 }

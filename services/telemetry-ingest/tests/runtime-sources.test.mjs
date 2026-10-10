@@ -7,14 +7,30 @@ import { fileURLToPath } from 'node:url';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import test from 'node:test';
 import {
-  acquireArtifact, assemble, inspectTarGzip, packageFromStatus, safePath,
-  serviceSnapshot, validateLock, validateUrl, verifyDsc, verifyFile, verifyUpstream, writeArchive,
+  acquireArtifact, assemble, inspectOverlayTar, inspectTarGzip, packageFromStatus, safePath,
+  serviceSnapshot, validateLock, validateUrl, verifyDsc, verifyFile, verifyOverlayRoot, verifyUpstream, writeArchive,
 } from '../scripts/runtime-sources.mjs';
 
 const service = fileURLToPath(new URL('../', import.meta.url));
 const real = JSON.parse(await fs.readFile(path.join(service, 'runtime-sources.lock.json')));
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const clone = () => structuredClone(real);
+function schemaOne() {
+  const lock = clone(), old = lock.overlay.basePackage;
+  lock.schemaVersion = 1;
+  lock.packages = lock.packages.map(p => p.name === old.name ? old : p);
+  lock.sources = lock.sources.filter(s => s.name !== 'openssl' || s.version === old.sourceVersion);
+  const used = new Set(lock.sources.flatMap(s => s.artifacts));
+  lock.artifacts = lock.artifacts.filter(a => a.role !== 'debian-security-binary' && (a.role !== 'debian-source' || used.has(a.filename)));
+  for (const name of [old.metadataPath, old.copyrightPath]) {
+    const original = lock.files.find(f => f.path === `provenance/base/${name}`);
+    Object.assign(lock.files.find(f => f.path === name), { ...original, path: name });
+  }
+  lock.files = lock.files.filter(f => !f.path.startsWith('provenance/base/'));
+  lock.blobs = Object.fromEntries(lock.files.map(f => [f.sha256, lock.blobs[f.sha256]]));
+  delete lock.overlay;
+  return lock;
+}
 const entry = (name, bytes) => ({ path: name, bytes, size: bytes.length, sha256: hash(bytes) });
 async function scratch(t) {
   const root = path.join(process.cwd(), `.runtime-sources-test-${randomUUID()}`);
@@ -38,7 +54,7 @@ function tarGzip(files) {
   return gzipSync(Buffer.concat([...chunks, Buffer.alloc(1024)]));
 }
 async function fixture(root) {
-  const lock = clone(), cache = path.join(root, 'cache'), projectRoot = path.join(root, 'project');
+  const lock = schemaOne(), cache = path.join(root, 'cache'), projectRoot = path.join(root, 'project');
   await fs.mkdir(cache); await fs.mkdir(projectRoot);
   lock.packages = lock.packages.slice(0, 1); lock.sources = lock.sources.slice(0, 1);
   const source = lock.sources[0], n = lock.node, d = lock.distroless;
@@ -85,12 +101,97 @@ async function fixture(root) {
 test('real lock closes the actual 14-package Debian 13 runtime, not the old builder', () => {
   validateLock(real);
   assert.equal(real.packages.length, 14);
-  assert.equal(real.sources.length, 10);
-  assert.equal(real.artifacts.filter(a => a.role === 'debian-source').length, 28);
+  assert.equal(real.sources.length, 11);
+  assert.equal(real.artifacts.filter(a => a.role === 'debian-source').length, 30);
   assert.equal(real.packages.find(p => p.name === 'zlib1g').sourceVersion, '1:1.3.dfsg+really1.3.1-1');
   assert.equal(real.sources.filter(s => s.name === 'gcc-14').length, 1);
   assert.equal(real.packages.filter(p => p.source === 'gcc-14').length, 4);
   assert.ok(!real.packages.some(p => /npm|corepack|yarn|bash|dpkg|apt/.test(p.name)));
+});
+
+test('schema 1 remains supported without pretending the overlay came from the original assembly', () => {
+  const original = schemaOne();
+  validateLock(original);
+  assert.equal(original.packages.find(p => p.name === 'libssl3t64').version, '3.5.7-1~deb13u2');
+  const patched = real.packages.find(p => p.name === 'libssl3t64');
+  assert.equal(patched.version, '3.5.7-1~deb13u3');
+  assert.equal(patched.binaryProvenance.assemblyRevision, undefined);
+  assert.equal(real.overlay.basePackage.binaryProvenance.assemblyRevision, original.distroless.revision);
+  assert.deepEqual(real.identities, original.identities);
+});
+
+test('security overlay rejects unknown provenance, incomplete binaries and stale metadata', () => {
+  for (const mutate of [
+    l => { l.overlay.extra = true; },
+    l => { l.overlay.schemaVersion = 2; },
+    l => { l.overlay.method = 'custom-build'; },
+    l => { l.overlay.basePackage.binaryProvenance.assemblyRevision = 'a'.repeat(40); },
+    l => { l.packages.find(p => p.name === 'libssl3t64').binaryProvenance.assemblyRevision = l.distroless.revision; },
+    l => { l.overlay.files.pop(); },
+    l => { l.overlay.files[0].path = 'usr/bin/sh'; },
+    l => { l.overlay.files[0].mode = 0o4755; },
+    l => { l.overlay.files[0].baseSha256 = 'bad'; },
+    l => { l.overlay.files.find(f => f.member === 'control').sha256 = 'a'.repeat(64); },
+    l => { l.overlay.files.find(f => f.member === 'control').baseSize++; },
+    l => { l.overlay.artifact = l.node.distributionArtifact; },
+    l => { l.sources = l.sources.filter(s => s.version !== l.overlay.basePackage.sourceVersion); },
+  ]) {
+    const lock = clone(); mutate(lock);
+    assert.throws(() => validateLock(lock));
+  }
+});
+
+test('overlay tar inspection rejects traversal, extra files, changed bytes and links without extraction', () => {
+  const data = Buffer.from('reviewed library'), descriptor = { size: data.length, sha256: hash(data), mode: 0o644 };
+  const targets = new Map([['usr/lib/libssl.so.3', descriptor]]);
+  const tar = gunzipSync(tarGzip({ 'usr/lib/libssl.so.3': data }));
+  assert.deepEqual(inspectOverlayTar(tar, targets).get('usr/lib/libssl.so.3'), data);
+  for (const files of [
+    { '../escape': data }, { 'usr/lib/libssl.so.3': 'changed' },
+    { 'usr/lib/libssl.so.3': data, 'usr/lib/old-libssl.so.3': data },
+  ]) assert.throws(() => inspectOverlayTar(gunzipSync(tarGzip(files)), targets));
+  const link = Buffer.from(tar); link[156] = 50; link.fill(32, 148, 156);
+  link.write(`${link.subarray(0, 512).reduce((a, b) => a + b, 0).toString(8).padStart(6, '0')}\0 `, 148);
+  assert.throws(() => inspectOverlayTar(link, targets), /Non-regular/);
+  assert.throws(() => inspectOverlayTar(tar.subarray(0, 700), targets), /Incomplete/);
+});
+
+test('base and patched filesystem verification binds all native bytes, metadata and exact inventory', async t => {
+  const root = await scratch(t), lock = clone(), { files } = validateLock(lock);
+  for (const p of lock.packages) {
+    for (const relative of [p.metadataPath, p.copyrightPath]) {
+      const name = relative.slice('runtime/'.length);
+      await fs.mkdir(path.dirname(path.join(root, name)), { recursive: true });
+      await fs.writeFile(path.join(root, name), files.get(`${p.name === 'libssl3t64' ? 'provenance/base/' : ''}${relative}`));
+    }
+    await fs.writeFile(path.join(root, `var/lib/dpkg/status.d/${p.name}.md5sums`), 'fixture');
+  }
+  for (const f of lock.overlay.files) {
+    await fs.mkdir(path.dirname(path.join(root, f.path)), { recursive: true });
+    const bytes = f.member === 'control' ? files.get('provenance/base/runtime/var/lib/dpkg/status.d/libssl3t64') :
+      f.path.endsWith('/copyright') ? files.get('runtime/usr/share/doc/libssl3t64/copyright') : Buffer.from(`base ${f.path}`);
+    f.baseSha256 = hash(bytes); f.baseSize = bytes.length;
+    await fs.writeFile(path.join(root, f.path), bytes, { mode: f.mode });
+  }
+  await verifyOverlayRoot(lock, root, 'base');
+  await assert.rejects(verifyOverlayRoot(lock, root), /mismatch/);
+  for (const f of lock.overlay.files) {
+    const bytes = f.member === 'control' ? files.get('runtime/var/lib/dpkg/status.d/libssl3t64') :
+      f.path.endsWith('/copyright') ? files.get('runtime/usr/share/doc/libssl3t64/copyright') : Buffer.from(`patched ${f.path}`);
+    f.sha256 = hash(bytes); f.size = bytes.length;
+    await fs.writeFile(path.join(root, f.path), bytes, { mode: f.mode });
+  }
+  await verifyOverlayRoot(lock, root);
+  const extra = path.join(root, 'usr/lib/x86_64-linux-gnu/libssl.so.older');
+  await fs.writeFile(extra, 'leftover');
+  await assert.rejects(verifyOverlayRoot(lock, root), /leftover/);
+  await fs.rm(extra);
+  const library = path.join(root, 'usr/lib/x86_64-linux-gnu/libssl.so.3');
+  await fs.chmod(library, 0o4644);
+  await assert.rejects(verifyOverlayRoot(lock, root), /mode mismatch/);
+  await fs.chmod(library, 0o644);
+  await fs.writeFile(library, 'stale vulnerable bytes');
+  await assert.rejects(verifyOverlayRoot(lock, root), /mismatch/);
 });
 
 test('control parsing preserves explicit source revisions, epochs and GCC binary/source differences', () => {

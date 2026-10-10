@@ -1,3 +1,5 @@
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:1ca671d851d5cd39326d095b949a1d4e6ec836f59c5022b21efcd2773bd3a6d5 AS runtime-base
+
 FROM node:24.21.0-bookworm-slim@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6 AS build
 WORKDIR /app/services/telemetry-ingest
 COPY services/telemetry-ingest/package.json services/telemetry-ingest/package-lock.json ./
@@ -19,15 +21,18 @@ COPY licenses/external-service-licenses.json /app/licenses/
 COPY licenses/external/nodable-entities-2.1.0/LICENSE.md /app/licenses/external/nodable-entities-2.1.0/LICENSE.md
 RUN npm test
 RUN node /app/scripts/check-licenses.mjs --scope service
+COPY --from=runtime-base / /app/runtime-base/
 RUN --mount=type=cache,id=missionspec-runtime-sources,target=/app/runtime-source-cache \
     node scripts/runtime-sources.mjs --lock runtime-sources.lock.json \
     --cache /app/runtime-source-cache --output /app/runtime-source-handoff \
-    --project-root /app --download
+    --project-root /app --download \
+    --runtime-base /app/runtime-base --overlay-output /app/runtime-overlay
 RUN npm prune --omit=dev --ignore-scripts --no-audit --no-fund --cache /app/services/telemetry-ingest/.npm-cache
 
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:1ca671d851d5cd39326d095b949a1d4e6ec836f59c5022b21efcd2773bd3a6d5
 ENV NODE_ENV=production
 WORKDIR /app/services/telemetry-ingest
+COPY --from=build /app/runtime-overlay/ /
 COPY --from=build /usr/local/bin/node /usr/local/bin/node
 COPY --from=build /usr/local/LICENSE /usr/share/doc/node/LICENSE
 COPY --from=build --chown=65532:65532 /app/runtime-source-handoff/ /usr/share/doc/telemetry-runtime/
