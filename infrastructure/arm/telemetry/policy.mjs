@@ -327,7 +327,8 @@ export function verifyReconciliation(c, foundation, origins, proposal, sourceSha
         !isDeepStrictEqual(overlay.receiverUpgrade.candidate,
           receiverCandidate.version === 2 && overlay.receiverUpgrade.candidate.version === 1 ? receiverCandidate.priorCandidate : receiverCandidate)) fail('RECONCILIATION_OVERLAY_CHANGED');
     const names = Object.keys(overlay.queueRecords);
-    if (proposal.version === 5 && overlay.queueRecords['queue-storage']?.version === 2) fail('VERSIONED_NSP_RECONCILIATION_REQUIRED');
+    if (proposal.version === 5 && (overlay.queueRecords['queue-storage']?.version === 2 ||
+        overlay.queueRecords['queue-storage']?.kind === 'reviewed-queue-storage-adoption')) fail('VERSIONED_NSP_RECONCILIATION_REQUIRED');
     if (names.length) {
       const last = QUEUE_PHASES.filter(name => names.includes(name)).at(-1);
       queueResources = qualifiedQueueRecords(c, overlay.queueRecords, overlay.queueRecords[last]?.topology, last);

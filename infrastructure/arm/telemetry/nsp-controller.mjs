@@ -6,6 +6,8 @@ import { NSP_API, NSP_STORAGE_API, NSP_DIAGNOSTIC_API, NSP_LIMITS, NSP_AUTHORITY
   buildNspPhase, verifyNspEvidence, verifyNspPreflight, verifyNspTransition, verifyNspObservation,
   verifyNspPreview, verifyNspPermissions, nspPermissionTargets, nspLineageHead, nspPreflightBaseline,
   nspState, nspConfigurationId, verifyNspApiCatalog } from './nsp.mjs';
+import { verifyNspTopology } from './nsp.mjs';
+import { collectQueueDefender } from './queue-defender.mjs';
 
 const hash = value => digest(json(value));
 const equal = (a, b, code) => { if (!isDeepStrictEqual(a, b)) fail(code); };
@@ -132,10 +134,16 @@ export function nspReadRequests(network) {
       item(`${id}/providers/Microsoft.Insights/diagnosticSettings`, NSP_DIAGNOSTIC_API)])),
   };
 }
-export async function collectNspObservation(network, io, deadline) {
+export async function collectNspObservation(network, io, deadline, context = null) {
+  const defender = network.version === 2;
+  if (defender) {
+    closed(context, ['c', 'adoption']);
+    verifyNspTopology(context.c, network, context.adoption.topology, context.adoption);
+    if (context.adoption.version !== 3) fail('QUEUE_DEFENDER_NSP_CONTEXT_REQUIRED');
+  } else if (network.version !== 1 || context?.adoption.version === 3) fail('QUEUE_DEFENDER_NSP_CONTEXT_REQUIRED');
   const startedAt = io.now(), requests = nspReadRequests(network), resources = {};
   await io.batch(Object.entries(requests.resources), async ([id, request]) => { resources[id] = await io.read(request, deadline); });
-  const observation = { version: 1, kind: 'observed-nsp-control-plane', startedAt, completedAt: null, resources };
+  const observation = { version: defender ? 2 : 1, kind: 'observed-nsp-control-plane', startedAt, completedAt: null, resources };
   const absentPerimeter = resources[network.ids.perimeter] === null, absentProfile = resources[network.ids.profile] === null;
   const absent = new Set(absentPerimeter ? ['profiles', 'associations', 'links', 'linkReferences', 'rules'] : absentProfile ? ['rules'] : []);
   await io.batch(['profiles', 'associations', 'rules', 'links', 'linkReferences', 'configurations', 'privateEndpoints', 'queues'], async key => {
@@ -150,6 +158,8 @@ export async function collectNspObservation(network, io, deadline) {
     const id = nspConfigurationId(network, configs[0]?.id);
     observation.configuration = await io.read({ id, apiVersion: NSP_STORAGE_API, filter: null }, deadline);
   }
+  if (defender) observation.defender = await collectQueueDefender(context.c, context.adoption.origin,
+    context.adoption.proposal.defender, io, deadline);
   observation.completedAt = io.now();
   if (observation.completedAt >= deadline) fail('NSP_READ_DEADLINE');
   return observation;
@@ -179,7 +189,7 @@ export async function checkNspReadOnly(c, phase, topology, adoption, evidence, i
   equal(phase, buildNspPhase(c, phase.phase, topology, adoption, evidence, phase.instance), 'NSP_PHASE_CHANGED');
   const foundation = await io.foundation(deadline);
   const [observation, permissions, networkLineageHead] = await io.batch([
-    () => collectNspObservation(evidence.topology, io, deadline),
+    () => collectNspObservation(evidence.topology, io, deadline, { c, adoption }),
     () => collectNspPermissions(c, phase, evidence.topology, io, deadline),
     () => io.readHead(evidence),
   ], read => read());

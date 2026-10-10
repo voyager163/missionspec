@@ -88,8 +88,8 @@ export function verifyNspReconciliationProposal(c, original, topology, adoption,
   verifyNspBilling(c, prior.topology, proposal.networkBillingReview, proposal.networkBillingEvidence, proposal.sourceSha256, at);
   return proposal;
 }
-async function readState(original, prior, io, deadline) {
-  const observation = await collectNspObservation(prior.topology, io, deadline);
+async function readState(c, adoption, original, prior, io, deadline) {
+  const observation = await collectNspObservation(prior.topology, io, deadline, { c, adoption });
   let deployment = null, operations = null;
   if (original.phase.deploymentId) {
     [deployment, operations] = await io.batch([
@@ -104,7 +104,7 @@ export async function collectNspReconciliation(c, original, topology, adoption, 
   verifyNspEvidence(c, prior, topology, adoption);
   const pendingHead = await io.pendingHead();
   verifyNspStoppedAttempt(c, original, topology, adoption, prior, pendingHead);
-  const state = await readState(original, prior, io, deadline);
+  const state = await readState(c, adoption, original, prior, io, deadline);
   equal(await io.pendingHead(), pendingHead, 'NSP_PENDING_HEAD_CHANGED');
   if (await io.sourceDigest() !== source || io.now() >= deadline) fail('NSP_RECONCILIATION_COLLECTION_EXPIRED');
   const proposal = { version: 1, kind: 'nsp-current-state-reconciliation-proposal',
@@ -163,7 +163,7 @@ export async function qualifyNspReconciliation(c, original, topology, adoption, 
   verifyReview(c, original, prior, proposal, review, publication.sourceSha256, start);
   equal(await io.pendingHead(), proposal.pendingHead, 'NSP_PENDING_HEAD_CHANGED');
   if (await io.sourceDigest() !== publication.sourceSha256) fail('NSP_RECONCILIATION_SOURCE_CHANGED');
-  const state = await readState(original, prior, io, deadline);
+  const state = await readState(c, adoption, original, prior, io, deadline);
   if (io.now() >= deadline || await io.sourceDigest() !== publication.sourceSha256) fail('NSP_RECONCILIATION_COLLECTION_EXPIRED');
   const record = { version: 2, kind: 'reviewed-nsp-reconciliation', phase: original.phase, original, proposal, review, publication,
     receipt: { qualified: true, qualificationKind: 'reviewed-nsp-current-state-reconciliation', stage: original.phase.afterStage,

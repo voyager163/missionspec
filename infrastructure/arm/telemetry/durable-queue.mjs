@@ -471,8 +471,9 @@ export function verifyQueueRecord(c, record) {
   if (!isDeepStrictEqual(phase, buildQueuePhase(c, phase.phase, topology, record.identity, context))) fail('QUEUE_PHASE_CHANGED');
   closed(record.priorRecords, phase.requiredReceipts);
   for (const [name, previous] of Object.entries(record.priorRecords)) {
-    if ((!nsp && previous?.version !== 1) || (nsp && previous?.version !== 2)) fail('QUEUE_NSP_VERSION_REQUIRED');
-    const adopted = previous.kind === 'reviewed-queue-storage-adoption';
+    const adopted = previous?.kind === 'reviewed-queue-storage-adoption';
+    if ((!nsp && previous?.version !== 1) || (nsp && previous?.version !== 2 &&
+        !(adopted && name === 'queue-storage' && previous.version === 3))) fail('QUEUE_NSP_VERSION_REQUIRED');
     if ((adopted ? name !== 'queue-storage' : previous.phase?.phase !== name) || !isDeepStrictEqual(previous.topology, topology) ||
         !isDeepStrictEqual(previous.identity, record.identity) ||
         canonicalInstant(adopted ? previous.adoptedAt : previous.receipt.completedAt) > at) fail('QUEUE_PREREQUISITE_CHANGED');
