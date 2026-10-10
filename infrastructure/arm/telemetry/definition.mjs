@@ -7,7 +7,9 @@ import { queueEnvironment } from './durable-queue.mjs';
 const PHASE_CODES = Object.freeze({ 'project-budget': 'pb', core: 'co', 'workspace-access': 'wa', data: 'da', 'upload-role': 'ur',
   assignments: 'ra', 'disabled-app': 'di', 'synthetic-admission': 'sy', 'synthetic-disable': 'sd',
   'disabled-image-upgrade': 'iu', 'disabled-image-rollback': 'ir', 'disabled-queue-upgrade': 'qu',
-  'queue-storage': 'qs', 'queue-role': 'qr', 'queue-assignment': 'qa' });
+  'queue-storage': 'qs', 'queue-role': 'qr', 'queue-assignment': 'qa',
+  'nsp-empty-boundary': 'ne', 'nsp-storage-lock': 'nl', 'nsp-enforced-association': 'na',
+  'nsp-subscription-admission': 'ns', 'nsp-network-deny': 'nd', 'nsp-subscription-readmit': 'nr' });
 export const PHASES = Object.freeze(['project-budget', 'core', 'workspace-access', 'data', 'upload-role', 'assignments',
   'disabled-app', 'synthetic-admission', 'synthetic-disable']);
 export const TOGGLE_PHASES = Object.freeze(['synthetic-admission', 'synthetic-disable']);
@@ -66,7 +68,7 @@ export function deploymentName(c, phase, instance) {
   validateConfig(c);
   if (!Object.hasOwn(PHASE_CODES, phase)) fail('PHASE_NOT_SUPPORTED');
   if (instance !== undefined) {
-    if (![...TOGGLE_PHASES, ...IMAGE_PHASES].includes(phase)) fail('WINDOW_INSTANCE_TOGGLE_ONLY');
+    if (![...TOGGLE_PHASES, ...IMAGE_PHASES, 'nsp-network-deny', 'nsp-subscription-readmit'].includes(phase)) fail('WINDOW_INSTANCE_TOGGLE_ONLY');
     validateWindowInstance(c, instance);
   }
   if (IMAGE_PHASES.includes(phase) && !instance) fail('IMAGE_INSTANCE_REQUIRED');
