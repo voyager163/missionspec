@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MissionSpec original operation source catalog",
+  "description": "Source metadata, not an installation record or permission grant. Input/output identifiers refer to engine contracts. Optional outputs are emitted only when their conditional effect is authorized. Host qualification is established separately.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "defaultInstall", "hosts", "rendering", "operations"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "defaultInstall": { "const": true },
+    "hosts": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": { "enum": ["copilot", "codex", "claude"] }
+    },
+    "rendering": {
+      "description": "Replace this sole token with the selected host's native invocation of the current operation. Do not interpolate user arguments as instructions. Handoffs remain stable operation IDs for renderer resolution.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["invocationPlaceholder"],
+      "properties": {
+        "invocationPlaceholder": { "const": "{{invocation}}" }
+      }
+    },
+    "operations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["discover", "draft", "draft-all", "implement", "verify", "archive", "revise", "clarify", "analyze", "principles", "sync", "onboard"],
+      "properties": {
+        "discover": { "allOf": [
+          { "$ref": "#/$defs/operation" },
+          { "type": "object", "properties": { "body": { "const": "discover.md" }, "category": { "const": "primary" }, "engineOwner": { "const": "discovery" } } }
+        ] },
+        "draft": { "allOf": [
+          { "$ref": "#/$defs/operation" },
+          { "type": "object", "properties": { "body": { "const": "draft.md" }, "category": { "const": "primary" }, "engineOwner": { "const": "specification" } } }
+        ] },
+        "draft-all": { "allOf": [
+          { "$ref": "#/$defs/operation" },
+          { "type": "object", "properties": { "body": { "const": "draft-all.md" }, "category": { "const": "primary" }, "engineOwner": { "const": "specification" } } }
+        ] },
+        "implement": { "allOf": [
+          { "$ref": "#/$defs/operation" },
+          { "type": "object", "properties": { "body": { "const": "implement.md" }, "category": { "const": "primary" }, "engineOwner": { "const": "execution" } } }
+        ] },
+        "verify": { "allOf": [
+          { "$ref": "#/$defs/operation" },
+          { "type": "object", "properties": { "body": { "const": "verify.md" }, "category": { "const": "primary" }, "engineOwner": { "const": "verification" } } }
+        ] },
+        "archive": { "allOf": [
+          { "$ref": "#/$defs/operation" },
+          { "type": "object", "properties": { "body": { "const": "archive.md" }, "category": { "const": "primary" }, "engineOwner": { "const": "specification" } } }
+        ] },
+        "revise": { "allOf": [
+          { "$ref": "#/$defs/operation" },
+          { "type": "object", "properties": { "body": { "const": "revise.md" }, "category": { "const": "supporting" }, "engineOwner": { "const": "specification" } } }
+        ] },
+        "clarify": { "allOf": [
+          { "$ref": "#/$defs/operation" },
+          { "type": "object", "properties": { "body": { "const": "clarify.md" }, "category": { "const": "supporting" }, "engineOwner": { "const": "discovery" } } }
+        ] },
+        "analyze": { "allOf": [
+          { "$ref": "#/$defs/operation" },
+          { "type": "object", "properties": { "body": { "const": "analyze.md" }, "category": { "const": "supporting" }, "engineOwner": { "const": "planning" } } }
+        ] },
+        "principles": { "allOf": [
+          { "$ref": "#/$defs/operation" },
+          { "type": "object", "properties": { "body": { "const": "principles.md" }, "category": { "const": "supporting" }, "engineOwner": { "const": "specification" } } }
+        ] },
+        "sync": { "allOf": [
+          { "$ref": "#/$defs/operation" },
+          { "type": "object", "properties": { "body": { "const": "sync.md" }, "category": { "const": "supporting" }, "engineOwner": { "const": "specification" } } }
+        ] },
+        "onboard": { "allOf": [
+          { "$ref": "#/$defs/operation" },
+          { "type": "object", "properties": { "body": { "const": "onboard.md" }, "category": { "const": "supporting" }, "engineOwner": { "const": "integration" } } }
+        ] }
+      }
+    }
+  },
+  "$defs": {
+    "operationId": {
+      "enum": ["discover", "draft", "draft-all", "implement", "verify", "archive", "revise", "clarify", "analyze", "principles", "sync", "onboard"]
+    },
+    "input": {
+      "enum": ["workspace", "request", "change", "context-observations", "capture-scope", "workflow-state", "artifact-selector", "change-creation-scope", "approved-revisions", "execution-grant", "task-graph", "auto-request", "run-reference", "source-revision", "check-plan", "verification-grant", "evidence", "outcome-selection", "acceptance-record", "sync-preview", "existing-artifacts", "amendment-scope", "gap-report", "ambiguity-scope", "answers", "project-principles", "principle-scope", "active-changes", "baseline-revisions", "accepted-deltas", "host-readiness", "walkthrough-selection"]
+    },
+    "output": {
+      "enum": ["findings", "questions", "discovery-notes", "artifact-patch", "validation-findings", "readiness-report", "attempt-records", "progress-report", "blocker-report", "check-observations", "gap-report", "proposed-repairs", "acceptance-record", "sync-result", "closure-record", "impact-report", "answer-patch", "unresolved-questions", "coverage-report", "quality-findings", "principles-patch", "sync-preview", "guidance"]
+    },
+    "effect": {
+      "description": "Distinct potential effects, never permission grants. Each effect needs concrete typed engine scope; these categories are not wildcards for commands, destinations or permissions. Unsupported external effects must block rather than acquire a catch-all permission.",
+      "enum": ["workspace-read", "change-create", "discovery-write", "artifact-write", "source-write", "project-check-execute", "dependency-change", "host-dispatch", "execution-record", "evidence-record", "acceptance-record", "baseline-write", "closure-write", "revision-invalidation", "analysis-report-write", "principles-write"]
+    },
+    "prerequisite": {
+      "enum": ["workspace-boundary", "authoritative-instructions", "capture-runtime", "operation-runtime", "pinned-workflow", "current-dependencies", "current-execution-grant", "qualified-host", "durable-ledger", "source-binding", "shared-sync-engine"]
+    },
+    "approvalRule": {
+      "enum": ["capture-scope", "explicit-change-creation", "host-permissions", "artifact-scope", "artifact-closure-scope", "separate-implementation-request", "revision-bound-grant", "explicit-auto", "per-run-limits", "material-change-reapproval", "verification-check-scope", "evidence-scope", "explicit-acceptance", "exact-sync-preview", "explicit-outcome-closure", "reviewed-revision-patch", "answer-capture-scope", "report-capture-scope", "project-principles-scope", "current-acceptance", "each-action-separately"]
+    },
+    "stopRule": {
+      "enum": ["missing-runtime-for-effects", "ambiguous-selection", "unauthorized-effect", "material-question", "capture-complete", "invalid-dependencies", "one-artifact-complete", "drafts-current", "before-implementation", "review-gate", "prerequisite-closure-complete", "stale-revision", "revoked-authority", "run-limit", "two-repairs", "no-progress", "unknown-outcome", "ledger-failure", "task-scope-complete", "unavailable-check", "report-complete", "no-standalone-repair", "acceptance-ineligible", "sync-conflict", "partial-effect", "archive-collision", "closure-complete", "new-artifact-needed", "patch-complete", "question-bound", "unanswered-question", "no-project-execution", "no-runtime-grants", "sync-complete-leave-open", "explanation-complete", "selected-step-boundary"]
+    },
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["body", "description", "category", "engineOwner", "inputs", "outputs", "effects", "prerequisites", "approvalRules", "stopRules", "handoffs", "telemetryClass"],
+      "properties": {
+        "body": { "type": "string", "pattern": "^[a-z]+(?:-[a-z]+)*\\.md$" },
+        "description": {
+          "description": "Canonical native-skill matching description: an original use-case cue and an important boundary. Renderers consume this field directly rather than deriving or duplicating descriptions.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240,
+          "pattern": "^(?![\\s\\S]*[\\r\\n\\u2028\\u2029])(?=.*\\S).+$"
+        },
+        "category": { "enum": ["primary", "supporting"] },
+        "engineOwner": {
+          "description": "Declared asset owner, which must be one of the operation registry's participating engines. Registry order does not designate a coordinator. Collaborating engines are resolved through the core registry rather than duplicated here.",
+          "enum": ["discovery", "specification", "planning", "execution", "verification", "integration"]
+        },
+        "inputs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["required", "optional"],
+          "properties": {
+            "required": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/input" } },
+            "optional": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/input" } }
+          }
+        },
+        "outputs": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/output" } },
+        "effects": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["default", "conditional"],
+          "properties": {
+            "default": { "const": ["workspace-read"] },
+            "conditional": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/effect" } }
+          }
+        },
+        "prerequisites": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/prerequisite" } },
+        "approvalRules": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/approvalRule" } },
+        "stopRules": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/stopRule" } },
+        "handoffs": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/operationId" } },
+        "telemetryClass": {
+          "description": "none forbids an event for this skill, including captures. stateful-top-level is eligibility only after a stateful outcome, central disclosure/opt-out policy and backend qualification; nested queries and previews never emit.",
+          "enum": ["none", "stateful-top-level"]
+        }
+      }
+    }
+  }
+}
