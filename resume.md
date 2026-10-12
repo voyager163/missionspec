@@ -1,5 +1,126 @@
 # MissionSpec cross-laptop handoff
 
+## Latest handoff: MacBook source review and private audit, 2026-10-12
+
+This section supersedes the Windows pickup status below without replacing its
+original failures, receipts, consumed grants or historical limits. It records
+source checks and a sanitized read-only private audit, not native-host
+qualification, current cloud facts or action authority.
+
+### Exact source candidate and separate repair
+
+[PR #2](https://github.com/voyager163/missionspec/pull/2) was independently
+refreshed as OPEN, draft, unmerged and CLEAN/MERGEABLE at exact head
+`fc7d5326fd602c892d27643790845e1a7be2d0b8`, against `missionspec-foundation`
+`d9c96a5a695465902dffd67e984c492a3a6cdf34`. All 34 completed hosted results
+actually belonged to that later handoff head, not merely implementation
+`57ca6d5`: [repository/platform/service/ARM](https://github.com/voyager163/missionspec/actions/runs/38249880078),
+[CodeQL](https://github.com/voyager163/missionspec/actions/runs/38249880204), and
+[dependency review](https://github.com/voyager163/missionspec/actions/runs/38249880168)
+all reported that exact revision and succeeded.
+
+The focused eleven-file PR diff contained no high-confidence changed-source
+defect. Its mandatory full local root check nevertheless failed twice on the
+MacBook. Those failures were investigated, not waived by hosted green results
+or a passing isolated test file.
+
+A separately scoped repair is retained on the isolated
+`askhooli-macbook-source-qualification` branch based on `fc7d532`. Its exact
+commit is discoverable with `git log`; it has not been pushed or merged, and it
+does not change PR #2's head or the parent foundation checkout. The repair
+changes synthetic native-host tests and directly related documentation, not
+production adapters, manifests, locks, CI, native deadlines or action gates.
+
+The old refusal assertions assumed a synthetic child consumed its denial before
+best-effort termination. The cancellation rendezvous observed the child's
+`turn/start` request log before the adapter necessarily processed the turn
+acknowledgement. The repaired tests observe successful local transport writes,
+separately cover abort before and after a valid turn acknowledgement, and release
+a synthetic late reply on termination rather than an elapsed-time guess.
+Accepted local writes are not remote denial or cancellation receipts.
+No failed case was disabled and no sleep or deadline was increased.
+
+### Supported source toolchain and actual checks
+
+The observed source host is **macOS 27.0.1, build 26A434, arm64**, with native
+Homebrew Node.js **24.21.0** and npm **11.19.0**. This satisfies the source
+runtime range; it is not independently admitted private/native-host execution.
+Initial root and service builds failed with `tsc: command not found`.
+Only after those missing-tool failures, the unchanged reviewed locks were
+restored with `npm ci --ignore-scripts --no-audit --no-fund` and
+`npm --prefix services/telemetry-ingest ci --ignore-scripts --no-audit --no-fund`.
+No global installation, execution-policy/account-setting change or `.npmrc`
+edit was made.
+
+| Candidate / command | Actual outcome |
+| --- | --- |
+| PR #2 `fc7d532`: focused package/Windows-shim/Dockerfile regressions | 8 passed, no failures or skips, after the supported build. |
+| PR #2 `fc7d532`: first `npm run check` | Failed: 778 tests, 708 passed, 1 failed, 69 existing platform skips. `Codex fails closed for approval` read an absent synthetic denial transcript entry at `tests/native-hosts.test.mjs:522`. |
+| PR #2 `fc7d532`: exact `npm run check` retry without the concurrent service workload | Failed: 778 tests, 707 passed, 2 failed, 69 existing platform skips. `permission-request` failed at the same denial assertion; cancellation read an absent `turn/interrupt` entry at line 681. |
+| PR #2 `fc7d532`: isolated `node --test tests/native-hosts.test.mjs` | 73 passed, no skips. Diagnostic isolation only; it did not erase either full-root failure. |
+| PR #2 `fc7d532`: complete service test | Schema/build and all 134 tests passed, no skips. |
+| Separate repair: `node --test tests/native-hosts.test.mjs` | All 76 synthetic cases passed, no failures or skips, including both turn-acknowledgement boundaries, late replies and the unchanged 1,500 ms timeout case. |
+| Separate repair: `npm run check` | Passed: 781 tests, 712 passed, no failures, 69 unchanged platform skips; architecture, repository, package boundaries and locked CLI licenses also passed. The earlier failed results remain failures. |
+| Separate repair: `npm run check:package -- --install` | Passed: actual offline POSIX npm executable and installed API, 6 engines, 36 projections, 133 locked runtime dependencies, 379 archive files, darwin-arm64 native-addon load and descriptor lock/unlock. No configured telemetry or native host admission. |
+| `node scripts/check-licenses.mjs --scope service` | Passed: 63 runtime packages and retained notices. |
+| `git diff --check` | Passed. |
+
+The complete service command was
+`env -u MSR_LOCAL_QUEUE_EVIDENCE -u MSR_LOCAL_FAULT_EVIDENCE -u MSR_LOCAL_FAULT_CASE npm --prefix services/telemetry-ingest test`.
+The command-scoped removals prevent optional evidence-output or single-case
+overrides; they do not change user state or skip tests. The focused command was
+`npm run build && node --test --test-name-pattern='installed smoke|Windows shim|Dockerfile|final runtime genuinely|build and source handoff' tests/package.test.mjs tests/repository-checks.test.mjs services/telemetry-ingest/tests/container-runtime.test.mjs`.
+
+These are local source/installed-package results, not hosted results for the
+separate repair or permission to merge the still-unchanged PR #2 candidate.
+Review that companion repair and recheck the actual eventual integration
+candidate before deliberate integration. PR #1 remains a separate foundation
+candidate; its body update is **not done**, blocked on the app account-relink
+requirement. No CLI bypass was used.
+
+### Private audit: bytes authenticated, original custody not restored
+
+The coordinating parent's read-only MacBook audit found all four original
+private packet roots and authenticated their exact named recursive regular-file
+closures against the original manifest pins:
+
+| Retained closure | Members | Bytes |
+| --- | ---: | ---: |
+| Native CHECK-only V6 | 51 | 1,981,041 |
+| Terminology amendment | 5 | 21,982 |
+| October 10 scanner preparation | 18 | 158,225 |
+| Typed source-transition V3 | 19 | 231,212 |
+| October 9 full raw closure | 26 | 1,592,084,478 |
+| Direct anchor | 4 | 4,839 |
+| Finalized V2 | 24 | 5,238,212 |
+| Original stage14 source | 927 | 338,850,851 |
+
+All 60 retained V5 read byte pins matched. Every original seven-stat comparison
+differed **only in device**, from `16777232` to `16777233`; sampled inode, time
+and mode observations were retained. The cause is unestablished. This does
+**not** restore original exact physical custody or renew any historical fact.
+Finding the originals supersedes their Windows absence, not the old expiry,
+failed attempts, consumed grants or required admission boundaries.
+
+The generic reference graph traversed 3,155 files / 9,502,504,244 bytes, but its
+full transitive closure remains **unproven** because of copied/versioned
+relative descriptors, archive/canonical-bound references and unresolved schemas.
+Those resolver limits are not established corruption and are not blanket
+private-state qualification. Audit scripts, receipts, logs, private paths and
+raw data remain private; none is committed by this handoff.
+
+### Remaining distinct admissions
+
+Source implementation permission and these read-only observations do not admit
+fresh vulnerability/image scans, pricing refresh, native CHECK-only execution,
+model pilots, cloud reads/effects, deployment or publication. Each still needs
+its genuine dependencies, current reviewed scope and distinct action authority.
+No old entrypoint was executed, no sealed packet was regenerated, no original
+grant replayed and no current fact renewed. The fresh private-host baseline,
+full referenced closure and machine/path-bound custody remain separate work.
+Preserve the failed stage15/V5 history and old limits while resolving those
+dependencies. **Product and native/live qualification remain incomplete.**
+
 ## Latest handoff: Windows back to MacBook, 2026-10-12
 
 This section records the Windows takeover and the user's return to the MacBook.
