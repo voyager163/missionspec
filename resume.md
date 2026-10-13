@@ -1,5 +1,162 @@
 # MissionSpec cross-laptop handoff
 
+## Latest handoff: reviewed source integrated, 2026-10-13
+
+This section supersedes the dated pickup and PR status below, while preserving
+all original failures, receipts, consumed grants and limits. The user renewed
+source implementation, repair, commit/push and qualified PR-merge authority.
+That does not waive distinct native/scan/pricing/live admission or approve
+publication. **Reviewed source repair is integrated; product/native/live
+qualification remains incomplete.**
+
+### Actual source integration and current continuation
+
+[PR #2](https://github.com/voyager163/missionspec/pull/2) was deliberately marked
+ready and normally merged at **2026-10-13 00:43:17 UTC**. The exact reviewed head
+was `d4dff458a3ac87ca6b79cf4b5ea69e6069e2c8fc`, against foundation
+`d9c96a5a695465902dffd67e984c492a3a6cdf34`. Its three commits were the Windows
+repair `57ca6d5`, takeover handoff `fc7d532` and separate synthetic transport
+repair `d4dff45`: 13 files, 508 additions/24 deletions.
+
+The actual merge commit is
+**`054a6ba7dbd0ddaf9782bae126f62edb170d54be`**, with exact parents
+`[d9c96a5, d4dff45]` and tree
+`30d3529afa829dffd99a022625903f655093c528`. That tree matches both the reviewed
+repair and tested PR merge tree. The original clean MacBook checkout on
+`missionspec-foundation` was advanced by **fast-forward only** to this verified
+merge: no branch switch, reset, stash, force push or unrelated WIP integration.
+This section is a later documentation-only change; discover its own revision
+with `git log`, rather than treating the code integration hash as its hash.
+
+[PR #1](https://github.com/voyager163/missionspec/pull/1) remains OPEN, non-draft
+and unmerged into `develop`. Its managed template-preserving body correction
+succeeded on October 13; the earlier account-relink blocker is historical for
+that edit. PR #2's source merge does not establish PR #1's broader qualification
+or acceptance. Refresh its actual head, description and checks after further
+documentation commits; do not reuse an earlier head's green results.
+
+The previously recorded companion PR #3 and its old workflow-run URLs returned
+404 on October 13, despite retained successful commit-check records and stale
+app linkage. The cause is **unestablished**: not proof of deletion, closure,
+merge or an account change. Managed companion recovery refused that stale
+binding. The supported recovery was a guarded, non-force update of the existing
+same-repository PR #2, retaining the repair as a separate reviewed commit.
+No duplicate PR, CLI creation fallback or account/project metadata mutation
+was used. Companion recovery is not required for the completed PR #2 source
+integration; its historical locator remains unresolved.
+
+### Fresh PR #2 candidate qualification, not historical substitution
+
+These three same-repository `pull_request` runs were created
+**2026-10-13 00:18:59 UTC**, attempt 1, explicitly associated with PR #2,
+head `d4dff45` and base `d9c96a5`:
+
+| Fresh workflow | Actual outcome |
+| --- | --- |
+| [Repository checks 38326627541](https://github.com/voyager163/missionspec/actions/runs/38326627541) | Completed SUCCESS at 00:36:18 UTC; 30/30 jobs, no failed/skipped/cancelled jobs or non-success steps. Includes full Linux/macOS repository/service workers, ten ARM shards, both aggregates and all documented Windows jobs. |
+| [CodeQL 38326627750](https://github.com/voyager163/missionspec/actions/runs/38326627750) | Both Actions and JavaScript/TypeScript jobs completed SUCCESS; no non-success steps; analysis upload completed. |
+| [Dependency review 38326627615](https://github.com/voyager163/missionspec/actions/runs/38326627615) | One job completed SUCCESS; no non-success steps. |
+
+There were **33 fresh completed SUCCESS Actions check records**, App 15368,
+on exact head `d4dff45`. The all-record view contained 67 successes: 34 old
+companion records plus 33 fresh workflow records. The standalone App 57789
+`CodeQL` check remained historical October 12/PR3; it was **not counted or
+relabelled as fresh**.
+
+Actual new PR #2 code-scanning analyses were independently verified on
+`refs/pull/2/merge`: JavaScript/TypeScript `1939918492` (103 rules) and Actions
+`1939912389` (23 rules), CodeQL 2.27.2, both on test merge
+`8abbbcef15c1511b34d05d856341d79f04ecc40b`, both with empty error and zero results.
+The current open CodeQL-alert query for that merge ref returned none. Fresh
+Linux/macOS/Windows checkout logs identified that exact test merge; its parents
+and tree matched the actual merge above. Source integration relied on these
+complete fresh workflows and analyses, not the old standalone check. Strict
+App-bound protection for `develop`/`main` remains unchanged and must be satisfied
+by the actual future PR #1 candidate; it does not cover this foundation target.
+No context was fabricated and no administrative bypass was used.
+
+Hosted macOS root results were 781 tests/712 passed/0 failed/69 existing platform
+skips; Linux was 781/708/0/73. Both complete service suites passed 134/134 with
+zero skips. The new pre-acknowledgement, post-acknowledgement and late-output
+synthetic cases passed. Offline POSIX executable, darwin-arm64/linux-x64 addon
+and descriptor lock/unlock checks passed: 133 runtime packages, 379 archive files
+and 36 projections. Windows portable results were 175/173 passed/0 failed/
+2 existing platform skips; both actual npm `.cmd` and PowerShell `.ps1`
+installed surfaces and win32-x64 addon load passed. The POSIX mutex was correctly
+not exercised on Windows. Platform test skips are not skipped jobs.
+
+The local repair's first complete `npm run check` passed on the repaired source
+in 40.38 seconds; the second passed on the final three-file tree including its
+new handoff in 41.06 seconds, concurrently with the full service suite. Each had
+781 tests/712 passed/0 failed/69 unchanged platform skips and all downstream
+stages passed. The original `fc7d532` failures below remain failures. Accepted
+local stdin/interrupt writes and processed synthetic acknowledgements still do
+not prove remote consumption, native cancellation, descendant fencing or
+paid-usage quiescence. Production best-effort cleanup is unchanged.
+
+### Updated read-only evidence and source-host observations
+
+The new October 13 private audit traversed **3,156 files / 9,502,507,060 bytes**,
+with zero byte-pin failures and **135 unresolved references**. The eight exact
+named closures in the October 12 table remain byte-authenticated. The retained
+corresponding-source archive was also streaming-authenticated without extraction
+or execution: **146 regular members / 296,193,645 member bytes**, archive
+296,326,756 bytes, SHA-256
+`1dc90c05e01872221b3de7b7ddad7e346aa018436a00e4b01b3febb0ab39746f`.
+
+The remaining references are 48 in a historical report that records removed
+scratch, 84 image-internal OpenSSL references, one byte-authenticated non-JSON
+failed output, one directory aggregate schema and one relative verified-history
+manifest reference. These resolver/schema limits are **not established
+corruption** or permission to reconstruct removed success. Full transitive
+closure remains unproven. All 60 retained V5 read byte pins still match; each
+seven-stat comparison differs only in device `16777232` to `16777233`. The cause
+remains unknown and original exact physical custody is not restored. Earlier
+incomplete resolver receipts are preserved rather than overwritten.
+
+Fresh October 13 source-host preflight observed macOS 27.0.1/build 26A434 arm64,
+Node.js 24.21.0/npm 11.19.0 and Python package metadata
+`azure-cli-core` 2.90.0/`azure-core` 1.39.0/`requests` 2.33.0. Actual resolved
+Node executable, npm package manifest and Azure Python executable were pinned
+before/after isolated local metadata observation. The receipt has no errors
+and explicitly reports **`privateHostQualified: false`**. This establishes
+source prerequisites only, not complete dynamic-library/Python dependency
+closure, account state, private-host qualification or action authority.
+Private audit/preflight scripts, receipts, logs, paths and raw data are not
+committed or uploaded.
+
+### Remaining work and distinct admission boundaries
+
+The six engines, twelve canonical skills/36 projections, guarded workflows and
+source repairs are implemented. Remaining native/telemetry tasks require actual
+qualification, not an invented success or another copy of their implementation.
+The selected continuation is still a **fresh private macOS/Linux baseline**,
+separate from historical custody and consumed invocations.
+
+Establish and review its exact machine/path/toolchain/dependency/custody scope
+before preparing separately admitted current scan, pricing and cloud facts.
+Then qualify a genuinely new CHECK-only invocation before storage/semantic
+supervision, accepted15/ordered successors or live delivery/retirement.
+Sealed V6 fixes are reviewed preparation, not a positive CHECK receipt.
+Native AI-host qualification additionally requires real account/default-model/
+billing protection, scoped isolation and cancellation/quiescence evidence.
+No scan, pricing refresh, native CHECK, cloud read/effect or model pilot was
+admitted or executed in this source integration.
+
+All previous limits remain: CHECK 120 seconds, driver at most 115 seconds with
+at least 5 seconds headroom, actual read span at least 50 seconds, commands at
+most 15 seconds/concurrency 4, supervisor 900 seconds and admission runway
+strictly greater than 930,000 ms. A fresh scan still requires its reviewed
+official-DB/immutable-image scope and at least 45 minutes real DB runway.
+Log/storage bounds and quiescence-before-final-logs/custody remain mandatory;
+there is no grant replay, expiry extension, retry-until-success or resource
+recreation as a missing-evidence substitute.
+
+Mission Context/Artifact Server and Claude/Codex live pilots remain deferred;
+Liftoff distribution remains out of scope. MissionSpec stays private at `0.0.0`,
+without release version/tag/access/publication approval. Do not merge PR #1
+as a fully qualified delivery or publish merely because the source repairs pass.
+
 ## Latest handoff: MacBook source review and private audit, 2026-10-12
 
 This section supersedes the Windows pickup status below without replacing its
