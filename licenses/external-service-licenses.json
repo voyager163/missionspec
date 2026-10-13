@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "scope": "service",
+  "notices": [
+    {
+      "name": "@nodable/entities",
+      "version": "2.1.0",
+      "licenseExpression": "MIT",
+      "resolved": "https://registry.npmjs.org/@nodable/entities/-/entities-2.1.0.tgz",
+      "integrity": "sha512-nyT7T3nbMyBI/lvr6L5TyWbFJAI9FTgVRakNoBqCD+PmID8DzFrrNdLLtHMwMszOtqZa8PAOV24ZqDnQrhQINA==",
+      "origin": "upstream-commit-supplement",
+      "shippedInPackage": false,
+      "repository": "https://github.com/nodable/val-parsers",
+      "gitHead": "f1c61a65e7b967c17b13822ef71e91bd25f17ce2",
+      "sourcePath": "LICENSE",
+      "sourceUrl": "https://raw.githubusercontent.com/nodable/val-parsers/f1c61a65e7b967c17b13822ef71e91bd25f17ce2/LICENSE",
+      "sourceBlobSha1": "561468f111a66df52cc0f1934642bb9fdd22a212",
+      "sourceSha256": "750cb3fb6362804957ef52caaf9b5c824015be44d494637330d7cd8834d31d40",
+      "retainedFile": "licenses/external/nodable-entities-2.1.0/LICENSE.md",
+      "retainedSha256": "750cb3fb6362804957ef52caaf9b5c824015be44d494637330d7cd8834d31d40"
+    }
+  ]
+}

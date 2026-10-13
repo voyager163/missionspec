@@ -1,0 +1,28 @@
+schemaVersion: 1
+profile: standard
+nodes:
+  - id: proposal
+    kind: proposal
+    dependsOn: []
+    outputMode: single
+    skip: never
+    additionalSections: []
+  - id: specs
+    kind: specs
+    dependsOn: [proposal]
+    outputMode: declared-set
+    skip: never
+    additionalSections: []
+  - id: design
+    kind: design
+    dependsOn: [proposal]
+    outputMode: single
+    skip: explicit
+    additionalSections: []
+  - id: tasks
+    kind: tasks
+    dependsOn: [specs, design]
+    outputMode: task-set
+    skip: never
+    additionalSections: []
+targets: [tasks]

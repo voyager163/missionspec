@@ -1,0 +1,38 @@
+[
+  {
+    "name": "TimeGenerated",
+    "type": "datetime"
+  },
+  {
+    "name": "schemaVersion",
+    "type": "long"
+  },
+  {
+    "name": "event",
+    "type": "string"
+  },
+  {
+    "name": "operation",
+    "type": "string"
+  },
+  {
+    "name": "cliVersion",
+    "type": "string"
+  },
+  {
+    "name": "outcome",
+    "type": "string"
+  },
+  {
+    "name": "host",
+    "type": "string"
+  },
+  {
+    "name": "os",
+    "type": "string"
+  },
+  {
+    "name": "durationBucket",
+    "type": "string"
+  }
+]

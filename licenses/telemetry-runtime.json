@@ -1,0 +1,1655 @@
+{
+  "schemaVersion": 1,
+  "scope": "service",
+  "packageName": "@msn-control/missionspec-telemetry-ingest",
+  "packageVersion": "0.0.0",
+  "lockfile": "services/telemetry-ingest/package-lock.json",
+  "lockfileDataSha256": "0ce79c57429df112d2e5ee0b1e9a39377c78fea2fb235e854fec49a22986c289",
+  "selection": "Complete locked runtime dependency/optional/peer closure; not a bundle or reachability analysis of executable code.",
+  "provenanceLimit": "Tarball integrity is recorded from the lockfile; trust restoration via npm ci. This check does not independently authenticate installed source bytes.",
+  "directDependencies": {
+    "@azure/identity": "node_modules/@azure/identity",
+    "@azure/logger": "node_modules/@azure/logger",
+    "@azure/monitor-ingestion": "node_modules/@azure/monitor-ingestion",
+    "@azure/storage-queue": "node_modules/@azure/storage-queue",
+    "ajv": "node_modules/ajv"
+  },
+  "omittedOptional": [],
+  "runtimePackages": [
+    {
+      "location": "node_modules/@azure-rest/core-client",
+      "name": "@azure-rest/core-client",
+      "version": "2.9.0",
+      "resolved": "https://registry.npmjs.org/@azure-rest/core-client/-/core-client-2.9.0.tgz",
+      "integrity": "sha512-6933vNLqh06RR7rumnrq3UZIeBtRLeBHDPMrieDPIljiCaMMwt0nRw++nd3TOxiohtasNtm29rC+b/9ZVKCOqg==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "@azure/abort-controller": "node_modules/@azure/abort-controller",
+        "@azure/core-auth": "node_modules/@azure/core-auth",
+        "@azure/core-rest-pipeline": "node_modules/@azure/core-rest-pipeline",
+        "@azure/core-tracing": "node_modules/@azure/core-tracing",
+        "@typespec/ts-http-runtime": "node_modules/@typespec/ts-http-runtime",
+        "tslib": "node_modules/tslib"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744",
+          "retainedSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/@azure/abort-controller",
+      "name": "@azure/abort-controller",
+      "version": "2.2.0",
+      "resolved": "https://registry.npmjs.org/@azure/abort-controller/-/abort-controller-2.2.0.tgz",
+      "integrity": "sha512-fNAjWnA/nZ2jz31kxR/AqRaUT8ewHBw/WuBIosK0moMy1C9e5ValbDfFdIxJzVOOYaYkV/b2F1S4H/aHiqfVQg==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "tslib": "node_modules/tslib"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744",
+          "retainedSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/@azure/core-auth",
+      "name": "@azure/core-auth",
+      "version": "1.11.0",
+      "resolved": "https://registry.npmjs.org/@azure/core-auth/-/core-auth-1.11.0.tgz",
+      "integrity": "sha512-IUZydyTUkDnYdstOW9pFOOUQlBjAepK5teihDE3x6yxsPJs/hsAaaYpeGxdxrgtOiJbBKSjKW7MDk7AEhb4LRg==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "@azure/abort-controller": "node_modules/@azure/abort-controller",
+        "@azure/core-util": "node_modules/@azure/core-util",
+        "tslib": "node_modules/tslib"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744",
+          "retainedSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/@azure/core-client",
+      "name": "@azure/core-client",
+      "version": "1.11.1",
+      "resolved": "https://registry.npmjs.org/@azure/core-client/-/core-client-1.11.1.tgz",
+      "integrity": "sha512-2QygG2F76ZpMP2eMztiJvAiFMu71M9rDeU7vO/QKg5Css7MgM4frUOslFjhVjRhbGaCNPtz/S8M6y46/fFKVuQ==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "@azure/abort-controller": "node_modules/@azure/abort-controller",
+        "@azure/core-auth": "node_modules/@azure/core-auth",
+        "@azure/core-rest-pipeline": "node_modules/@azure/core-rest-pipeline",
+        "@azure/core-tracing": "node_modules/@azure/core-tracing",
+        "@azure/core-util": "node_modules/@azure/core-util",
+        "@azure/logger": "node_modules/@azure/logger",
+        "tslib": "node_modules/tslib"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744",
+          "retainedSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/@azure/core-http-compat",
+      "name": "@azure/core-http-compat",
+      "version": "2.5.0",
+      "resolved": "https://registry.npmjs.org/@azure/core-http-compat/-/core-http-compat-2.5.0.tgz",
+      "integrity": "sha512-BoSmXPx2er1Ai+wKlDvj29jIQespCNBwEmKyZVHO2kEFsWbGjAjwMCGzug3DJM5/QYIV3vej0S1zcU5bq9fa8w==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "@azure/abort-controller": "node_modules/@azure/abort-controller",
+        "@azure/core-client": "node_modules/@azure/core-client",
+        "@azure/core-rest-pipeline": "node_modules/@azure/core-rest-pipeline"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744",
+          "retainedSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/@azure/core-paging",
+      "name": "@azure/core-paging",
+      "version": "1.7.0",
+      "resolved": "https://registry.npmjs.org/@azure/core-paging/-/core-paging-1.7.0.tgz",
+      "integrity": "sha512-7GEAoIsaoBr6KELNRb8nypowCqvk8dnCHFCYg4XD4lOQGY2GqjQg5IhkRjyBFRO18CGSMq05PaNqSOE9GQro3g==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "tslib": "node_modules/tslib"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744",
+          "retainedSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/@azure/core-process",
+      "name": "@azure/core-process",
+      "version": "1.0.0",
+      "resolved": "https://registry.npmjs.org/@azure/core-process/-/core-process-1.0.0.tgz",
+      "integrity": "sha512-/shnJ+ooO8WPxDhPEeI/2oRQuubn16gZ6CvlbpWbEswZfzwI9tI/sMAHmF3x1LuQ9yZYXfLW3TjzGMLEC5blKg==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "e4154853b384fa7ec1e699f360873868890b9e030b789fcd05a0246f154f99de",
+          "retainedSha256": "e4154853b384fa7ec1e699f360873868890b9e030b789fcd05a0246f154f99de"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/@azure/core-rest-pipeline",
+      "name": "@azure/core-rest-pipeline",
+      "version": "1.25.0",
+      "resolved": "https://registry.npmjs.org/@azure/core-rest-pipeline/-/core-rest-pipeline-1.25.0.tgz",
+      "integrity": "sha512-bMs8ekJLjX8wPV+9IPBges1SLPyuDtE9g5gLDWOpxzKcoOFQnpLGkbcT1tdw3FaAmDS1gnPmMmJ6y/T5B96kIA==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": true,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "@azure/abort-controller": "node_modules/@azure/abort-controller",
+        "@azure/core-auth": "node_modules/@azure/core-auth",
+        "@azure/core-tracing": "node_modules/@azure/core-tracing",
+        "@azure/core-util": "node_modules/@azure/core-util",
+        "@azure/logger": "node_modules/@azure/logger",
+        "@typespec/ts-http-runtime": "node_modules/@typespec/ts-http-runtime",
+        "tslib": "node_modules/tslib"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744",
+          "retainedSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/@azure/core-tracing",
+      "name": "@azure/core-tracing",
+      "version": "1.4.0",
+      "resolved": "https://registry.npmjs.org/@azure/core-tracing/-/core-tracing-1.4.0.tgz",
+      "integrity": "sha512-eGwxD0AtncrxeBM4tG8R55Pc3rdX1hNW2WibJAgYpCVA6E93mvvVH+LcssoVjOBrSKWS55yEIHsk0X8ctHmfOQ==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "tslib": "node_modules/tslib"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744",
+          "retainedSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/@azure/core-util",
+      "name": "@azure/core-util",
+      "version": "1.14.0",
+      "resolved": "https://registry.npmjs.org/@azure/core-util/-/core-util-1.14.0.tgz",
+      "integrity": "sha512-9n2pWK61veAuN0V20t9lOuoV4CFMdyAZ1ygZzvBGk/pBBJRib/PjL9PLXa/aI2CcPpyHfqVsxxqLCYl6uZlfDw==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "@azure/abort-controller": "node_modules/@azure/abort-controller",
+        "@typespec/ts-http-runtime": "node_modules/@typespec/ts-http-runtime",
+        "tslib": "node_modules/tslib"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744",
+          "retainedSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/@azure/identity",
+      "name": "@azure/identity",
+      "version": "4.13.3",
+      "resolved": "https://registry.npmjs.org/@azure/identity/-/identity-4.13.3.tgz",
+      "integrity": "sha512-zGQPtqvXPgSA8yfV2CkIQ1qirqk0p9AIVpC5uEkdXQYcKl07QHvyaGYRnZOk0AsQUmxNb4wfkcwY5di8Z5xa9A==",
+      "relationship": "direct",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "@azure/abort-controller": "node_modules/@azure/abort-controller",
+        "@azure/core-auth": "node_modules/@azure/core-auth",
+        "@azure/core-client": "node_modules/@azure/core-client",
+        "@azure/core-process": "node_modules/@azure/core-process",
+        "@azure/core-rest-pipeline": "node_modules/@azure/core-rest-pipeline",
+        "@azure/core-tracing": "node_modules/@azure/core-tracing",
+        "@azure/core-util": "node_modules/@azure/core-util",
+        "@azure/logger": "node_modules/@azure/logger",
+        "@azure/msal-browser": "node_modules/@azure/msal-browser",
+        "@azure/msal-node": "node_modules/@azure/msal-node",
+        "open": "node_modules/open",
+        "tslib": "node_modules/tslib"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744",
+          "retainedSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/@azure/logger",
+      "name": "@azure/logger",
+      "version": "1.3.0",
+      "resolved": "https://registry.npmjs.org/@azure/logger/-/logger-1.3.0.tgz",
+      "integrity": "sha512-fCqPIfOcLE+CGqGPd66c8bZpwAji98tZ4JI9i/mlTNTlsIWslCfpg48s/ypyLxZTump5sypjrKn2/kY7q8oAbA==",
+      "relationship": "direct",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "@typespec/ts-http-runtime": "node_modules/@typespec/ts-http-runtime",
+        "tslib": "node_modules/tslib"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744",
+          "retainedSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/@azure/monitor-ingestion",
+      "name": "@azure/monitor-ingestion",
+      "version": "1.2.0",
+      "resolved": "https://registry.npmjs.org/@azure/monitor-ingestion/-/monitor-ingestion-1.2.0.tgz",
+      "integrity": "sha512-e03DQeZCVsUoCLxTF6AMAs3YSQTv2/X4685dp1+p84ctArCWNckVbzOgPKGcWn+A5oUit9rtEyujH1iIL5SIdQ==",
+      "relationship": "direct",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "@azure-rest/core-client": "node_modules/@azure-rest/core-client",
+        "@azure/abort-controller": "node_modules/@azure/abort-controller",
+        "@azure/core-auth": "node_modules/@azure/core-auth",
+        "@azure/core-client": "node_modules/@azure/core-client",
+        "@azure/core-rest-pipeline": "node_modules/@azure/core-rest-pipeline",
+        "@azure/core-tracing": "node_modules/@azure/core-tracing",
+        "@azure/core-util": "node_modules/@azure/core-util",
+        "@azure/logger": "node_modules/@azure/logger",
+        "pako": "node_modules/pako",
+        "tslib": "node_modules/tslib"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744",
+          "retainedSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/@azure/msal-browser",
+      "name": "@azure/msal-browser",
+      "version": "5.22.0",
+      "resolved": "https://registry.npmjs.org/@azure/msal-browser/-/msal-browser-5.22.0.tgz",
+      "integrity": "sha512-5kgu9xeEKgGc2JeidxAtU15NJTqiH/CMCRRQAJ4Rac56kB7KVg91vbNmn+z3RO1vNomPN69UvjKG9h1Pghx6dQ==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "@azure/msal-common": "node_modules/@azure/msal-common"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "c544adf8f0d43453d9fdf6c11da19605d12d89806a7870653169b8cc97f5bb53",
+          "retainedSha256": "c544adf8f0d43453d9fdf6c11da19605d12d89806a7870653169b8cc97f5bb53"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/@azure/msal-common",
+      "name": "@azure/msal-common",
+      "version": "16.14.1",
+      "resolved": "https://registry.npmjs.org/@azure/msal-common/-/msal-common-16.14.1.tgz",
+      "integrity": "sha512-Or6xhPNyi4zHW25158yxBoyxuCqNSPa5YBVqfF1J5Ks4MJWBo/USXdp05DQIPu1Zli00YZu6t0+h6KvHJealxQ==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "c544adf8f0d43453d9fdf6c11da19605d12d89806a7870653169b8cc97f5bb53",
+          "retainedSha256": "c544adf8f0d43453d9fdf6c11da19605d12d89806a7870653169b8cc97f5bb53"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/@azure/msal-node",
+      "name": "@azure/msal-node",
+      "version": "6.0.1",
+      "resolved": "https://registry.npmjs.org/@azure/msal-node/-/msal-node-6.0.1.tgz",
+      "integrity": "sha512-ixSO1Y/kCVRthRs+hSx/5qkwaunX1/RAePhlMN0wIpIQ4WEZ6AREGGnGd1AP0qspHVsAwzWQKGubpjh50JyJIQ==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "@azure/msal-common": "node_modules/@azure/msal-common",
+        "jsonwebtoken": "node_modules/jsonwebtoken"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "17474e386e0b9e1a700cc3d06b2b0882a2c376d9c6b49c7f8274409b8f8d2352",
+          "retainedSha256": "17474e386e0b9e1a700cc3d06b2b0882a2c376d9c6b49c7f8274409b8f8d2352"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/@azure/storage-common",
+      "name": "@azure/storage-common",
+      "version": "12.5.0",
+      "resolved": "https://registry.npmjs.org/@azure/storage-common/-/storage-common-12.5.0.tgz",
+      "integrity": "sha512-bttzuhQiCIwrkzjPDA+AtAR7dg19L/CC6ztcqJ5LfvWpXuys9mHp0UQ0udYnoUvv9SCT9KTR5kqFvFr0e6k0lQ==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "@azure/abort-controller": "node_modules/@azure/abort-controller",
+        "@azure/core-auth": "node_modules/@azure/core-auth",
+        "@azure/core-http-compat": "node_modules/@azure/core-http-compat",
+        "@azure/core-rest-pipeline": "node_modules/@azure/core-rest-pipeline",
+        "@azure/core-tracing": "node_modules/@azure/core-tracing",
+        "@azure/core-util": "node_modules/@azure/core-util",
+        "@azure/logger": "node_modules/@azure/logger",
+        "events": "node_modules/events",
+        "tslib": "node_modules/tslib"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "ed11982ff1ff5818970e943bf9aefc3909dbc65e5f0b3465a969c73a8bca5bb2",
+          "retainedSha256": "ed11982ff1ff5818970e943bf9aefc3909dbc65e5f0b3465a969c73a8bca5bb2"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/@azure/storage-queue",
+      "name": "@azure/storage-queue",
+      "version": "12.32.0",
+      "resolved": "https://registry.npmjs.org/@azure/storage-queue/-/storage-queue-12.32.0.tgz",
+      "integrity": "sha512-jMtVg87egqEanN4lb5mXViAYAsjZshLhqgx35f1Xr+qjVF7eh9eI0u2dMuDW/IQXrNK6H9rXUbS3xap2XeI88g==",
+      "relationship": "direct",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "@azure-rest/core-client": "node_modules/@azure-rest/core-client",
+        "@azure/abort-controller": "node_modules/@azure/abort-controller",
+        "@azure/core-auth": "node_modules/@azure/core-auth",
+        "@azure/core-client": "node_modules/@azure/core-client",
+        "@azure/core-http-compat": "node_modules/@azure/core-http-compat",
+        "@azure/core-paging": "node_modules/@azure/core-paging",
+        "@azure/core-rest-pipeline": "node_modules/@azure/core-rest-pipeline",
+        "@azure/core-tracing": "node_modules/@azure/core-tracing",
+        "@azure/core-util": "node_modules/@azure/core-util",
+        "@azure/logger": "node_modules/@azure/logger",
+        "@azure/storage-common": "node_modules/@azure/storage-common",
+        "fast-xml-parser": "node_modules/fast-xml-parser",
+        "tslib": "node_modules/tslib"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744",
+          "retainedSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/@nodable/entities",
+      "name": "@nodable/entities",
+      "version": "2.1.0",
+      "resolved": "https://registry.npmjs.org/@nodable/entities/-/entities-2.1.0.tgz",
+      "integrity": "sha512-nyT7T3nbMyBI/lvr6L5TyWbFJAI9FTgVRakNoBqCD+PmID8DzFrrNdLLtHMwMszOtqZa8PAOV24ZqDnQrhQINA==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "licenses/external/nodable-entities-2.1.0/LICENSE.md",
+          "sourceSha256": "750cb3fb6362804957ef52caaf9b5c824015be44d494637330d7cd8834d31d40",
+          "retainedSha256": "750cb3fb6362804957ef52caaf9b5c824015be44d494637330d7cd8834d31d40",
+          "provenance": {
+            "name": "@nodable/entities",
+            "version": "2.1.0",
+            "licenseExpression": "MIT",
+            "resolved": "https://registry.npmjs.org/@nodable/entities/-/entities-2.1.0.tgz",
+            "integrity": "sha512-nyT7T3nbMyBI/lvr6L5TyWbFJAI9FTgVRakNoBqCD+PmID8DzFrrNdLLtHMwMszOtqZa8PAOV24ZqDnQrhQINA==",
+            "origin": "upstream-commit-supplement",
+            "shippedInPackage": false,
+            "repository": "https://github.com/nodable/val-parsers",
+            "gitHead": "f1c61a65e7b967c17b13822ef71e91bd25f17ce2",
+            "sourcePath": "LICENSE",
+            "sourceUrl": "https://raw.githubusercontent.com/nodable/val-parsers/f1c61a65e7b967c17b13822ef71e91bd25f17ce2/LICENSE",
+            "sourceBlobSha1": "561468f111a66df52cc0f1934642bb9fdd22a212",
+            "sourceSha256": "750cb3fb6362804957ef52caaf9b5c824015be44d494637330d7cd8834d31d40",
+            "retainedFile": "licenses/external/nodable-entities-2.1.0/LICENSE.md",
+            "retainedSha256": "750cb3fb6362804957ef52caaf9b5c824015be44d494637330d7cd8834d31d40",
+            "scope": "service",
+            "pathBase": "repository"
+          }
+        }
+      ]
+    },
+    {
+      "location": "node_modules/@typespec/ts-http-runtime",
+      "name": "@typespec/ts-http-runtime",
+      "version": "0.3.9",
+      "resolved": "https://registry.npmjs.org/@typespec/ts-http-runtime/-/ts-http-runtime-0.3.9.tgz",
+      "integrity": "sha512-edSdeAqkdxBVzA1yL1LrLCml1YjyCVvPMtMqJpbF+6K609tHe8V6sQUzFQSGcYNhcuhOceZtjvN32+mpIth30A==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "http-proxy-agent": "node_modules/http-proxy-agent",
+        "https-proxy-agent": "node_modules/https-proxy-agent",
+        "tslib": "node_modules/tslib"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744",
+          "retainedSha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/agent-base",
+      "name": "agent-base",
+      "version": "7.1.4",
+      "resolved": "https://registry.npmjs.org/agent-base/-/agent-base-7.1.4.tgz",
+      "integrity": "sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "8d8c55319c7729d57be811c747452636688d54f19701ee0752b6b15ad3771d9a",
+          "retainedSha256": "8d8c55319c7729d57be811c747452636688d54f19701ee0752b6b15ad3771d9a"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/ajv",
+      "name": "ajv",
+      "version": "8.20.0",
+      "resolved": "https://registry.npmjs.org/ajv/-/ajv-8.20.0.tgz",
+      "integrity": "sha512-Thbli+OlOj+iMPYFBVBfJ3OmCAnaSyNn4M1vz9T6Gka5Jt9ba/HIR56joy65tY6kx/FCF5VXNB819Y7/GUrBGA==",
+      "relationship": "direct",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "fast-deep-equal": "node_modules/fast-deep-equal",
+        "fast-uri": "node_modules/fast-uri",
+        "json-schema-traverse": "node_modules/json-schema-traverse",
+        "require-from-string": "node_modules/require-from-string"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "a05350a88e318e4f5f2c2a1ff1e2e88daa4dd38e6e78b71cccae422bdc762cc3",
+          "retainedSha256": "a05350a88e318e4f5f2c2a1ff1e2e88daa4dd38e6e78b71cccae422bdc762cc3"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/anynum",
+      "name": "anynum",
+      "version": "1.0.1",
+      "resolved": "https://registry.npmjs.org/anynum/-/anynum-1.0.1.tgz",
+      "integrity": "sha512-N6//FLET/tXYNM/F6ABca1oH6fWB+KlTt909Le28WMDBk8oaT4vY17DCrwg2MvmuqUKt3Ni4N5dGJ/EoBgcO6A==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "8e75fc0e776c62ccadb8178ece8d3daa9ba7601fb0a49b2dfb0ea9a7a5c0aa07",
+          "retainedSha256": "8e75fc0e776c62ccadb8178ece8d3daa9ba7601fb0a49b2dfb0ea9a7a5c0aa07"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/buffer-equal-constant-time",
+      "name": "buffer-equal-constant-time",
+      "version": "1.0.1",
+      "resolved": "https://registry.npmjs.org/buffer-equal-constant-time/-/buffer-equal-constant-time-1.0.1.tgz",
+      "integrity": "sha512-zRpUiDwd/xk6ADqPMATG8vc9VPrkck7T07OIx0gnjmJAnHnTVXNQG3vfvWNuiZIkwu9KrKdA1iJKfsfTVxE6NA==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "BSD-3-Clause",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE.txt",
+          "sourceSha256": "751d0e80fb5c828f8c3de198cc760e1e05377e47c8263ab6ee2f10cdc19ba658",
+          "retainedSha256": "751d0e80fb5c828f8c3de198cc760e1e05377e47c8263ab6ee2f10cdc19ba658"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/bundle-name",
+      "name": "bundle-name",
+      "version": "4.1.0",
+      "resolved": "https://registry.npmjs.org/bundle-name/-/bundle-name-4.1.0.tgz",
+      "integrity": "sha512-tjwM5exMg6BGRI+kNmTntNsvdZS1X8BFYS6tnJ2hdH0kVxM6/eVZ2xy+FqStSWvYmtfFMDLIxurorHwDKfDz5Q==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "run-applescript": "node_modules/run-applescript"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "license",
+          "sourceSha256": "5c932d88256b4ab958f64a856fa48e8bd1f55bc1d96b8149c65689e0c61789d3",
+          "retainedSha256": "5c932d88256b4ab958f64a856fa48e8bd1f55bc1d96b8149c65689e0c61789d3"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/debug",
+      "name": "debug",
+      "version": "4.4.3",
+      "resolved": "https://registry.npmjs.org/debug/-/debug-4.4.3.tgz",
+      "integrity": "sha512-RGwwWnwQvkVfavKVt22FGLw+xYSdzARwm0ru6DhTVA3umU5hZc28V3kO4stgYryrTlLpuvgI9GiijltAjNbcqA==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "ms": "node_modules/ms"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "3a61c6c96caf5c1d9b623fb9b04c822b783dfcb78aa7e49c76a3f643e6ed7f95",
+          "retainedSha256": "3a61c6c96caf5c1d9b623fb9b04c822b783dfcb78aa7e49c76a3f643e6ed7f95"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/default-browser",
+      "name": "default-browser",
+      "version": "5.5.1",
+      "resolved": "https://registry.npmjs.org/default-browser/-/default-browser-5.5.1.tgz",
+      "integrity": "sha512-m1pAzaJgZ/gssEqlOhJkPJp8Xly7QyW6xcrkUa2KKcDeDSEMP7X8xipU3snUcfisTQx0w1AGae+9UtJSfVnXGw==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "bundle-name": "node_modules/bundle-name",
+        "default-browser-id": "node_modules/default-browser-id"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "license",
+          "sourceSha256": "5c932d88256b4ab958f64a856fa48e8bd1f55bc1d96b8149c65689e0c61789d3",
+          "retainedSha256": "5c932d88256b4ab958f64a856fa48e8bd1f55bc1d96b8149c65689e0c61789d3"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/default-browser-id",
+      "name": "default-browser-id",
+      "version": "5.0.1",
+      "resolved": "https://registry.npmjs.org/default-browser-id/-/default-browser-id-5.0.1.tgz",
+      "integrity": "sha512-x1VCxdX4t+8wVfd1so/9w+vQ4vx7lKd2Qp5tDRutErwmR85OgmfX7RlLRMWafRMY7hbEiXIbudNrjOAPa/hL8Q==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "license",
+          "sourceSha256": "5c932d88256b4ab958f64a856fa48e8bd1f55bc1d96b8149c65689e0c61789d3",
+          "retainedSha256": "5c932d88256b4ab958f64a856fa48e8bd1f55bc1d96b8149c65689e0c61789d3"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/define-lazy-prop",
+      "name": "define-lazy-prop",
+      "version": "3.0.0",
+      "resolved": "https://registry.npmjs.org/define-lazy-prop/-/define-lazy-prop-3.0.0.tgz",
+      "integrity": "sha512-N+MeXYoqr3pOgn8xfyRPREN7gHakLYjhsHhWGT3fWAiL4IkAt0iDw14QiiEm2bE30c5XX5q0FtAA3CK5f9/BUg==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "license",
+          "sourceSha256": "5c932d88256b4ab958f64a856fa48e8bd1f55bc1d96b8149c65689e0c61789d3",
+          "retainedSha256": "5c932d88256b4ab958f64a856fa48e8bd1f55bc1d96b8149c65689e0c61789d3"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/ecdsa-sig-formatter",
+      "name": "ecdsa-sig-formatter",
+      "version": "1.0.11",
+      "resolved": "https://registry.npmjs.org/ecdsa-sig-formatter/-/ecdsa-sig-formatter-1.0.11.tgz",
+      "integrity": "sha512-nagl3RYrbNv6kQkeJIpt6NJZy8twLB/2vtz6yN9Z4vRKHN4/QZJIEbqohALSgwKdnksuY3k5Addp5lg8sVoVcQ==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "Apache-2.0",
+      "optional": false,
+      "dependencies": {
+        "safe-buffer": "node_modules/safe-buffer"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "50a6b24f8defc31a078aa9799a91d776f83948071574854f12473362aee74d0d",
+          "retainedSha256": "50a6b24f8defc31a078aa9799a91d776f83948071574854f12473362aee74d0d"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/events",
+      "name": "events",
+      "version": "3.3.0",
+      "resolved": "https://registry.npmjs.org/events/-/events-3.3.0.tgz",
+      "integrity": "sha512-mQw+2fkQbALzQ7V0MY0IqdnXNOeTtP4r0lN9z7AAawCXgqea7bDii20AYrIBrFd/Hx0M2Ocz6S111CaFkUcb0Q==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "631987b7616a325a5b97566c232418481ddf7dbb5ecadefb991e791876cc2599",
+          "retainedSha256": "631987b7616a325a5b97566c232418481ddf7dbb5ecadefb991e791876cc2599"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/fast-deep-equal",
+      "name": "fast-deep-equal",
+      "version": "3.1.3",
+      "resolved": "https://registry.npmjs.org/fast-deep-equal/-/fast-deep-equal-3.1.3.tgz",
+      "integrity": "sha512-f3qQ9oQy9j2AhBe/H9VC91wLmKBCCU/gDOnKNAYG5hswO7BLKj09Hc5HYNz9cGI++xlpDCIgDaitVs03ATR84Q==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "7bf9b2de73a6b356761c948d0e9eeb4be6c1270bd04c79cd489c1e400ffdfc1a",
+          "retainedSha256": "7bf9b2de73a6b356761c948d0e9eeb4be6c1270bd04c79cd489c1e400ffdfc1a"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/fast-uri",
+      "name": "fast-uri",
+      "version": "3.1.8",
+      "resolved": "https://registry.npmjs.org/fast-uri/-/fast-uri-3.1.8.tgz",
+      "integrity": "sha512-GZMtZUTNRpOVIECoXwLNZS5xUGE+mVNbTB8h/7Rwh2TFWcBQiPzTgyZi05BF9UMZKkLJv8XBRJTlU7zg8+ZfMg==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "BSD-3-Clause",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "b010b0dfdfdb23d7396e03b82cd4621fc9bb8f95d6b0aea70b9c24e12074c786",
+          "retainedSha256": "b010b0dfdfdb23d7396e03b82cd4621fc9bb8f95d6b0aea70b9c24e12074c786"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/fast-xml-builder",
+      "name": "fast-xml-builder",
+      "version": "1.3.1",
+      "resolved": "https://registry.npmjs.org/fast-xml-builder/-/fast-xml-builder-1.3.1.tgz",
+      "integrity": "sha512-pIM/1n3ntFXKYrUZwW7QCK0gAW7XY+wzj1YMIV3tLDvPj/V+zTGJK5e3/4WJfwj0qWw2ElNXiTixda/R+3YSug==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "path-expression-matcher": "node_modules/path-expression-matcher",
+        "xml-naming": "node_modules/xml-naming"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "8e75fc0e776c62ccadb8178ece8d3daa9ba7601fb0a49b2dfb0ea9a7a5c0aa07",
+          "retainedSha256": "8e75fc0e776c62ccadb8178ece8d3daa9ba7601fb0a49b2dfb0ea9a7a5c0aa07"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/fast-xml-parser",
+      "name": "fast-xml-parser",
+      "version": "5.7.0",
+      "resolved": "https://registry.npmjs.org/fast-xml-parser/-/fast-xml-parser-5.7.0.tgz",
+      "integrity": "sha512-MTcrUoRQ1GSQ9iG3QJzBGquYYYeA7piZaJoIWbPFGbRn6Jj6z7xgoAyi4DrZX4y2ZIQQBF59gc/zmvvejjgoFQ==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "@nodable/entities": "node_modules/@nodable/entities",
+        "fast-xml-builder": "node_modules/fast-xml-builder",
+        "path-expression-matcher": "node_modules/path-expression-matcher",
+        "strnum": "node_modules/strnum"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "7883225d5e84a6bbb9b170c3d891b4bf6d6259cee869c86bd86381a927071745",
+          "retainedSha256": "7883225d5e84a6bbb9b170c3d891b4bf6d6259cee869c86bd86381a927071745"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/http-proxy-agent",
+      "name": "http-proxy-agent",
+      "version": "7.0.2",
+      "resolved": "https://registry.npmjs.org/http-proxy-agent/-/http-proxy-agent-7.0.2.tgz",
+      "integrity": "sha512-T1gkAiYYDWYx3V5Bmyu7HcfcvL7mUrTWiM6yOfa3PIphViJ/gFPbvidQ+veqSOHci/PxBcDabeUNCzpOODJZig==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "agent-base": "node_modules/agent-base",
+        "debug": "node_modules/debug"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "71368fd0f5b4129191e9afcd1e1ef2dc89a9090d3e4d80bbab92dafd032b3bef",
+          "retainedSha256": "71368fd0f5b4129191e9afcd1e1ef2dc89a9090d3e4d80bbab92dafd032b3bef"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/https-proxy-agent",
+      "name": "https-proxy-agent",
+      "version": "7.0.6",
+      "resolved": "https://registry.npmjs.org/https-proxy-agent/-/https-proxy-agent-7.0.6.tgz",
+      "integrity": "sha512-vK9P5/iUfdl95AI+JVyUuIcVtd4ofvtrOr3HNtM2yxC9bnMbEdp3x01OhQNnjb8IJYi38VlTE3mBXwcfvywuSw==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "agent-base": "node_modules/agent-base",
+        "debug": "node_modules/debug"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "8d8c55319c7729d57be811c747452636688d54f19701ee0752b6b15ad3771d9a",
+          "retainedSha256": "8d8c55319c7729d57be811c747452636688d54f19701ee0752b6b15ad3771d9a"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/is-docker",
+      "name": "is-docker",
+      "version": "3.0.0",
+      "resolved": "https://registry.npmjs.org/is-docker/-/is-docker-3.0.0.tgz",
+      "integrity": "sha512-eljcgEDlEns/7AXFosB5K/2nCM4P7FQPkGc/DWLy5rmFEWvZayGrik1d9/QIY5nJ4f9YsVvBkA6kJpHn9rISdQ==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "license",
+          "sourceSha256": "5c932d88256b4ab958f64a856fa48e8bd1f55bc1d96b8149c65689e0c61789d3",
+          "retainedSha256": "5c932d88256b4ab958f64a856fa48e8bd1f55bc1d96b8149c65689e0c61789d3"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/is-inside-container",
+      "name": "is-inside-container",
+      "version": "1.0.0",
+      "resolved": "https://registry.npmjs.org/is-inside-container/-/is-inside-container-1.0.0.tgz",
+      "integrity": "sha512-KIYLCCJghfHZxqjYBE7rEy0OBuTd5xCHS7tHVgvCLkx7StIoaxwNW3hCALgEUjFfeRk+MG/Qxmp/vtETEF3tRA==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "is-docker": "node_modules/is-docker"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "license",
+          "sourceSha256": "5c932d88256b4ab958f64a856fa48e8bd1f55bc1d96b8149c65689e0c61789d3",
+          "retainedSha256": "5c932d88256b4ab958f64a856fa48e8bd1f55bc1d96b8149c65689e0c61789d3"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/is-wsl",
+      "name": "is-wsl",
+      "version": "3.1.1",
+      "resolved": "https://registry.npmjs.org/is-wsl/-/is-wsl-3.1.1.tgz",
+      "integrity": "sha512-e6rvdUCiQCAuumZslxRJWR/Doq4VpPR82kqclvcS0efgt430SlGIk05vdCN58+VrzgtIcfNODjozVielycD4Sw==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "is-inside-container": "node_modules/is-inside-container"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "license",
+          "sourceSha256": "5c932d88256b4ab958f64a856fa48e8bd1f55bc1d96b8149c65689e0c61789d3",
+          "retainedSha256": "5c932d88256b4ab958f64a856fa48e8bd1f55bc1d96b8149c65689e0c61789d3"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/json-schema-traverse",
+      "name": "json-schema-traverse",
+      "version": "1.0.0",
+      "resolved": "https://registry.npmjs.org/json-schema-traverse/-/json-schema-traverse-1.0.0.tgz",
+      "integrity": "sha512-NM8/P9n3XjXhIZn1lLhkFaACTOURQXjWhV4BA/RnOv8xvgqtqpAX9IO4mRQxSx1Rlo4tqzeqb0sOlruaOy3dug==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "7bf9b2de73a6b356761c948d0e9eeb4be6c1270bd04c79cd489c1e400ffdfc1a",
+          "retainedSha256": "7bf9b2de73a6b356761c948d0e9eeb4be6c1270bd04c79cd489c1e400ffdfc1a"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/jsonwebtoken",
+      "name": "jsonwebtoken",
+      "version": "9.0.3",
+      "resolved": "https://registry.npmjs.org/jsonwebtoken/-/jsonwebtoken-9.0.3.tgz",
+      "integrity": "sha512-MT/xP0CrubFRNLNKvxJ2BYfy53Zkm++5bX9dtuPbqAeQpTVe0MQTFhao8+Cp//EmJp244xt6Drw/GVEGCUj40g==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "jws": "node_modules/jws",
+        "lodash.includes": "node_modules/lodash.includes",
+        "lodash.isboolean": "node_modules/lodash.isboolean",
+        "lodash.isinteger": "node_modules/lodash.isinteger",
+        "lodash.isnumber": "node_modules/lodash.isnumber",
+        "lodash.isplainobject": "node_modules/lodash.isplainobject",
+        "lodash.isstring": "node_modules/lodash.isstring",
+        "lodash.once": "node_modules/lodash.once",
+        "ms": "node_modules/ms",
+        "semver": "node_modules/semver"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "2144eb6894cb440fde6b2b3aaae3b617c8f1dc9bb19813079dcf62ec6c517042",
+          "retainedSha256": "2144eb6894cb440fde6b2b3aaae3b617c8f1dc9bb19813079dcf62ec6c517042"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/jwa",
+      "name": "jwa",
+      "version": "2.0.1",
+      "resolved": "https://registry.npmjs.org/jwa/-/jwa-2.0.1.tgz",
+      "integrity": "sha512-hRF04fqJIP8Abbkq5NKGN0Bbr3JxlQ+qhZufXVr0DvujKy93ZCbXZMHDL4EOtodSbCWxOqR8MS1tXA5hwqCXDg==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "buffer-equal-constant-time": "node_modules/buffer-equal-constant-time",
+        "ecdsa-sig-formatter": "node_modules/ecdsa-sig-formatter",
+        "safe-buffer": "node_modules/safe-buffer"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "3320319f8a5f42bc4254e65471eca7a5ea4dc8c883c4c24b4868e36b14890bcf",
+          "retainedSha256": "3320319f8a5f42bc4254e65471eca7a5ea4dc8c883c4c24b4868e36b14890bcf"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/jws",
+      "name": "jws",
+      "version": "4.0.1",
+      "resolved": "https://registry.npmjs.org/jws/-/jws-4.0.1.tgz",
+      "integrity": "sha512-EKI/M/yqPncGUUh44xz0PxSidXFr/+r0pA70+gIYhjv+et7yxM+s29Y+VGDkovRofQem0fs7Uvf4+YmAdyRduA==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "jwa": "node_modules/jwa",
+        "safe-buffer": "node_modules/safe-buffer"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "3320319f8a5f42bc4254e65471eca7a5ea4dc8c883c4c24b4868e36b14890bcf",
+          "retainedSha256": "3320319f8a5f42bc4254e65471eca7a5ea4dc8c883c4c24b4868e36b14890bcf"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/lodash.includes",
+      "name": "lodash.includes",
+      "version": "4.3.0",
+      "resolved": "https://registry.npmjs.org/lodash.includes/-/lodash.includes-4.3.0.tgz",
+      "integrity": "sha512-W3Bx6mdkRTGtlJISOvVD/lbqjTlPPUDTMnlXZFnVwi9NKJ6tiAk6LVdlhZMm17VZisqhKcgzpO5Wz91PCt5b0w==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "ffd8b33b354585f4ce119f19c53728281e48a97b074491eb6bf6d5c5ff305272",
+          "retainedSha256": "ffd8b33b354585f4ce119f19c53728281e48a97b074491eb6bf6d5c5ff305272"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/lodash.isboolean",
+      "name": "lodash.isboolean",
+      "version": "3.0.3",
+      "resolved": "https://registry.npmjs.org/lodash.isboolean/-/lodash.isboolean-3.0.3.tgz",
+      "integrity": "sha512-Bz5mupy2SVbPHURB98VAcw+aHh4vRV5IPNhILUCsOzRmsTmSQ17jIuqopAentWoehktxGd9e/hbIXq980/1QJg==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "25a399d4a42f419445101092a1fc3f9b4bfe06d614f84128222d79e3a2105fe7",
+          "retainedSha256": "25a399d4a42f419445101092a1fc3f9b4bfe06d614f84128222d79e3a2105fe7"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/lodash.isinteger",
+      "name": "lodash.isinteger",
+      "version": "4.0.4",
+      "resolved": "https://registry.npmjs.org/lodash.isinteger/-/lodash.isinteger-4.0.4.tgz",
+      "integrity": "sha512-DBwtEWN2caHQ9/imiNeEA5ys1JoRtRfY3d7V9wkqtbycnAmTvRRmbHKDV4a0EYc678/dia0jrte4tjYwVBaZUA==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "ffd8b33b354585f4ce119f19c53728281e48a97b074491eb6bf6d5c5ff305272",
+          "retainedSha256": "ffd8b33b354585f4ce119f19c53728281e48a97b074491eb6bf6d5c5ff305272"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/lodash.isnumber",
+      "name": "lodash.isnumber",
+      "version": "3.0.3",
+      "resolved": "https://registry.npmjs.org/lodash.isnumber/-/lodash.isnumber-3.0.3.tgz",
+      "integrity": "sha512-QYqzpfwO3/CWf3XP+Z+tkQsfaLL/EnUlXWVkIk5FUPc4sBdTehEqZONuyRt2P67PXAk+NXmTBcc97zw9t1FQrw==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "25a399d4a42f419445101092a1fc3f9b4bfe06d614f84128222d79e3a2105fe7",
+          "retainedSha256": "25a399d4a42f419445101092a1fc3f9b4bfe06d614f84128222d79e3a2105fe7"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/lodash.isplainobject",
+      "name": "lodash.isplainobject",
+      "version": "4.0.6",
+      "resolved": "https://registry.npmjs.org/lodash.isplainobject/-/lodash.isplainobject-4.0.6.tgz",
+      "integrity": "sha512-oSXzaWypCMHkPC3NvBEaPHf0KsA5mvPrOPgQWDsbg8n7orZ290M0BmC/jgRZ4vcJ6DTAhjrsSYgdsW/F+MFOBA==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "ffd8b33b354585f4ce119f19c53728281e48a97b074491eb6bf6d5c5ff305272",
+          "retainedSha256": "ffd8b33b354585f4ce119f19c53728281e48a97b074491eb6bf6d5c5ff305272"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/lodash.isstring",
+      "name": "lodash.isstring",
+      "version": "4.0.1",
+      "resolved": "https://registry.npmjs.org/lodash.isstring/-/lodash.isstring-4.0.1.tgz",
+      "integrity": "sha512-0wJxfxH1wgO3GrbuP+dTTk7op+6L41QCXbGINEmD+ny/G/eCqGzxyCsh7159S+mgDDcoarnBw6PC1PS5+wUGgw==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "25a399d4a42f419445101092a1fc3f9b4bfe06d614f84128222d79e3a2105fe7",
+          "retainedSha256": "25a399d4a42f419445101092a1fc3f9b4bfe06d614f84128222d79e3a2105fe7"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/lodash.once",
+      "name": "lodash.once",
+      "version": "4.1.1",
+      "resolved": "https://registry.npmjs.org/lodash.once/-/lodash.once-4.1.1.tgz",
+      "integrity": "sha512-Sb487aTOCr9drQVL8pIxOzVhafOjZN9UU54hiN8PU3uAiSV7lx1yYNpbNmex2PK6dSJoNTSJUUswT651yww3Mg==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "ffd8b33b354585f4ce119f19c53728281e48a97b074491eb6bf6d5c5ff305272",
+          "retainedSha256": "ffd8b33b354585f4ce119f19c53728281e48a97b074491eb6bf6d5c5ff305272"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/ms",
+      "name": "ms",
+      "version": "2.1.3",
+      "resolved": "https://registry.npmjs.org/ms/-/ms-2.1.3.tgz",
+      "integrity": "sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "license.md",
+          "sourceSha256": "1662fae9b5314d11cf51284e2dcd1f006a354f7343f08712a730fcff9a359801",
+          "retainedSha256": "1662fae9b5314d11cf51284e2dcd1f006a354f7343f08712a730fcff9a359801"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/open",
+      "name": "open",
+      "version": "10.2.0",
+      "resolved": "https://registry.npmjs.org/open/-/open-10.2.0.tgz",
+      "integrity": "sha512-YgBpdJHPyQ2UE5x+hlSXcnejzAvD0b22U2OuAP+8OnlJT+PjWPxtgmGqKKc+RgTM63U9gN0YzrYc71R2WT/hTA==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "default-browser": "node_modules/default-browser",
+        "define-lazy-prop": "node_modules/define-lazy-prop",
+        "is-inside-container": "node_modules/is-inside-container",
+        "wsl-utils": "node_modules/wsl-utils"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "license",
+          "sourceSha256": "5c932d88256b4ab958f64a856fa48e8bd1f55bc1d96b8149c65689e0c61789d3",
+          "retainedSha256": "5c932d88256b4ab958f64a856fa48e8bd1f55bc1d96b8149c65689e0c61789d3"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/pako",
+      "name": "pako",
+      "version": "2.2.0",
+      "resolved": "https://registry.npmjs.org/pako/-/pako-2.2.0.tgz",
+      "integrity": "sha512-zJq6RP/5q+TO2OpFV3FHzlPnFjmkb7Nc99a5SNjJE+uu/PkpChs+NIZSSzbBoD+6kjiISXjfYdwj1ZRQ81dz/w==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "(MIT AND Zlib)",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "a04665b3b2de56c66730c1f720f528175739e4104f79073614aa611da1e85539",
+          "retainedSha256": "a04665b3b2de56c66730c1f720f528175739e4104f79073614aa611da1e85539"
+        },
+        {
+          "path": "lib/zlib/README",
+          "sourceSha256": "20356aece8f36fda34645e97af3b163da0a88e253b78ffba298590d5b9121ebb",
+          "retainedSha256": "20356aece8f36fda34645e97af3b163da0a88e253b78ffba298590d5b9121ebb"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/path-expression-matcher",
+      "name": "path-expression-matcher",
+      "version": "1.6.2",
+      "resolved": "https://registry.npmjs.org/path-expression-matcher/-/path-expression-matcher-1.6.2.tgz",
+      "integrity": "sha512-enSlaiat05iasnzmgNxRj8reFdj3puY2QpNgP1aPIaVfT6nn9ICuPoFlKHk8EN22HcwewshO+mN2DGbkCEOtqQ==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "75486ea0af9309140ca6e2c401d7e67bea8f4892344e5707f6394dc5e83dfc44",
+          "retainedSha256": "75486ea0af9309140ca6e2c401d7e67bea8f4892344e5707f6394dc5e83dfc44"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/require-from-string",
+      "name": "require-from-string",
+      "version": "2.0.2",
+      "resolved": "https://registry.npmjs.org/require-from-string/-/require-from-string-2.0.2.tgz",
+      "integrity": "sha512-Xf0nWe6RseziFMu+Ap9biiUbmplq6S9/p+7w7YXP/JBHhrUDDUhwa+vANyubuqfZWTveU//DYVGsDG7RKL/vEw==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "license",
+          "sourceSha256": "6ee0feb1f6ef996ff5a68600f8cf98909cf412d39ef3cdceaefd87d636fa1b7f",
+          "retainedSha256": "6ee0feb1f6ef996ff5a68600f8cf98909cf412d39ef3cdceaefd87d636fa1b7f"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/run-applescript",
+      "name": "run-applescript",
+      "version": "7.1.0",
+      "resolved": "https://registry.npmjs.org/run-applescript/-/run-applescript-7.1.0.tgz",
+      "integrity": "sha512-DPe5pVFaAsinSaV6QjQ6gdiedWDcRCbUuiQfQa2wmWV7+xC9bGulGI8+TdRmoFkAPaBXk8CrAbnlY2ISniJ47Q==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "license",
+          "sourceSha256": "5c932d88256b4ab958f64a856fa48e8bd1f55bc1d96b8149c65689e0c61789d3",
+          "retainedSha256": "5c932d88256b4ab958f64a856fa48e8bd1f55bc1d96b8149c65689e0c61789d3"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/safe-buffer",
+      "name": "safe-buffer",
+      "version": "5.2.1",
+      "resolved": "https://registry.npmjs.org/safe-buffer/-/safe-buffer-5.2.1.tgz",
+      "integrity": "sha512-rp3So07KcdmmKbGvgaNxQSJr7bGVSVk5S9Eq1F+ppbRo70+YeaDxkw5Dd8NPN+GD6bjnYm2VuPuCXmpuYvmCXQ==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "c7cc929b57080f4b9d0c6cf57669f0463fc5b39906344dfc8d3bc43426b30eac",
+          "retainedSha256": "c7cc929b57080f4b9d0c6cf57669f0463fc5b39906344dfc8d3bc43426b30eac"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/semver",
+      "name": "semver",
+      "version": "7.8.5",
+      "resolved": "https://registry.npmjs.org/semver/-/semver-7.8.5.tgz",
+      "integrity": "sha512-Y7/KDsb8LjooZpwaqGyulO6DQlksgCncchHGk+sZIY4SBvUocMBEFH5Ur1fI4dV+Jvl0w6cjvucaIi40puRioA==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "ISC",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "4ec3d4c66cd87f5c8d8ad911b10f99bf27cb00cdfcff82621956e379186b016b",
+          "retainedSha256": "4ec3d4c66cd87f5c8d8ad911b10f99bf27cb00cdfcff82621956e379186b016b"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/strnum",
+      "name": "strnum",
+      "version": "2.4.2",
+      "resolved": "https://registry.npmjs.org/strnum/-/strnum-2.4.2.tgz",
+      "integrity": "sha512-rDG3Ah4TV0k1hWvLSzkZtMmLN9+eS+h3knq4MP6A42Y3Yh5qGNnOUs1jJkoSr8FG5dsL28c7KgkIBzSEykqtuw==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "anynum": "node_modules/anynum"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "2aa16be0f4fad003a352a955a43314e9d1d8deef7034060a82ac9c49f32b81e2",
+          "retainedSha256": "2aa16be0f4fad003a352a955a43314e9d1d8deef7034060a82ac9c49f32b81e2"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/tslib",
+      "name": "tslib",
+      "version": "2.8.1",
+      "resolved": "https://registry.npmjs.org/tslib/-/tslib-2.8.1.tgz",
+      "integrity": "sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "0BSD",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "CopyrightNotice.txt",
+          "sourceSha256": "da16ddb65f8ca390998fb99223d0112498b56b45784d00afd77ff8ce1ac4de8b",
+          "retainedSha256": "72ba857a2d06a6d440c28e690835119f6d70fe16f58b7538e3e3c1c133d944d7"
+        },
+        {
+          "path": "LICENSE.txt",
+          "sourceSha256": "210b19e543130388c68654b7497e967119ce17145f66ab7d85688fbd70f08751",
+          "retainedSha256": "0e8d2550baea17eb3072c4f919b36fbf9852bb49dba948549872e713863c0834"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/wsl-utils",
+      "name": "wsl-utils",
+      "version": "0.1.0",
+      "resolved": "https://registry.npmjs.org/wsl-utils/-/wsl-utils-0.1.0.tgz",
+      "integrity": "sha512-h3Fbisa2nKGPxCpm89Hk33lBLsnaGBvctQopaBSOW/uIs6FTe1ATyAnKFJrzVs9vpGdsTe73WF3V4lIsk4Gacw==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {
+        "is-wsl": "node_modules/is-wsl"
+      },
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "license",
+          "sourceSha256": "5c932d88256b4ab958f64a856fa48e8bd1f55bc1d96b8149c65689e0c61789d3",
+          "retainedSha256": "5c932d88256b4ab958f64a856fa48e8bd1f55bc1d96b8149c65689e0c61789d3"
+        }
+      ]
+    },
+    {
+      "location": "node_modules/xml-naming",
+      "name": "xml-naming",
+      "version": "0.3.0",
+      "resolved": "https://registry.npmjs.org/xml-naming/-/xml-naming-0.3.0.tgz",
+      "integrity": "sha512-ghig2TBE/H11aOVgmahA3MhimvkBr6JIYknH/Dhdk10nXwdbIqBJsbfMxpvFPG8bAw77gN29aQWvKpmVoPlvPQ==",
+      "relationship": "transitive",
+      "alsoDirectDevelopmentDependency": false,
+      "licenseExpression": "MIT",
+      "optional": false,
+      "dependencies": {},
+      "omittedOptional": [],
+      "legalFiles": [
+        {
+          "path": "LICENSE",
+          "sourceSha256": "8e75fc0e776c62ccadb8178ece8d3daa9ba7601fb0a49b2dfb0ea9a7a5c0aa07",
+          "retainedSha256": "8e75fc0e776c62ccadb8178ece8d3daa9ba7601fb0a49b2dfb0ea9a7a5c0aa07"
+        }
+      ]
+    }
+  ],
+  "developmentOnly": [
+    {
+      "location": "node_modules/@types/node",
+      "name": "@types/node",
+      "version": "24.13.6",
+      "declaredLicense": "MIT",
+      "optional": false,
+      "audit": "excluded-development-only; license text not reviewed"
+    },
+    {
+      "location": "node_modules/@typescript/typescript-aix-ppc64",
+      "name": "@typescript/typescript-aix-ppc64",
+      "version": "7.0.2",
+      "declaredLicense": "Apache-2.0",
+      "optional": true,
+      "audit": "excluded-development-only; license text not reviewed"
+    },
+    {
+      "location": "node_modules/@typescript/typescript-darwin-arm64",
+      "name": "@typescript/typescript-darwin-arm64",
+      "version": "7.0.2",
+      "declaredLicense": "Apache-2.0",
+      "optional": true,
+      "audit": "excluded-development-only; license text not reviewed"
+    },
+    {
+      "location": "node_modules/@typescript/typescript-darwin-x64",
+      "name": "@typescript/typescript-darwin-x64",
+      "version": "7.0.2",
+      "declaredLicense": "Apache-2.0",
+      "optional": true,
+      "audit": "excluded-development-only; license text not reviewed"
+    },
+    {
+      "location": "node_modules/@typescript/typescript-freebsd-arm64",
+      "name": "@typescript/typescript-freebsd-arm64",
+      "version": "7.0.2",
+      "declaredLicense": "Apache-2.0",
+      "optional": true,
+      "audit": "excluded-development-only; license text not reviewed"
+    },
+    {
+      "location": "node_modules/@typescript/typescript-freebsd-x64",
+      "name": "@typescript/typescript-freebsd-x64",
+      "version": "7.0.2",
+      "declaredLicense": "Apache-2.0",
+      "optional": true,
+      "audit": "excluded-development-only; license text not reviewed"
+    },
+    {
+      "location": "node_modules/@typescript/typescript-linux-arm",
+      "name": "@typescript/typescript-linux-arm",
+      "version": "7.0.2",
+      "declaredLicense": "Apache-2.0",
+      "optional": true,
+      "audit": "excluded-development-only; license text not reviewed"
+    },
+    {
+      "location": "node_modules/@typescript/typescript-linux-arm64",
+      "name": "@typescript/typescript-linux-arm64",
+      "version": "7.0.2",
+      "declaredLicense": "Apache-2.0",
+      "optional": true,
+      "audit": "excluded-development-only; license text not reviewed"
+    },
+    {
+      "location": "node_modules/@typescript/typescript-linux-loong64",
+      "name": "@typescript/typescript-linux-loong64",
+      "version": "7.0.2",
+      "declaredLicense": "Apache-2.0",
+      "optional": true,
+      "audit": "excluded-development-only; license text not reviewed"
+    },
+    {
+      "location": "node_modules/@typescript/typescript-linux-mips64el",
+      "name": "@typescript/typescript-linux-mips64el",
+      "version": "7.0.2",
+      "declaredLicense": "Apache-2.0",
+      "optional": true,
+      "audit": "excluded-development-only; license text not reviewed"
+    },
+    {
+      "location": "node_modules/@typescript/typescript-linux-ppc64",
+      "name": "@typescript/typescript-linux-ppc64",
+      "version": "7.0.2",
+      "declaredLicense": "Apache-2.0",
+      "optional": true,
+      "audit": "excluded-development-only; license text not reviewed"
+    },
+    {
+      "location": "node_modules/@typescript/typescript-linux-riscv64",
+      "name": "@typescript/typescript-linux-riscv64",
+      "version": "7.0.2",
+      "declaredLicense": "Apache-2.0",
+      "optional": true,
+      "audit": "excluded-development-only; license text not reviewed"
+    },
+    {
+      "location": "node_modules/@typescript/typescript-linux-s390x",
+      "name": "@typescript/typescript-linux-s390x",
+      "version": "7.0.2",
+      "declaredLicense": "Apache-2.0",
+      "optional": true,
+      "audit": "excluded-development-only; license text not reviewed"
+    },
+    {
+      "location": "node_modules/@typescript/typescript-linux-x64",
+      "name": "@typescript/typescript-linux-x64",
+      "version": "7.0.2",
+      "declaredLicense": "Apache-2.0",
+      "optional": true,
+      "audit": "excluded-development-only; license text not reviewed"
+    },
+    {
+      "location": "node_modules/@typescript/typescript-netbsd-arm64",
+      "name": "@typescript/typescript-netbsd-arm64",
+      "version": "7.0.2",
+      "declaredLicense": "Apache-2.0",
+      "optional": true,
+      "audit": "excluded-development-only; license text not reviewed"
+    },
+    {
+      "location": "node_modules/@typescript/typescript-netbsd-x64",
+      "name": "@typescript/typescript-netbsd-x64",
+      "version": "7.0.2",
+      "declaredLicense": "Apache-2.0",
+      "optional": true,
+      "audit": "excluded-development-only; license text not reviewed"
+    },
+    {
+      "location": "node_modules/@typescript/typescript-openbsd-arm64",
+      "name": "@typescript/typescript-openbsd-arm64",
+      "version": "7.0.2",
+      "declaredLicense": "Apache-2.0",
+      "optional": true,
+      "audit": "excluded-development-only; license text not reviewed"
+    },
+    {
+      "location": "node_modules/@typescript/typescript-openbsd-x64",
+      "name": "@typescript/typescript-openbsd-x64",
+      "version": "7.0.2",
+      "declaredLicense": "Apache-2.0",
+      "optional": true,
+      "audit": "excluded-development-only; license text not reviewed"
+    },
+    {
+      "location": "node_modules/@typescript/typescript-sunos-x64",
+      "name": "@typescript/typescript-sunos-x64",
+      "version": "7.0.2",
+      "declaredLicense": "Apache-2.0",
+      "optional": true,
+      "audit": "excluded-development-only; license text not reviewed"
+    },
+    {
+      "location": "node_modules/@typescript/typescript-win32-arm64",
+      "name": "@typescript/typescript-win32-arm64",
+      "version": "7.0.2",
+      "declaredLicense": "Apache-2.0",
+      "optional": true,
+      "audit": "excluded-development-only; license text not reviewed"
+    },
+    {
+      "location": "node_modules/@typescript/typescript-win32-x64",
+      "name": "@typescript/typescript-win32-x64",
+      "version": "7.0.2",
+      "declaredLicense": "Apache-2.0",
+      "optional": true,
+      "audit": "excluded-development-only; license text not reviewed"
+    },
+    {
+      "location": "node_modules/typescript",
+      "name": "typescript",
+      "version": "7.0.2",
+      "declaredLicense": "Apache-2.0",
+      "optional": false,
+      "audit": "excluded-development-only; license text not reviewed"
+    },
+    {
+      "location": "node_modules/undici-types",
+      "name": "undici-types",
+      "version": "7.18.2",
+      "declaredLicense": "MIT",
+      "optional": false,
+      "audit": "excluded-development-only; license text not reviewed"
+    }
+  ]
+}

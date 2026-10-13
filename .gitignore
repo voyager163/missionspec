@@ -1,0 +1,9 @@
+node_modules/
+coverage/
+dist/
+.missionspec/
+.env
+.env.*
+!.env.example
+.DS_Store
+*.log
