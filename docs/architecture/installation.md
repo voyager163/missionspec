@@ -144,11 +144,14 @@ Results report `sourceFormat: "supported"` and
 invoked, permission-approved, executed, and verified are separate milestones.
 The installer neither probes a live host nor upgrades any of these claims.
 
-Current writes inherit the workspace adapter's qualified POSIX local-filesystem
-restrictions, ownership checks, no-link policy, transaction size limits, and
-recovery limitations. Windows native file effects remain unavailable until that
-adapter is qualified. Filesystem/authority fixture tests are not demonstrations
-of live-host behavior or model compliance.
+Current writes inherit the workspace adapter's platform-specific restrictions,
+ownership checks, no-link policy, transaction size limits, and recovery
+limitations. Windows file effects require the qualified private current-user
+NTFS scope described in [Windows state](windows-state.md); a public checkout or
+unsupported machine policy does not become an admitted destination. Qualification
+of those shared file APIs is not installer-specific native-host qualification.
+Filesystem/authority fixture tests are not demonstrations of live-host behavior
+or model compliance.
 
 `tests/installation.test.mjs` exercises actual local repositories, all 36 files,
 selected subsets, no-write queries and repeated operations, drift and unowned

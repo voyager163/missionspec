@@ -6,6 +6,10 @@ const dockerfile = await readFile(new URL('../Dockerfile', import.meta.url), 'ut
 const lock = JSON.parse(await readFile(new URL('../runtime-sources.lock.json', import.meta.url), 'utf8'));
 const ignore = await readFile(new URL('../../../.dockerignore', import.meta.url), 'utf8');
 
+test('Dockerfile build-definition bytes preserve canonical LF on every platform', () => {
+  assert(!dockerfile.includes('\r'));
+});
+
 test('final runtime genuinely selects minimal pinned closure rather than purging or concealing builder packages', () => {
   const stage = dockerfile.slice(dockerfile.lastIndexOf('\nFROM ') + 1);
   assert(stage.startsWith(`FROM ${lock.identities.runtimeBase}\n`));

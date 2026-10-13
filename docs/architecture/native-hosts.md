@@ -512,6 +512,12 @@ contact providers, consume paid model usage, or generate qualification evidence.
 It covers every-turn restrictions, wrong pins, malformed/oversized responses,
 ambient configuration, unexpected tool requests and approvals, stdout/stderr
 discipline, source-preimage/path scope, deadlines, cancellation and late replies.
+Denial and interrupt assertions observe accepted local transport writes, not
+peer-delivery receipts. Cancellation cases separately cover an unacknowledged
+turn and a valid turn acknowledgement processed by the local adapter; the former
+must not invent an interrupt target. The synthetic late peer replies only after
+local termination is requested, rather than racing an elapsed-time assumption.
+These observations do not establish remote cancellation or paid-usage quiescence.
 
 ```sh
 npm run build

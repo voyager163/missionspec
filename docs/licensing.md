@@ -44,7 +44,7 @@ not operator sources or the service inventory/notices. The service Docker build
 checks its own inventory and includes its notices and `runtime-inventory.json`
 in the separate image.
 
-The current direct CLI pins include `@modelcontextprotocol/sdk@1.30.0`,
+The current direct CLI pins include `@modelcontextprotocol/sdk@1.31.0`,
 `ajv@8.20.0`, `fs-native-extensions@1.5.1`, `mdast-util-from-markdown@2.0.3`,
 `yaml@2.9.1`, and `zod@4.6.5`.
 The isolated service pins `@azure/identity@4.13.3`, `@azure/logger@1.3.0`,

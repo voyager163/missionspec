@@ -26,6 +26,13 @@ function validWorkflow() {
   };
 }
 
+test('Dockerfile checkout attributes preserve canonical build-definition bytes', async () => {
+  const attributes = await readFile(new URL('../.gitattributes', import.meta.url), 'utf8');
+  assert.match(attributes, /^Dockerfile text eol=lf$/mu);
+  const dockerfile = await readFile(new URL('../services/telemetry-ingest/Dockerfile', import.meta.url), 'utf8');
+  assert(!dockerfile.includes('\r'));
+});
+
 test('installed tarballs run once per OS behind the existing required contexts after locked restore', async () => {
   const file = '.github/workflows/repository.yml';
   const workflow = parseYaml(await readFile(new URL(`../${file}`, import.meta.url), 'utf8'), file);

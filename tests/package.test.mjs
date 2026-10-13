@@ -184,6 +184,26 @@ test('installed smoke replaces case-insensitive PATH/preloads and does not hide 
   assert(!Object.values(env).some((value) => value.includes('untrusted')));
 });
 
+test('installed smoke canonicalizes observed SystemRoot casing without inventing or redirecting the Windows host', () => {
+  for (const key of ['SystemRoot', 'SYSTEMROOT', 'systemroot', 'sYsTeMrOoT']) {
+    const inherited = Object.freeze({ [key]: 'C:\\WINDOWS', unrelated: 'preserved' });
+    const env = installSmokeEnvironment('/owned/home', '/owned/guard.mjs', inherited);
+    assert.equal(env.SystemRoot, 'C:\\WINDOWS');
+    assert.deepEqual(Object.keys(env).filter((name) => name.toLowerCase() === 'systemroot'), ['SystemRoot']);
+    assert.equal(env.unrelated, 'preserved');
+    assert.deepEqual(inherited, { [key]: 'C:\\WINDOWS', unrelated: 'preserved' });
+  }
+  assert(!Object.hasOwn(installSmokeEnvironment('/owned/home', '/owned/guard.mjs', {}), 'SystemRoot'));
+  const foreign = installSmokeEnvironment('/owned/home', '/owned/guard.mjs', { SYSTEMROOT: 'D:\\redirected' });
+  assert.equal(foreign.SystemRoot, 'D:\\redirected');
+  assert.throws(() => windowsShimInvocation('powershell', 'C:\\owned\\missionspec', ['--version'], foreign.SystemRoot),
+    /fixed C:\\Windows/);
+  for (const other of ['C:\\WINDOWS', 'D:\\redirected']) {
+    assert.throws(() => installSmokeEnvironment('/owned/home', '/owned/guard.mjs',
+      { SystemRoot: 'C:\\WINDOWS', SYSTEMROOT: other }), /Ambiguous SystemRoot/);
+  }
+});
+
 test('install fixture uses private owned checkout directories even with a permissive child umask', async () => {
   const checker = new URL('../scripts/check-package.mjs', import.meta.url).href;
   const source = `

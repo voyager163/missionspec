@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import childProcess from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { chmod, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import path from 'node:path';
 import test from 'node:test';
 import { ClaudeProposalHost, CodexProposalHost, CopilotProposalHost, CODEX_RESTRICTED_CONFIG, NATIVE_PROPOSAL_PINS } from '../dist/adapters/hosts/index.js';
@@ -22,6 +24,45 @@ async function waitFor(condition) {
     assert.ok(Date.now() < deadline, 'Synthetic transport did not reach the expected state.');
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
+}
+function observeCodexTransport(t, fixture) {
+  const transport = { writes: [], received: [], closed: false };
+  const spawn = childProcess.spawn;
+  const mocked = t.mock.method(childProcess, 'spawn', (executable, argv, options) => {
+    const child = spawn(executable, argv, options);
+    if (executable === fixture.setup.executable && argv.includes('app-server')) {
+      const write = child.stdin.write;
+      t.mock.method(child.stdin, 'write', function (chunk, ...args) {
+        const result = write.call(this, chunk, ...args);
+        transport.writes.push(JSON.parse(chunk.toString()));
+        return result;
+      });
+      let buffer = '';
+      child.stdout.on('data', (chunk) => {
+        buffer += chunk.toString('utf8');
+        let newline;
+        while ((newline = buffer.indexOf('\n')) >= 0) {
+          const message = JSON.parse(buffer.slice(0, newline));
+          buffer = buffer.slice(newline + 1);
+          // Observe the reply only after the adapter's synchronous data handler.
+          queueMicrotask(() => transport.received.push(message));
+        }
+      });
+      child.once('close', () => { transport.closed = true; });
+    }
+    return child;
+  });
+  syncBuiltinESMExports();
+  t.after(() => { mocked.mock.restore(); syncBuiltinESMExports(); });
+  return transport;
+}
+async function waitForCodexTurnAcknowledgement(transport) {
+  await waitFor(() => {
+    const start = transport.writes.find((message) => message.method === 'turn/start');
+    return start !== undefined && transport.received.some((message) =>
+      message.id === start.id && message.result?.turn?.id === 'turn-test' &&
+      message.result.turn.status === 'inProgress');
+  });
 }
 const request = (host, overrides = {}) => ({
   prompt: 'Propose the answer correction, without using tools.',
@@ -53,7 +94,13 @@ const transcript = ${JSON.stringify(transcript)};
 if (process.argv.includes('--version')) {
   process.stdout.write(${JSON.stringify(versionText)});
 } else {
-  process.on('SIGTERM', () => setTimeout(() => process.exit(0), behavior === 'late' ? 150 : 10));
+  let finishLate;
+  process.on('SIGTERM', () => {
+    if (behavior === 'late') {
+      finishLate?.();
+      process.stdout.end(() => process.exit(0));
+    } else setTimeout(() => process.exit(0), 10);
+  });
   appendFileSync(transcript, JSON.stringify({ argv: process.argv.slice(2), env: process.env })+'\\n');
   const send = (message) => process.stdout.write(JSON.stringify(message)+'\\n');
   const event = (method, params) => send({ method, params });
@@ -120,6 +167,7 @@ if (process.argv.includes('--version')) {
         event('turn/completed', {threadId:'thread-test',turn:{id:'turn-test',status:'completed',error:null}});
       }
     } else if (message.method === 'turn/start') {
+      if (behavior === 'unacknowledged-turn') return;
       if (behavior !== 'events-before-turn-ack') answer(message.id, { turn: { id: 'turn-test', status: 'inProgress' } });
       if (behavior === 'unsolicited-turn') return;
       event('turn/started', { threadId: 'thread-test', turn: { id: 'turn-test', status: 'inProgress' } });
@@ -145,7 +193,7 @@ if (process.argv.includes('--version')) {
         event('thread/status/changed', {threadId:'thread-test',status:{type:'idle'}});
         if (behavior === 'events-before-turn-ack') answer(message.id, {turn:{id:'turn-test',status:'inProgress'}});
       };
-      if (behavior === 'late') setTimeout(finish, 100); else finish();
+      if (behavior === 'late') finishLate = finish; else finish();
     }
   });
 }
@@ -503,6 +551,8 @@ for (const [behavior, code] of [
 ]) {
   test(`Codex fails closed for ${behavior}`, async (t) => {
     const f = await fixture(t, 'codex', behavior);
+    const transport = nativeDenials[behavior] || ['unknown-request','user-input-request'].includes(behavior)
+      ? observeCodexTransport(t, f) : null;
     const outcome = await new CodexProposalHost(f.setup).propose(request('codex'));
     assert.notEqual(outcome.status, 'ok');
     assert.equal(outcome.error.code, code, JSON.stringify(outcome));
@@ -516,11 +566,12 @@ for (const [behavior, code] of [
     ].includes(behavior)) assert.equal((await f.readTranscript()).some((message) => ['account/login/start','thread/start','turn/start'].includes(message.method)), false);
     // Unsolicited bytes can arrive after the outbound request; rejection, not read timing, is the invariant.
     if (behavior === 'thread-environment') assert.equal((await f.readTranscript()).some((message) => message.method === 'turn/start'), false);
-    if (nativeDenials[behavior] || ['unknown-request','user-input-request'].includes(behavior)) {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      const denied = (await f.readTranscript()).find((message) => message.id === (nativeDenials[behavior] ? 'native-denied' : 'native-tool') && !message.method);
+    if (transport !== null) {
+      const denied = transport.writes.find((message) => message.id === (nativeDenials[behavior] ? 'native-denied' : 'native-tool') && !message.method);
+      assert(denied, 'The local transport did not accept the denial write.');
       if (nativeDenials[behavior]) assert.deepEqual(denied.result, nativeDenials[behavior].result);
       else assert.equal(denied.error.code, -32601);
+      await waitFor(() => transport.closed);
     }
   });
 }
@@ -668,25 +719,54 @@ test('Claude queued-message interrupt receipts never become cancellation evidenc
   await new Promise((resolve) => setTimeout(resolve,10));
 });
 
-test('Codex cancellation and timeout stop local consumption without synthesizing fenced host evidence', async (t) => {
-  const f = await fixture(t, 'codex', 'hang');
+test('Codex abort before turn acknowledgement does not invent an interrupt target or fenced host evidence', async (t) => {
+  const f = await fixture(t, 'codex', 'unacknowledged-turn');
+  const transport = observeCodexTransport(t, f);
   const controller = new AbortController();
   const pending = new CodexProposalHost(f.setup).propose(request('codex'), controller.signal);
-  await waitFor(async () => { try { return (await f.readTranscript()).some((message) => message.method === 'turn/start'); } catch { return false; } });
+  await waitFor(() => transport.writes.some((message) => message.method === 'turn/start'));
   controller.abort();
   const outcome = await pending;
   assert.equal(outcome.status, 'outcome-unknown');
+  assert.equal(outcome.reconciliationRequired, true);
   assert.equal('evidence' in outcome, false);
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.deepEqual((await f.readTranscript()).find((message) => message.method === 'turn/interrupt').params, { threadId:'thread-test',turnId:'turn-test' });
+  await waitFor(() => transport.closed);
+  assert(!transport.received.some((message) => message.result?.turn));
+  assert(!transport.writes.some((message) => message.method === 'turn/interrupt'));
+});
+
+test('Codex abort after turn acknowledgement writes the exact local interrupt without claiming delivery', async (t) => {
+  const f = await fixture(t, 'codex', 'hang');
+  const transport = observeCodexTransport(t, f);
+  const controller = new AbortController();
+  const pending = new CodexProposalHost(f.setup).propose(request('codex'), controller.signal);
+  await waitForCodexTurnAcknowledgement(transport);
+  controller.abort();
+  const outcome = await pending;
+  assert.equal(outcome.status, 'outcome-unknown');
+  assert.equal(outcome.reconciliationRequired, true);
+  assert.equal('evidence' in outcome, false);
+  assert.deepEqual(transport.writes.find((message) => message.method === 'turn/interrupt')?.params, { threadId:'thread-test',turnId:'turn-test' });
+  await waitFor(() => transport.closed);
+});
+
+test('Codex discards a synthetic reply emitted after cancellation without synthesizing fenced host evidence', async (t) => {
   const late = await fixture(t, 'codex', 'late');
+  const transport = observeCodexTransport(t, late);
   const lateController = new AbortController();
   const latePending = new CodexProposalHost(late.setup).propose(request('codex'), lateController.signal);
-  await waitFor(async () => { try { return (await late.readTranscript()).some((message) => message.method === 'turn/start'); } catch { return false; } });
+  await waitForCodexTurnAcknowledgement(transport);
   lateController.abort();
-  assert.equal((await latePending).status, 'outcome-unknown');
-  await waitFor(async () => (await late.readTranscript()).some((message) => message.lateOutput));
-  await new Promise((resolve) => setTimeout(resolve, 75));
+  const outcome = await latePending;
+  assert.equal(outcome.status, 'outcome-unknown');
+  assert.equal(outcome.reconciliationRequired, true);
+  assert.equal('evidence' in outcome, false);
+  await waitFor(() => transport.closed);
+  assert(transport.received.some((message) => message.method === 'turn/completed'));
+  assert((await late.readTranscript()).some((message) => message.lateOutput));
+});
+
+test('Codex timeout stops local consumption without synthesizing fenced host evidence', async (t) => {
   const timedFixture = await fixture(t, 'codex', 'hang');
   const timed = await new CodexProposalHost(timedFixture.setup).propose(request('codex', { limits: { ...request('codex').limits, timeoutMs: 1_500 } }));
   assert.equal(timed.status, 'outcome-unknown');

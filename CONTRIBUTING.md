@@ -58,8 +58,10 @@ approving reviews**. The maintainer may review and merge their own pull request
 after checking its content and validation results. Conversation resolution,
 force-push and deletion restrictions are active. Required checks use observed
 successful hosted identities and their GitHub Apps, with strict up-to-date-branch
-enforcement. Windows CI covers portable/read-only behavior, not private-state
-write qualification.
+enforcement. Windows CI separates portable/read-only checks from native
+private-state, held-handle race, workflow, lifecycle, console and trusted-check
+qualification. Those jobs cover their documented private-NTFS and local-process
+scope, not native AI-host execution or adversarial confinement.
 
 Changes to workflows, validation controls, release configuration, and security
 policy need deliberate maintainer review. A green check or an automated

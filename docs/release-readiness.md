@@ -305,6 +305,41 @@ an install smoke must never enable a collector or send events to Azure.
 The source checkout's `infrastructure/arm/telemetry/README.md` documents the
 collector UAT boundary; infrastructure is deliberately not packaged with the CLI.
 
+## Cross-machine prerequisites
+
+Restore the exact reviewed lockfiles with a supported Node.js
+`>=24.21.0 <25` runtime. A portable runtime may be isolated from the machine's
+existing installation; do not change global account settings or execution policy
+to make a check pass. On Windows, the package checker canonicalizes the observed
+`SystemRoot` environment key case-insensitively, rejects duplicate spellings, and
+still requires the fixed `C:\Windows` host. A missing or redirected value remains
+a failure. Both actual npm shims remain required; a working `.cmd` shim does not
+waive a policy refusal of the `.ps1` shim.
+
+Tracked Dockerfiles use explicit LF checkout attributes so Windows checkouts
+preserve canonical build-definition bytes rather than weakening policy checks
+to accept platform-dependent source representations.
+
+Windows CLI qualification does not qualify the checkout-only collector
+operator. That operator requires POSIX private-file admission, and its native
+what-if bridge admits only the separately qualified Homebrew Azure CLI layout.
+A Windows source build cannot substitute for those guarantees. Use an
+independently supported execution host, or separately design and qualify a new
+operator port; do not replace no-follow, ownership or toolchain checks with
+permissive fallbacks.
+
+Git does not contain the prior private native packets, original read files,
+operator history, image/scan artifacts or session-only diagnostic helpers.
+Continuation requires a reviewed private transfer of each necessary packet's
+full recursively referenced closure, not just its manifest. Never publish
+credentials, operator state or session folders. Preserve original receipts and
+failed attempts; authenticate copied bytes separately from new-machine custody
+and obtain a fresh machine/path-bound invocation and distinct authority.
+If originals are unavailable, the old native/retirement chain is blocked.
+A new independent qualification lineage needs its own reviewed baseline and
+scope; it cannot reconstruct missing successes or authorize replay or recreation
+of existing cloud resources.
+
 ## Interpreting qualification evidence
 
 Keep retained read artifacts separate from observed command invocations. A
